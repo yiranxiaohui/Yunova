@@ -223,7 +223,7 @@ export function StoragePanel() {
                     onChange={(event) =>
                       setForm((current) => current && { ...current, bucket: event.target.value })
                     }
-                    placeholder="novachat-media"
+                    placeholder="yunova-media"
                     disabled={busy}
                   />
                 </Field>
@@ -234,7 +234,7 @@ export function StoragePanel() {
                     onChange={(event) =>
                       setForm((current) => current && { ...current, prefix: event.target.value })
                     }
-                    placeholder="novachat"
+                    placeholder="yunova"
                     disabled={busy}
                   />
                 </Field>

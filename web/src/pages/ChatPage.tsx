@@ -2376,7 +2376,7 @@ export default function ChatPage() {
               )}
             </div>
             <p className="mt-2 text-center text-[10px] tracking-wide text-muted-foreground/80">
-              NovaChat 可能会生成不准确的信息，请核对重要内容
+              Yunova 可能会生成不准确的信息，请核对重要内容
             </p>
           </div>
         </div>

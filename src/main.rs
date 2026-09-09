@@ -12,6 +12,7 @@ mod payments;
 mod profile;
 mod prompts;
 mod rate_limit;
+mod runtime_env;
 mod search;
 mod settings;
 mod setup;
@@ -142,11 +143,11 @@ fn validate_credentials(c: &Credentials) -> Result<(), &'static str> {
 
 /// Whether to set the `Secure` attribute on session cookies. Default ON —
 /// the browser then only sends the cookie over HTTPS, blocking session-token
-/// theft on plain-HTTP downgrades. Set `NOVACHAT_INSECURE_COOKIE=1` only for
+/// theft on plain-HTTP downgrades. Set `YUNOVA_INSECURE_COOKIE=1` only for
 /// local dev when serving plain HTTP without a TLS-terminating proxy.
 fn cookies_secure() -> bool {
     !matches!(
-        std::env::var("NOVACHAT_INSECURE_COOKIE").as_deref(),
+        crate::runtime_env::var("YUNOVA_INSECURE_COOKIE").as_deref(),
         Ok("1") | Ok("true") | Ok("yes")
     )
 }
@@ -1244,17 +1245,18 @@ async fn main() {
     db::install_drivers();
 
     let data_dir = std::path::PathBuf::from(
-        std::env::var("NOVACHAT_DATA_DIR").unwrap_or_else(|_| "data".into()),
+        crate::runtime_env::var("YUNOVA_DATA_DIR").unwrap_or_else(|_| "data".into()),
     );
     if let Err(e) = std::fs::create_dir_all(&data_dir) {
         eprintln!("WARNING: failed to create data dir {}: {e}", data_dir.display());
     }
-    let config_path = std::env::var("NOVACHAT_CONFIG")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| data_dir.join("novachat.toml"));
+    let config_path = setup::config_path(
+        &data_dir,
+        runtime_env::var("YUNOVA_CONFIG").ok().as_deref(),
+    );
 
     // priority: env DATABASE_URL -> config file -> install wizard
-    let env_url = std::env::var("NOVACHAT_DATABASE_URL")
+    let env_url = crate::runtime_env::var("YUNOVA_DATABASE_URL")
         .ok()
         .or_else(|| std::env::var("DATABASE_URL").ok());
     let stored_config = setup::load_config(&config_path).ok();
@@ -1315,7 +1317,7 @@ async fn main() {
         },
         workers: crate::worker::WorkerRegistry::new(),
         media_process_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
-            std::env::var("NOVACHAT_MEDIA_CONCURRENCY")
+            crate::runtime_env::var("YUNOVA_MEDIA_CONCURRENCY")
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(2)
@@ -1390,9 +1392,9 @@ async fn main() {
         }
     });
 
-    let addr = std::env::var("NOVACHAT_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
+    let addr = crate::runtime_env::var("YUNOVA_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
     let listener = tokio::net::TcpListener::bind(&addr).await.expect("bind");
-    println!("NovaChat listening on http://{addr}");
+    println!("Yunova listening on http://{addr}");
     println!(
         "  media storage: {} ({})",
         state.storage.backend_name(),

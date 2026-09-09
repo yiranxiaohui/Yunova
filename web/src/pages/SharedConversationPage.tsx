@@ -60,7 +60,7 @@ export default function SharedConversationPage() {
           to="/"
           className="rounded-md px-3 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent"
         >
-          打开自己的 NovaChat →
+          打开自己的 Yunova →
         </Link>
       </header>
 
@@ -118,7 +118,7 @@ export default function SharedConversationPage() {
             <footer className="mt-4 rounded-xl border border-border bg-muted/30 p-4 text-center text-xs text-muted-foreground">
               想自己也体验？{" "}
               <Link to="/" className="font-medium text-primary hover:underline">
-                打开 NovaChat
+                打开 Yunova
               </Link>
             </footer>
           </>

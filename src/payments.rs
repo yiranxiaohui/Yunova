@@ -81,7 +81,7 @@ fn epay_api_base(value: &str) -> String {
         .to_string()
 }
 
-/// Accept either a full NovaChat callback route or its host-level base URL.
+/// Accept either a full Yunova callback route or its host-level base URL.
 fn epay_callback_url(value: &str, path: &str) -> String {
     let base = value.trim().trim_end_matches('/');
     if base.is_empty() || base.ends_with(path) {
@@ -181,7 +181,7 @@ async fn create_order(
     );
     let product_name = {
         let n = s(pool, kind, "epay_product_name").await;
-        if n.is_empty() { "NovaChat 积分充值".to_string() } else { n }
+        if n.is_empty() { "Yunova 积分充值".to_string() } else { n }
     };
 
     if api_url.is_empty() || pid.is_empty() || key.is_empty() || notify_url.is_empty() {

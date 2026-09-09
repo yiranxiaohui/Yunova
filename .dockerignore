@@ -4,6 +4,15 @@ target
 web/node_modules
 web/dist
 data
+yunova.db
+yunova.db-*
+yunova.toml
+yunova_data
+yunova_mysql
+yunova_postgres
+novachat_data
+novachat_mysql
+novachat_postgres
 novachat.db
 novachat.db-*
 novachat.toml

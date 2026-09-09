@@ -119,7 +119,7 @@ export default function RegisterPage() {
 
   return (
     <AuthShell
-      eyebrow="加入 NovaChat"
+      eyebrow="加入 Yunova"
       title="创建你的空间"
       description="只需几步，即可开始与多个领先模型协作。"
       footer={

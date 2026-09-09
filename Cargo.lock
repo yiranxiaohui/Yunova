@@ -1250,7 +1250,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "novachat"
+name = "yunova"
 version = "0.1.0"
 dependencies = [
  "argon2",
@@ -1281,7 +1281,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "novachat-worker"
+name = "yunova-worker"
 version = "0.1.0"
 dependencies = [
  "futures-util",

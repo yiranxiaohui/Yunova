@@ -2,7 +2,7 @@
 
 > **For Hermes:** 用 subagent-driven-development 逐任务执行。
 
-**Goal:** 把 NovaChat 的"单 shared upstream + 全局 cost_chat/cost_image 扁平定价"重构为"多渠道（channel）+ 按模型独立定价 + 优先级 fallback"。
+**Goal:** 把 Yunova 的"单 shared upstream + 全局 cost_chat/cost_image 扁平定价"重构为"多渠道（channel）+ 按模型独立定价 + 优先级 fallback"。
 
 **Architecture:**
 - 新增 `upstream_channels` 表（管理员 CRUD 的上游连接池）

@@ -12,7 +12,7 @@ type Props = {
 
 const FEATURES = [
   "兼容 OpenAI、Claude 与 Gemini",
-  "对话、图像与视频集中创作",
+  "整合 Agent、工具执行与创作工作流",
   "自托管部署，数据由你掌控",
 ]
 
@@ -37,12 +37,12 @@ export function AuthShell({
           <div className="relative flex items-center gap-3">
             <img
               src="/logo.png"
-              alt="NovaChat"
+              alt="Yunova"
               className="size-11 rounded-2xl ring-1 ring-white/20 shadow-2xl"
             />
             <div>
-              <p className="text-xl font-semibold tracking-[-0.035em]">NovaChat</p>
-              <p className="text-[11px] tracking-[0.16em] text-violet-200/75">INTELLIGENT WORKSPACE</p>
+              <p className="text-xl font-semibold tracking-[-0.035em]">Yunova</p>
+              <p className="text-[11px] tracking-[0.16em] text-violet-200/75">AGENT WORKSPACE</p>
             </div>
           </div>
 
@@ -57,7 +57,7 @@ export function AuthShell({
               </span>
             </h2>
             <p className="mt-5 text-sm leading-7 text-violet-100/70">
-              从灵感构思到内容创作，让不同模型在清爽、专注的工作空间里为你协作。
+              连接模型与工具，将对话、任务执行和内容创作整合到一个工作空间。
             </p>
 
             <ul className="mt-9 space-y-3.5">
@@ -78,7 +78,7 @@ export function AuthShell({
         </aside>
 
         <main className="flex min-h-[620px] flex-col justify-center bg-card/75 px-6 py-8 backdrop-blur-xl sm:px-10 lg:px-12 lg:py-10">
-          <BrandMark subtitle="智能创作空间" className="mb-9 lg:hidden" />
+          <BrandMark subtitle="Agent 工作空间" className="mb-9 lg:hidden" />
           <span className="mb-3 w-fit rounded-full border border-primary/15 bg-primary/5 px-3 py-1 text-[11px] font-semibold tracking-wide text-primary">
             {eyebrow}
           </span>

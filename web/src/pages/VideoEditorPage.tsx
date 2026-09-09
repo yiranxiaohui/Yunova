@@ -95,7 +95,7 @@ const DEFAULT_ZOOM = 64
 const MIN_ZOOM = 24
 const MAX_ZOOM = 240
 const AUTOSAVE_MS = 1400
-const TRACK_DRAG_TYPE = "application/x-novachat-editor-track"
+const TRACK_DRAG_TYPE = "application/x-yunova-editor-track"
 
 type SequenceFormat = {
   width: number
@@ -1363,7 +1363,7 @@ function AssetPanel({
               key={asset.id}
               draggable
               onDragStart={(event) => {
-                event.dataTransfer.setData("application/x-novachat-asset", asset.id)
+                event.dataTransfer.setData("application/x-yunova-asset", asset.id)
                 event.dataTransfer.effectAllowed = "copy"
               }}
               className="group overflow-hidden rounded-lg border border-white/10 bg-black/20 transition-colors hover:border-sky-400/40"
@@ -1753,7 +1753,7 @@ function TimelinePanel({
                 onDrop={(event) => {
                   if (dropTrack(event, track.id)) return
                   event.preventDefault()
-                  const assetId = event.dataTransfer.getData("application/x-novachat-asset")
+                  const assetId = event.dataTransfer.getData("application/x-yunova-asset")
                   const asset = assets.find((item) => item.id === assetId)
                   if (asset && !track.locked) onAddAsset(asset, track.id, timeFromEvent(event))
                 }}

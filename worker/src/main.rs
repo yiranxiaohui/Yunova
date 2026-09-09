@@ -1,5 +1,7 @@
 mod proto;
 mod exec;
+#[path = "../../src/runtime_env.rs"]
+mod runtime_env;
 
 use futures_util::{SinkExt, StreamExt};
 use proto::{ToServer, ToWorker};
@@ -12,13 +14,13 @@ async fn main() {
     // 否则 rustls 0.23 无法自动确定后端会直接 panic。
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    let raw = std::env::var("NOVACHAT_WORKER_URL")
-        .expect("需要环境变量 NOVACHAT_WORKER_URL（如 https://chat.yunnet.top）");
+    let raw = crate::runtime_env::var("YUNOVA_WORKER_URL")
+        .expect("需要环境变量 YUNOVA_WORKER_URL（如 https://chat.yunnet.top）");
     let url = normalize_url(&raw);
     eprintln!("[worker] 连接地址: {url}");
-    let token = std::env::var("NOVACHAT_WORKER_TOKEN")
-        .expect("需要环境变量 NOVACHAT_WORKER_TOKEN（配对码）");
-    let name = std::env::var("NOVACHAT_WORKER_NAME")
+    let token = crate::runtime_env::var("YUNOVA_WORKER_TOKEN")
+        .expect("需要环境变量 YUNOVA_WORKER_TOKEN（配对码）");
+    let name = crate::runtime_env::var("YUNOVA_WORKER_NAME")
         .unwrap_or_else(|_| hostname());
 
     let mut backoff = 1u64;

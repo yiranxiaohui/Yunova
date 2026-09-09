@@ -826,7 +826,7 @@ function SystemPanel() {
             <Database className="size-4" /> 运行信息
           </h2>
           <dl className="grid grid-cols-1 gap-x-6 gap-y-2 text-sm sm:grid-cols-2">
-            <InfoRow label="NovaChat 版本" value={info.version} />
+            <InfoRow label="Yunova 版本" value={info.version} />
             <InfoRow label="数据库类型" value={info.db_kind} />
             <InfoRow label="监听地址" value={info.bind_addr} />
             <InfoRow
@@ -1569,7 +1569,7 @@ function EmailPanel() {
             <Label className="text-xs">发件人名称</Label>
             <Input
               defaultValue={cfg.smtp_from_name}
-              placeholder="NovaChat"
+              placeholder="Yunova"
               onChange={(e) => set("smtp_from_name", e.target.value)}
             />
           </div>
@@ -1781,7 +1781,7 @@ function PaymentsPanel() {
             <Input
               defaultValue={cfg.product_name}
               onChange={(e) => set("product_name", e.target.value)}
-              placeholder="NovaChat 积分充值"
+              placeholder="Yunova 积分充值"
             />
           </div>
           <div className="flex flex-col gap-1.5">

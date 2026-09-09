@@ -4,29 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-NovaChat is a self-hosted, multi-protocol AI chat app: a Rust/Axum backend that serves a React SPA, proxies OpenAI / Anthropic / Gemini calls, and stores conversations, skills, prompts, images, and credits in a SQLite/MySQL/Postgres database. The frontend is embedded into the Rust binary at build time via `rust-embed`, so a single `cargo build` produces one shippable executable.
+Yunova is a self-hosted Agent platform combining multi-model chat, remote tool execution, media creation, and workflows. Its Rust/Axum backend serves a React SPA, proxies OpenAI / Anthropic / Gemini calls, and stores conversations, skills, prompts, images, and credits in a SQLite/MySQL/Postgres database. The frontend is embedded into the Rust binary at build time via `rust-embed`, so a single `cargo build` produces one shippable executable.
 
 ## Commands
 
 Backend (repo root):
-- `cargo run` — starts the server on `127.0.0.1:3000` (override with `NOVACHAT_BIND`). On first run without a configured DB, the app exposes `/setup` and the frontend's SetupPage walks the user through picking SQLite/MySQL/Postgres.
+- `cargo run` — starts the server on `127.0.0.1:3000` (override with `YUNOVA_BIND`). On first run without a configured DB, the app exposes `/setup` and the frontend's SetupPage walks the user through picking SQLite/MySQL/Postgres.
 - `cargo check` — fast type-check; the first run still invokes `bun install && bun run build` in `web/` via [build.rs](build.rs).
-- Environment: `NOVACHAT_DATA_DIR` (default `./data` — SQLite DB, local media, `novachat.toml` live here), `NOVACHAT_DATABASE_URL` / `DATABASE_URL` (skips the install wizard), `NOVACHAT_CONFIG` (path for the TOML config). Configure optional S3-compatible media storage in the admin UI; it persists to `[storage]` in `novachat.toml` and applies at runtime. Legacy `NOVACHAT_STORAGE_BACKEND=s3` plus `NOVACHAT_S3_*` variables remain fallback-only.
+- Environment: `YUNOVA_DATA_DIR` (default `./data` — SQLite DB, local media, `yunova.toml` live here), `YUNOVA_DATABASE_URL` / `DATABASE_URL` (skips the install wizard), `YUNOVA_CONFIG` (path for the TOML config). Configure optional S3-compatible media storage in the admin UI; it persists to `[storage]` in `yunova.toml` and applies at runtime. Legacy `YUNOVA_STORAGE_BACKEND=s3` plus `YUNOVA_S3_*` variables remain fallback-only.
 
 Frontend (in `web/`):
 - `bun run dev` — Vite dev server (expects the Rust backend on :3000 for `/api` calls; configure proxy in `vite.config.ts` if needed).
 - `bun run build` — `tsc -b && vite build`. Outputs to `web/dist/`, which `rust-embed` bundles at compile time.
 - `bun run lint` — ESLint. Project-wide `react-hooks/set-state-in-effect` warnings exist in pre-existing dialogs; don't fix them reactively. `rules-of-hooks` errors are real — local helpers named `useFoo` inside a component get mistaken for hooks; rename to `handleFoo` / `applyFoo`.
-- No test runner is configured (backend or frontend). Verify features by running the server and exercising the UI.
+- Run backend tests with `cargo test --workspace --locked` and frontend tests with `bun test` in `web/`. Also verify the built application over HTTP.
 
 Docker:
 - `docker compose up -d` — SQLite (walk through `/setup` on first boot).
-- `docker compose --profile mysql up -d` / `--profile postgres up -d` — sets `NOVACHAT_DATABASE_URL` so the DB step is skipped; you still create the first admin via `/setup`.
+- `docker compose --profile mysql up -d` / `--profile postgres up -d` — sets `YUNOVA_DATABASE_URL` so the DB step is skipped; you still create the first admin via `/setup`.
 
 ## Architecture
 
 ### Boot flow
-[src/main.rs](src/main.rs) holds `AppState { installed: Arc<RwLock<Option<InstalledState>>>, http, config_path, data_dir, storage, config_lock }`. `storage` is a hot-swappable local/S3 media backend managed by the admin storage API; S3 reads fall back to legacy local objects. `config_lock` serializes admin writes to `novachat.toml`. `InstalledState { pool, kind }` is `None` until the setup wizard (or `NOVACHAT_DATABASE_URL`) supplies a connection string. All protected routes go through `require_auth` middleware which loads `InstalledState` into request extensions alongside `CurrentUser { id }` — downstream handlers take `Extension<InstalledState>` and `Extension<CurrentUser>` rather than re-reading `AppState`.
+[src/main.rs](src/main.rs) holds `AppState { installed: Arc<RwLock<Option<InstalledState>>>, http, config_path, data_dir, storage, config_lock }`. `storage` is a hot-swappable local/S3 media backend managed by the admin storage API; S3 reads fall back to legacy local objects. `config_lock` serializes admin writes to `yunova.toml`. `InstalledState { pool, kind }` is `None` until the setup wizard (or `YUNOVA_DATABASE_URL`) supplies a connection string. All protected routes go through `require_auth` middleware which loads `InstalledState` into request extensions alongside `CurrentUser { id }` — downstream handlers take `Extension<InstalledState>` and `Extension<CurrentUser>` rather than re-reading `AppState`.
 
 ### Database layer
 Three dialects share one schema. Conventions in [src/db.rs](src/db.rs):

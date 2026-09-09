@@ -29,7 +29,7 @@ describe("browser-local video API", () => {
     expect(models.map((model) => model.model)).toEqual(["wan2.1", "wan2.2"])
   })
 
-  test("creates a multipart job without calling a NovaChat API", async () => {
+  test("creates a multipart job without calling a Yunova API", async () => {
     globalThis.fetch = (async (input, init) => {
       expect(String(input)).toBe("http://192.168.13.91:8000/v1/videos")
       expect(init?.method).toBe("POST")

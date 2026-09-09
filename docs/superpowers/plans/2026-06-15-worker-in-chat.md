@@ -704,7 +704,7 @@ Expected: 无类型错误。
 
 - [ ] **Step 10: 手动验证**
 
-启动 server（需有一个在线工蜂；没有则先在设置里配对并本地跑 `novachat-worker` 连上）：
+启动 server（需有一个在线工蜂；没有则先在设置里配对并本地跑 `yunova-worker` 连上）：
 1. 普通对话：发消息、切换会话、回看——全部如旧（无回归）。
 2. 开「工蜂模式」→ 选在线工蜂 → 发消息：看到 text/tool_call/tool_result 渲染，markdown 生效，超长工具结果折叠可展开。
 3. 触发一次需批准的工具，点「批准/拒绝」生效。
@@ -836,7 +836,7 @@ function WorkerSettings() {
     return () => clearInterval(t)
   }, [])
   const deployCmd = (tok: string) =>
-    `NOVACHAT_WORKER_URL=wss://你的域名/api/worker/connect NOVACHAT_WORKER_TOKEN=${tok} ./novachat-worker`
+    `YUNOVA_WORKER_URL=wss://你的域名/api/worker/connect YUNOVA_WORKER_TOKEN=${tok} ./yunova-worker`
   async function pair() {
     if (pairing) return
     setPairing(true)

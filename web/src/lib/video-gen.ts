@@ -1,4 +1,4 @@
-// Video generation API client. Platform mode uses NovaChat's server API;
+// Video generation API client. Platform mode uses Yunova's server API;
 // local mode talks to the user's OpenAI-compatible service from the browser.
 
 async function jsonOrThrow<T>(res: Response): Promise<T> {
@@ -35,7 +35,7 @@ export type VideoJob = {
   refunded: boolean
   created_at: string
   finished_at: string | null
-  // Browser-local jobs never exist in NovaChat's database.
+  // Browser-local jobs never exist in Yunova's database.
   local?: true
   local_base_url?: string
   local_upstream_id?: string
@@ -400,13 +400,15 @@ export async function deleteVideoJob(token: string): Promise<void> {
 }
 
 function localJobsKey(owner: number | string): string {
-  return `novachat:local-video-jobs:v${LOCAL_JOBS_VERSION}:${owner}`
+  return `yunova:local-video-jobs:v${LOCAL_JOBS_VERSION}:${owner}`
 }
 
 export function loadLocalVideoJobs(owner: number | string): VideoJob[] {
   if (typeof localStorage === "undefined") return []
   try {
-    const parsed = JSON.parse(localStorage.getItem(localJobsKey(owner)) ?? "[]") as unknown
+    const raw = localStorage.getItem(localJobsKey(owner))
+      ?? localStorage.getItem(`novachat:local-video-jobs:v${LOCAL_JOBS_VERSION}:${owner}`)
+    const parsed = JSON.parse(raw ?? "[]") as unknown
     if (!Array.isArray(parsed)) return []
     return parsed
       .filter((item): item is VideoJob => {
@@ -437,4 +439,5 @@ export function saveLocalVideoJobs(owner: number | string, jobs: VideoJob[]): vo
     .slice(0, LOCAL_JOBS_LIMIT)
     .map((job) => ({ ...job, video_path: null }))
   localStorage.setItem(localJobsKey(owner), JSON.stringify(localJobs))
+  localStorage.removeItem(`novachat:local-video-jobs:v${LOCAL_JOBS_VERSION}:${owner}`)
 }

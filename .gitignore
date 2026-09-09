@@ -3,10 +3,17 @@
 /web/dist
 /data
 # docker compose bind mounts
+/yunova_data
+/yunova_mysql
+/yunova_postgres
+# legacy layout
+/yunova.db
+/yunova.db-*
+/yunova.toml
+# Existing installations may still use the original data/configuration paths.
 /novachat_data
 /novachat_mysql
 /novachat_postgres
-# legacy layout
 /novachat.db
 /novachat.db-*
 /novachat.toml

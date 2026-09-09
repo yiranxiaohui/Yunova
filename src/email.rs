@@ -130,7 +130,7 @@ async fn load_smtp(pool: &Pool, kind: DbKind) -> Result<SmtpConfig, String> {
     }
     let from_name = credits::get_setting(pool, kind, "smtp_from_name")
         .await
-        .unwrap_or_else(|| "NovaChat".into());
+        .unwrap_or_else(|| "Yunova".into());
     let security_raw = credits::get_setting(pool, kind, "smtp_security")
         .await
         .unwrap_or_else(|| "starttls".into());
@@ -392,9 +392,9 @@ async fn send_code(
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
 
-    let subject = "NovaChat 注册验证码";
+    let subject = "Yunova 注册验证码";
     let body = format!(
-        "您好，\n\n您的 NovaChat 注册验证码是：{code}\n\n该验证码 {CODE_TTL_MINUTES} 分钟内有效。如果不是您本人操作，请忽略此邮件。\n"
+        "您好，\n\n您的 Yunova 注册验证码是：{code}\n\n该验证码 {CODE_TTL_MINUTES} 分钟内有效。如果不是您本人操作，请忽略此邮件。\n"
     );
     if let Err(e) = send_mail(&smtp, &email, subject, body).await {
         return (StatusCode::BAD_GATEWAY, e).into_response();
@@ -424,8 +424,8 @@ pub async fn admin_send_test(
         Ok(c) => c,
         Err(e) => return (StatusCode::SERVICE_UNAVAILABLE, e).into_response(),
     };
-    let subject = "NovaChat SMTP 测试邮件";
-    let body = "这是一封 NovaChat 测试邮件，用于验证 SMTP 配置是否正常。\n".to_string();
+    let subject = "Yunova SMTP 测试邮件";
+    let body = "这是一封 Yunova 测试邮件，用于验证 SMTP 配置是否正常。\n".to_string();
     match send_mail(&smtp, &email, subject, body).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),

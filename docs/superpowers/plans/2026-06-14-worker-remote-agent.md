@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 给 NovaChat 新增「工蜂」远程 agent：用户服务器上跑一个瘦执行器二进制，网页用自然语言对话，后端用 Claude 跑 agent 循环，下发 shell/读/写工具调用给工蜂执行。
+**Goal:** 给 Yunova 新增「工蜂」远程 agent：用户服务器上跑一个瘦执行器二进制，网页用自然语言对话，后端用 Claude 跑 agent 循环，下发 shell/读/写工具调用给工蜂执行。
 
 **Architecture:** 工蜂（新 crate）主动建 WebSocket 连回后端鉴权 → 后端在内存维护在线工蜂注册表 → agent 循环在后端编排（复用渠道链调 Claude 非流式 Messages API + 复用 credits 扣费）→ 工具调用经 WS 下发工蜂、结果回传 → SSE 流式推网页。审批分级：read 自动，shell/write 默认需网页批准，会话级「自动批准」开关。
 
@@ -87,12 +87,12 @@ git commit -m "build(worker): 转 cargo workspace + axum 开 ws feature"
 
 ```toml
 [package]
-name = "novachat-worker"
+name = "yunova-worker"
 version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-name = "novachat-worker"
+name = "yunova-worker"
 path = "src/main.rs"
 
 [dependencies]
@@ -147,7 +147,7 @@ mod exec;
 
 #[tokio::main]
 async fn main() {
-    eprintln!("novachat-worker 占位入口（Task 4 实现连接逻辑）");
+    eprintln!("yunova-worker 占位入口（Task 4 实现连接逻辑）");
 }
 ```
 
@@ -159,7 +159,7 @@ async fn main() {
 
 - [ ] **Step 5: 验证编译**
 
-Run: `cargo check -p novachat-worker 2>&1 | tail -20`
+Run: `cargo check -p yunova-worker 2>&1 | tail -20`
 Expected: 编译通过（可能有 unused 警告）。
 
 - [ ] **Step 6: 提交**
@@ -261,7 +261,7 @@ async fn write_file(args: &Value) -> (bool, String) {
 
 - [ ] **Step 2: 验证编译**
 
-Run: `cargo check -p novachat-worker 2>&1 | tail -20`
+Run: `cargo check -p yunova-worker 2>&1 | tail -20`
 Expected: 编译通过。
 
 - [ ] **Step 3: 提交**
@@ -280,7 +280,7 @@ git commit -m "feat(worker): 实现 shell/read_file/write_file 三工具执行"
 
 - [ ] **Step 1: 实现 `worker/src/main.rs`**
 
-配置来源：环境变量 `NOVACHAT_WORKER_URL`（如 `wss://chat.example.com/api/worker/connect`）和 `NOVACHAT_WORKER_TOKEN`（配对码）。
+配置来源：环境变量 `YUNOVA_WORKER_URL`（如 `wss://chat.example.com/api/worker/connect`）和 `YUNOVA_WORKER_TOKEN`（配对码）。
 
 ```rust
 mod proto;
@@ -293,11 +293,11 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main]
 async fn main() {
-    let url = std::env::var("NOVACHAT_WORKER_URL")
-        .expect("需要环境变量 NOVACHAT_WORKER_URL（如 wss://host/api/worker/connect）");
-    let token = std::env::var("NOVACHAT_WORKER_TOKEN")
-        .expect("需要环境变量 NOVACHAT_WORKER_TOKEN（配对码）");
-    let name = std::env::var("NOVACHAT_WORKER_NAME")
+    let url = std::env::var("YUNOVA_WORKER_URL")
+        .expect("需要环境变量 YUNOVA_WORKER_URL（如 wss://host/api/worker/connect）");
+    let token = std::env::var("YUNOVA_WORKER_TOKEN")
+        .expect("需要环境变量 YUNOVA_WORKER_TOKEN（配对码）");
+    let name = std::env::var("YUNOVA_WORKER_NAME")
         .unwrap_or_else(|_| hostname());
 
     let mut backoff = 1u64;
@@ -397,7 +397,7 @@ async fn run_once(url: &str, token: &str, name: &str) -> Result<(), String> {
 
 - [ ] **Step 2: 验证编译**
 
-Run: `cargo check -p novachat-worker 2>&1 | tail -30`
+Run: `cargo check -p yunova-worker 2>&1 | tail -30`
 Expected: 编译通过。若 `Message::Text` 需要的类型不符（tungstenite 0.24 用 `Utf8Bytes`），按编译器提示用 `.into()` 包装（上面已加 `.into()`）。
 
 - [ ] **Step 3: 提交**
@@ -551,12 +551,12 @@ CREATE INDEX idx_worker_messages_session ON worker_messages(session_id);
 
 - [ ] **Step 5: 验证编译（include_str! 路径正确即过）**
 
-Run: `cargo check -p novachat 2>&1 | tail -20`
+Run: `cargo check -p yunova 2>&1 | tail -20`
 Expected: 编译通过。
 
 - [ ] **Step 6: 手动验证迁移可跑（SQLite）**
 
-Run: `rm -f /tmp/wk-test.db && NOVACHAT_DATABASE_URL="sqlite:///tmp/wk-test.db?mode=rwc" cargo run -p novachat 2>&1 | head -15`
+Run: `rm -f /tmp/wk-test.db && YUNOVA_DATABASE_URL="sqlite:///tmp/wk-test.db?mode=rwc" cargo run -p yunova 2>&1 | head -15`
 Expected: 启动日志无迁移报错；Ctrl-C 退出。（确认 0026-0028 被应用。）
 
 - [ ] **Step 7: 提交**
@@ -655,7 +655,7 @@ pub fn routes() -> Router<AppState> {
 
 - [ ] **Step 3: 验证编译**
 
-Run: `cargo check -p novachat 2>&1 | tail -20`
+Run: `cargo check -p yunova 2>&1 | tail -20`
 Expected: 编译通过（routes 空、注册表暂未被用，可能有 dead_code 警告）。
 
 - [ ] **Step 4: 提交**
@@ -822,7 +822,7 @@ pub fn public_routes() -> Router<AppState> {
 
 - [ ] **Step 4: 验证编译**
 
-Run: `cargo check -p novachat 2>&1 | tail -30`
+Run: `cargo check -p yunova 2>&1 | tail -30`
 Expected: 编译通过。
 
 - [ ] **Step 5: 提交**
@@ -944,7 +944,7 @@ pub fn routes() -> Router<AppState> {
 
 - [ ] **Step 4: 验证编译**
 
-Run: `cargo check -p novachat 2>&1 | tail -30`
+Run: `cargo check -p yunova 2>&1 | tail -30`
 Expected: 编译通过。
 
 - [ ] **Step 5: 手动验证（启动后端，配对 + 连工蜂）**
@@ -952,12 +952,12 @@ Expected: 编译通过。
 Run（两个终端）:
 ```bash
 # 终端 A：启动后端
-rm -f /tmp/wk-test.db && NOVACHAT_DATABASE_URL="sqlite:///tmp/wk-test.db?mode=rwc" cargo run -p novachat
+rm -f /tmp/wk-test.db && YUNOVA_DATABASE_URL="sqlite:///tmp/wk-test.db?mode=rwc" cargo run -p yunova
 # 浏览器走 /setup 建管理员并登录，或用已有会话 cookie。
 # 拿到 cookie 后：
 curl -s -X POST http://127.0.0.1:3000/api/worker/pair -H "Cookie: <session>" # 返回 {"token":"..."}
 # 终端 B：用该 token 起工蜂
-NOVACHAT_WORKER_URL=ws://127.0.0.1:3000/api/worker/connect NOVACHAT_WORKER_TOKEN=<token> cargo run -p novachat-worker
+YUNOVA_WORKER_URL=ws://127.0.0.1:3000/api/worker/connect YUNOVA_WORKER_TOKEN=<token> cargo run -p yunova-worker
 # 终端 A 工蜂日志应出现「鉴权成功」；再 curl /api/worker/list 应见 online:true
 ```
 Expected: 工蜂日志「鉴权成功，worker_id=…」；list 返回 `online:true`。
@@ -1233,7 +1233,7 @@ async fn approve(
 
 - [ ] **Step 5: 验证编译**
 
-Run: `cargo check -p novachat 2>&1 | tail -40`
+Run: `cargo check -p yunova 2>&1 | tail -40`
 Expected: 编译通过。逐个修复字段名 / 提取器签名编译错误。
 
 - [ ] **Step 6: 端到端手动验证**
@@ -1402,7 +1402,7 @@ export default function WorkerPage() {
           <div className="mt-2 p-2 bg-muted rounded text-sm break-all">
             配对码（仅显示一次）：<code>{token}</code>
             <div className="mt-1 text-xs opacity-70">
-              部署：<code>NOVACHAT_WORKER_URL=wss://你的域名/api/worker/connect NOVACHAT_WORKER_TOKEN={token} ./novachat-worker</code>
+              部署：<code>YUNOVA_WORKER_URL=wss://你的域名/api/worker/connect YUNOVA_WORKER_TOKEN={token} ./yunova-worker</code>
             </div>
           </div>
         )}
@@ -1464,7 +1464,7 @@ Expected: 构建通过。
 
 - [ ] **Step 4: 端到端 UI 验证**
 
-`cargo run -p novachat` 起后端（前端已嵌入），登录 → 进「工蜂」→ 生成配对码 → 另起工蜂连上 → 在会话区发「列出 /etc 下前 5 个文件」→ 观察自动执行(read/shell)与审批流。
+`cargo run -p yunova` 起后端（前端已嵌入），登录 → 进「工蜂」→ 生成配对码 → 另起工蜂连上 → 在会话区发「列出 /etc 下前 5 个文件」→ 观察自动执行(read/shell)与审批流。
 Expected: 在线徽标变绿；会话能跑通工具调用与审批。
 
 - [ ] **Step 5: 提交**
@@ -1484,7 +1484,7 @@ git commit -m "feat(worker): 工蜂页 UI（管理 + agent 会话 + 审批）+ �
 
 - [ ] **Step 1: 写 `worker/README.md`**
 
-内容：工蜂用途、单二进制构建方式（`cargo build -p novachat-worker --release`，按 CLAUDE.md 规约——构建在本地/CI 做，不在线上机；产物 `target/release/novachat-worker`）、部署运行（设 `NOVACHAT_WORKER_URL` / `NOVACHAT_WORKER_TOKEN` / 可选 `NOVACHAT_WORKER_NAME`，建议非 root 运行）、安全提示（工蜂能执行任意命令，仅部署到自己信任的机器）。
+内容：工蜂用途、单二进制构建方式（`cargo build -p yunova-worker --release`，按 CLAUDE.md 规约——构建在本地/CI 做，不在线上机；产物 `target/release/yunova-worker`）、部署运行（设 `YUNOVA_WORKER_URL` / `YUNOVA_WORKER_TOKEN` / 可选 `YUNOVA_WORKER_NAME`，建议非 root 运行）、安全提示（工蜂能执行任意命令，仅部署到自己信任的机器）。
 
 - [ ] **Step 2: 全量构建复核**
 

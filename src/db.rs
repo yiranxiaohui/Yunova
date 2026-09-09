@@ -101,6 +101,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (34, include_str!("../migrations/sqlite/0034_workflow_run_logs.sql")),
     (35, include_str!("../migrations/sqlite/0035_video_editor.sql")),
     (36, include_str!("../migrations/sqlite/0036_unify_media_library.sql")),
+    (37, include_str!("../migrations/sqlite/0037_yunova_brand.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -139,6 +140,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (34, include_str!("../migrations/mysql/0034_workflow_run_logs.sql")),
     (35, include_str!("../migrations/mysql/0035_video_editor.sql")),
     (36, include_str!("../migrations/mysql/0036_unify_media_library.sql")),
+    (37, include_str!("../migrations/mysql/0037_yunova_brand.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -177,6 +179,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (34, include_str!("../migrations/postgres/0034_workflow_run_logs.sql")),
     (35, include_str!("../migrations/postgres/0035_video_editor.sql")),
     (36, include_str!("../migrations/postgres/0036_unify_media_library.sql")),
+    (37, include_str!("../migrations/postgres/0037_yunova_brand.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -406,5 +409,40 @@ pub fn day_bucket(kind: DbKind, col: &str) -> String {
         DbKind::Sqlite => format!("substr({col}, 1, 10)"),
         DbKind::Mysql => format!("DATE_FORMAT({col}, '%Y-%m-%d')"),
         DbKind::Postgres => format!("to_char({col}, 'YYYY-MM-DD')"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn brand_migration_updates_defaults_and_preserves_custom_settings() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+        let read = "SELECT k, v FROM app_settings WHERE k IN ('smtp_from_name', 'epay_product_name') ORDER BY k";
+        let defaults: Vec<(String, String)> = sqlx::query_as(read).fetch_all(&pool).await.unwrap();
+        assert_eq!(defaults, vec![
+            ("epay_product_name".into(), "Yunova 积分充值".into()),
+            ("smtp_from_name".into(), "Yunova".into()),
+        ]);
+
+        // Simulate upgrading a database with customized names at version 36.
+        pool.execute("DELETE FROM _migrations WHERE id = 37").await.unwrap();
+        pool.execute("UPDATE app_settings SET v = 'My workspace' WHERE k = 'smtp_from_name'").await.unwrap();
+        pool.execute("UPDATE app_settings SET v = 'Custom credits' WHERE k = 'epay_product_name'").await.unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+        let customized: Vec<(String, String)> = sqlx::query_as(read).fetch_all(&pool).await.unwrap();
+        assert_eq!(customized, vec![
+            ("epay_product_name".into(), "Custom credits".into()),
+            ("smtp_from_name".into(), "My workspace".into()),
+        ]);
+        pool.close().await;
     }
 }

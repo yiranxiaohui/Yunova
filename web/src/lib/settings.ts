@@ -27,7 +27,7 @@ export type UpstreamSettings = {
   imageUseProxy: boolean
 
   // Video generation. Custom requests go from the browser directly to the
-  // local upstream; these values are never sent to or persisted by NovaChat.
+  // local upstream; these values are never sent to or persisted by Yunova.
   videoMode: UpstreamMode
   videoBaseUrl: string
   videoApiKey: string
@@ -114,13 +114,14 @@ const GUEST_EMPTY: UpstreamSettings = {
 }
 
 function keyFor(userId: number | string) {
-  return `novachat:upstream:v2:${userId}`
+  return `yunova:upstream:v2:${userId}`
 }
 
 export function loadSettings(userId: number | string): UpstreamSettings {
   const fallback = userId === GUEST_SETTINGS_ID ? GUEST_EMPTY : EMPTY
   try {
     const raw = localStorage.getItem(keyFor(userId))
+      ?? localStorage.getItem(`novachat:upstream:v2:${userId}`)
     if (!raw) return fallback
     const parsed = JSON.parse(raw) as Partial<UpstreamSettings>
     const merged: UpstreamSettings = { ...fallback, ...parsed }
@@ -137,10 +138,12 @@ export function loadSettings(userId: number | string): UpstreamSettings {
 
 export function saveSettings(userId: number | string, s: UpstreamSettings) {
   localStorage.setItem(keyFor(userId), JSON.stringify(s))
+  localStorage.removeItem(`novachat:upstream:v2:${userId}`)
 }
 
 export function clearSettings(userId: number | string) {
   localStorage.removeItem(keyFor(userId))
+  localStorage.removeItem(`novachat:upstream:v2:${userId}`)
 }
 
 export function trimSlash(url: string): string {

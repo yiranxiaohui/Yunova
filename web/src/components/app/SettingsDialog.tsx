@@ -733,7 +733,7 @@ function WorkerSettings() {
     return () => clearInterval(t)
   }, [])
   const deployCmd = (tok: string) =>
-    `NOVACHAT_WORKER_URL=wss://你的域名/api/worker/connect NOVACHAT_WORKER_TOKEN=${tok} ./novachat-worker`
+    `YUNOVA_WORKER_URL=wss://你的域名/api/worker/connect YUNOVA_WORKER_TOKEN=${tok} ./yunova-worker`
   async function pair() {
     if (pairing) return
     setPairing(true)

@@ -423,7 +423,7 @@ async fn get_system_info(
         db_kind: installed.kind.as_str(),
         data_dir: state.data_dir.display().to_string(),
         config_path: state.config_path.display().to_string(),
-        bind_addr: std::env::var("NOVACHAT_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into()),
+        bind_addr: crate::runtime_env::var("YUNOVA_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into()),
         images_dir_bytes,
         storage_backend: state.storage.backend_name(),
         storage_location: state.storage.location(),
@@ -460,7 +460,13 @@ fn storage_settings(
         endpoint: config.endpoint.clone().unwrap_or_default(),
         region: config.region.clone().unwrap_or_else(|| "us-east-1".into()),
         bucket: config.bucket.clone().unwrap_or_default(),
-        prefix: config.prefix.clone().unwrap_or_else(|| "novachat".into()),
+        prefix: config.prefix.clone().unwrap_or_else(|| {
+            if active_backend == "s3" {
+                crate::storage::DEFAULT_S3_PREFIX.into()
+            } else {
+                "yunova".into()
+            }
+        }),
         path_style: config.path_style.unwrap_or(true),
         access_key_id_set: config
             .access_key_id
@@ -495,7 +501,7 @@ fn read_config_for_update(state: &AppState) -> Result<crate::setup::StoredConfig
             .map_err(|error| format!("read config: {error}"));
     }
 
-    let database_url = std::env::var("NOVACHAT_DATABASE_URL")
+    let database_url = crate::runtime_env::var("YUNOVA_DATABASE_URL")
         .ok()
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .ok_or_else(|| "database configuration is missing".to_string())?;
@@ -693,7 +699,7 @@ mod tests {
             endpoint: " https://objects.example.com ".into(),
             region: " auto ".into(),
             bucket: " media ".into(),
-            prefix: " novachat ".into(),
+            prefix: " yunova ".into(),
             path_style: true,
             ..Default::default()
         };
@@ -702,7 +708,7 @@ mod tests {
         assert_eq!(merged.endpoint.as_deref(), Some("https://objects.example.com"));
         assert_eq!(merged.region.as_deref(), Some("auto"));
         assert_eq!(merged.bucket.as_deref(), Some("media"));
-        assert_eq!(merged.prefix.as_deref(), Some("novachat"));
+        assert_eq!(merged.prefix.as_deref(), Some("yunova"));
         assert_eq!(merged.access_key_id.as_deref(), Some("existing-key"));
         assert_eq!(merged.secret_access_key.as_deref(), Some("existing-secret"));
         assert_eq!(merged.session_token.as_deref(), Some("existing-token"));

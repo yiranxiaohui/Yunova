@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 为 NovaChat 增加 OpenAI `/v1/videos` 协议的视频生成：独立视频创作台 + 个人视频库，模型+时长+分辨率组合定价，只走平台渠道扣积分，前端懒轮询 + 60s 定时兜底。
+**Goal:** 为 Yunova 增加 OpenAI `/v1/videos` 协议的视频生成：独立视频创作台 + 个人视频库，模型+时长+分辨率组合定价，只走平台渠道扣积分，前端懒轮询 + 60s 定时兜底。
 
 **Architecture:** 新后端模块 `src/videos.rs`（job 表 + 懒轮询推进函数 `advance_job`），复用 `upstream_channels`（`kind='video'`）与 `credits::try_deduct/grant`；MP4 下载落盘 `data_dir/videos/`；前端新增 `VideoStudioPage` + `video-gen.ts` 客户端 + 管理端 `VideoPricingPanel`。
 
@@ -194,7 +194,7 @@ CREATE TABLE video_pricing (
 Run: `cargo check`
 Expected: 编译通过（include_str! 路径正确即可；表要到运行时才建）。
 
-可选运行验证：`rm -f /tmp/nc-test.db && NOVACHAT_DATA_DIR=/tmp/nc-vtest cargo run` 短暂启动确认 migration 应用无 SQL 报错后 Ctrl-C。
+可选运行验证：`rm -f /tmp/nc-test.db && YUNOVA_DATA_DIR=/tmp/nc-vtest cargo run` 短暂启动确认 migration 应用无 SQL 报错后 Ctrl-C。
 
 ```bash
 git add migrations src/db.rs
@@ -1120,10 +1120,10 @@ Expected: 全 PASS。
 - [ ] **Step 2: 冷启动 + migration**
 
 ```bash
-rm -rf /tmp/nc-video-e2e && NOVACHAT_DATA_DIR=/tmp/nc-video-e2e NOVACHAT_BIND=127.0.0.1:3100 cargo run
+rm -rf /tmp/nc-video-e2e && YUNOVA_DATA_DIR=/tmp/nc-video-e2e YUNOVA_BIND=127.0.0.1:3100 cargo run
 ```
 
-走 `/setup` 建 SQLite + 管理员。确认启动日志无 migration 报错；`sqlite3 /tmp/nc-video-e2e/novachat.db ".schema video_jobs"` 能看到表。
+走 `/setup` 建 SQLite + 管理员。确认启动日志无 migration 报错；`sqlite3 /tmp/nc-video-e2e/yunova.db ".schema video_jobs"` 能看到表。
 
 - [ ] **Step 3: 管理端配置**
 

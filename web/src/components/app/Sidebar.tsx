@@ -260,7 +260,7 @@ export function Sidebar({
   return (
     <aside className="flex h-full w-[18rem] shrink-0 flex-col border-r border-sidebar-border bg-sidebar/95 text-sidebar-foreground shadow-[12px_0_40px_-32px_rgba(37,24,70,0.45)] backdrop-blur-xl">
       <div className="flex items-center justify-between px-4 pb-4 pt-5">
-        <BrandMark subtitle="智能创作空间" />
+        <BrandMark subtitle="Agent 工作空间" />
       </div>
 
       <div className="flex flex-col gap-3 px-3 pb-3">

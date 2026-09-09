@@ -79,7 +79,7 @@ Commit: `refactor(web): remove shared upstream UI from settings + admin`
 
 1. `cargo check` (already clean per phase) + `cd web && bun run typecheck`.
 2. `cd web && bun run build` succeeds.
-3. `git push origin main` → GHA → SSH prod pull + `up -d novachat`.
+3. `git push origin main` → GHA → SSH prod pull + `up -d yunova`.
 4. Manual smoke (prod):
    - Anonymous chat (channel route) ✅
    - Image generate via studio ✅

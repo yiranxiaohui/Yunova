@@ -1,34 +1,34 @@
-# NovaChat — default stack: just the app with a persistent data volume.
+# Yunova — default stack: just the app with a persistent data volume.
 #
 #   docker compose up -d                 # SQLite (walk the /setup wizard)
-#   docker compose --profile mysql up -d # NovaChat + MySQL
+#   docker compose --profile mysql up -d # Yunova + MySQL
 #   docker compose --profile postgres up -d
 #
 # When using the mysql/postgres profiles the app is preconfigured via
-# NOVACHAT_DATABASE_URL so the install wizard skips the DB step; you still
+# YUNOVA_DATABASE_URL so the install wizard skips the DB step; you still
 # create the admin user from /setup on first visit.
 
 services:
-  novachat:
-    image: ghcr.io/yiranxiaohui/novachat:latest
+  yunova:
+    image: ghcr.io/yiranxiaohui/yunova:latest
     # To build locally instead, comment out `image:` above and uncomment:
     # build:
     #   context: .
     #   dockerfile: Dockerfile
-    container_name: novachat
+    container_name: yunova
     restart: unless-stopped
     ports:
       - "3000:3000"
     volumes:
-      - ./novachat_data:/data
+      - ${YUNOVA_DATA_PATH:-./yunova_data}:/data
     environment:
-      NOVACHAT_BIND: 0.0.0.0:3000
-      NOVACHAT_DATA_DIR: /data
+      YUNOVA_BIND: 0.0.0.0:3000
+      YUNOVA_DATA_DIR: /data
       # Configure S3-compatible media storage in 管理后台 → 媒体存储.
       # Uncomment for MySQL profile:
-      # NOVACHAT_DATABASE_URL: mysql://novachat:novachat@mysql:3306/novachat
+      # YUNOVA_DATABASE_URL: mysql://yunova:yunova@mysql:3306/yunova
       # Uncomment for Postgres profile:
-      # NOVACHAT_DATABASE_URL: postgres://novachat:novachat@postgres:5432/novachat
+      # YUNOVA_DATABASE_URL: postgres://yunova:yunova@postgres:5432/yunova
     healthcheck:
       test: ["CMD", "bash", "-c", ":>/dev/tcp/127.0.0.1/3000"]
       interval: 30s
@@ -39,16 +39,16 @@ services:
   mysql:
     profiles: ["mysql"]
     image: mysql:8
-    container_name: novachat-mysql
+    container_name: yunova-mysql
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: rootpw
-      MYSQL_DATABASE: novachat
-      MYSQL_USER: novachat
-      MYSQL_PASSWORD: novachat
+      MYSQL_DATABASE: yunova
+      MYSQL_USER: yunova
+      MYSQL_PASSWORD: yunova
     command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
     volumes:
-      - ./novachat_mysql:/var/lib/mysql
+      - ${YUNOVA_MYSQL_DATA_PATH:-./yunova_mysql}:/var/lib/mysql
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpw"]
       interval: 10s
@@ -58,16 +58,16 @@ services:
   postgres:
     profiles: ["postgres"]
     image: postgres:16-alpine
-    container_name: novachat-postgres
+    container_name: yunova-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: novachat
-      POSTGRES_USER: novachat
-      POSTGRES_PASSWORD: novachat
+      POSTGRES_DB: yunova
+      POSTGRES_USER: yunova
+      POSTGRES_PASSWORD: yunova
     volumes:
-      - ./novachat_postgres:/var/lib/postgresql/data
+      - ${YUNOVA_POSTGRES_DATA_PATH:-./yunova_postgres}:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U novachat -d novachat"]
+      test: ["CMD-SHELL", "pg_isready -U yunova -d yunova"]
       interval: 10s
       timeout: 5s
       retries: 10

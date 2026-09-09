@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "web",
+      "name": "yunova-web",
       "dependencies": {
         "@tailwindcss/vite": "^4.2.4",
         "class-variance-authority": "^0.7.1",

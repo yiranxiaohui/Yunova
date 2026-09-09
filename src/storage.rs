@@ -17,6 +17,11 @@ use tokio_util::io::ReaderStream;
 
 const SIGNED_URL_TTL: Duration = Duration::from_secs(15 * 60);
 
+// Existing objects use this namespace when no explicit prefix was configured.
+// Renaming it would make those objects inaccessible. New UI configurations
+// explicitly choose the Yunova prefix instead.
+pub const DEFAULT_S3_PREFIX: &str = "novachat";
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct StorageConfig {
     #[serde(default)]
@@ -82,7 +87,7 @@ impl fmt::Display for StorageError {
 impl std::error::Error for StorageError {}
 
 /// A media object whose bytes can be forwarded without buffering the whole
-/// object in NovaChat first. The stream owns its file or upstream response, so
+/// object in Yunova first. The stream owns its file or upstream response, so
 /// it remains valid after the storage backend is reconfigured.
 pub struct MediaStream {
     content_length: Option<u64>,
@@ -228,7 +233,7 @@ impl MediaStorage {
         *self.backend.write().unwrap_or_else(|lock| lock.into_inner()) = backend;
     }
 
-    /// Verify that the configured bucket accepts the operations NovaChat
+    /// Verify that the configured bucket accepts the operations Yunova
     /// needs. The probe writes and deletes one empty, uniquely named object.
     pub async fn test_connection(&self) -> Result<(), StorageError> {
         let Backend::S3(s3) = self.current_backend() else {
@@ -238,7 +243,7 @@ impl MediaStorage {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let name = format!(".novachat-storage-test-{}-{nonce}", std::process::id());
+        let name = format!(".yunova-storage-test-{}-{nonce}", std::process::id());
         let key = if s3.prefix.is_empty() {
             name
         } else {
@@ -796,7 +801,9 @@ fn env_value<F>(getenv: &mut F, names: &[&str]) -> Option<String>
 where
     F: FnMut(&str) -> Option<String>,
 {
-    names.iter().find_map(|name| nonempty(getenv(name)))
+    names.iter().find_map(|name| {
+        nonempty(crate::runtime_env::value_with(name, &mut *getenv))
+    })
 }
 
 fn parse_bool(name: &str, value: &str) -> Result<bool, String> {
@@ -830,7 +837,7 @@ where
     // authoritative after a restart. Environment variables are retained as a
     // backwards-compatible fallback for deployments without [storage].
     let backend = nonempty(Some(config.backend.clone()))
-        .or_else(|| env_value(&mut getenv, &["NOVACHAT_STORAGE_BACKEND"]))
+        .or_else(|| env_value(&mut getenv, &["YUNOVA_STORAGE_BACKEND"]))
         .unwrap_or_else(|| "local".into())
         .to_ascii_lowercase();
     if backend == "local" {
@@ -841,40 +848,40 @@ where
     }
 
     let region = config_value(&config.region)
-        .or_else(|| env_value(&mut getenv, &["NOVACHAT_S3_REGION"]))
+        .or_else(|| env_value(&mut getenv, &["YUNOVA_S3_REGION"]))
         .or_else(|| env_value(&mut getenv, &["AWS_REGION", "AWS_DEFAULT_REGION"]))
         .unwrap_or_else(|| "us-east-1".into());
     let custom_endpoint = config_value(&config.endpoint)
-        .or_else(|| env_value(&mut getenv, &["NOVACHAT_S3_ENDPOINT"]))
+        .or_else(|| env_value(&mut getenv, &["YUNOVA_S3_ENDPOINT"]))
         .or_else(|| env_value(&mut getenv, &["AWS_ENDPOINT_URL_S3"]));
     let endpoint = custom_endpoint
         .clone()
         .unwrap_or_else(|| format!("https://s3.{region}.amazonaws.com"));
     let bucket = config_value(&config.bucket)
-        .or_else(|| env_value(&mut getenv, &["NOVACHAT_S3_BUCKET"]))
+        .or_else(|| env_value(&mut getenv, &["YUNOVA_S3_BUCKET"]))
         .ok_or_else(|| "S3 bucket is required".to_string())?;
     if bucket.contains('/') || bucket.contains('\\') {
         return Err("S3 bucket must not contain slashes".into());
     }
     let access_key_id = config_value(&config.access_key_id)
-        .or_else(|| env_value(&mut getenv, &["NOVACHAT_S3_ACCESS_KEY_ID"]))
+        .or_else(|| env_value(&mut getenv, &["YUNOVA_S3_ACCESS_KEY_ID"]))
         .or_else(|| env_value(&mut getenv, &["AWS_ACCESS_KEY_ID"]))
         .ok_or_else(|| "S3 access key id is required".to_string())?;
     let secret_access_key = config_value(&config.secret_access_key)
-        .or_else(|| env_value(&mut getenv, &["NOVACHAT_S3_SECRET_ACCESS_KEY"]))
+        .or_else(|| env_value(&mut getenv, &["YUNOVA_S3_SECRET_ACCESS_KEY"]))
         .or_else(|| env_value(&mut getenv, &["AWS_SECRET_ACCESS_KEY"]))
         .ok_or_else(|| "S3 secret access key is required".to_string())?;
     let session_token = config_value(&config.session_token)
-        .or_else(|| env_value(&mut getenv, &["NOVACHAT_S3_SESSION_TOKEN"]))
+        .or_else(|| env_value(&mut getenv, &["YUNOVA_S3_SESSION_TOKEN"]))
         .or_else(|| env_value(&mut getenv, &["AWS_SESSION_TOKEN"]));
     let prefix = config_value(&config.prefix)
-        .or_else(|| env_value(&mut getenv, &["NOVACHAT_S3_PREFIX"]))
-        .unwrap_or_else(|| "novachat".into());
+        .or_else(|| env_value(&mut getenv, &["YUNOVA_S3_PREFIX"]))
+        .unwrap_or_else(|| DEFAULT_S3_PREFIX.into());
     let prefix = normalize_prefix(prefix)?;
     let path_style = match config.path_style {
         Some(value) => value,
-        None => match env_value(&mut getenv, &["NOVACHAT_S3_PATH_STYLE"]) {
-            Some(value) => parse_bool("NOVACHAT_S3_PATH_STYLE", &value)?,
+        None => match env_value(&mut getenv, &["YUNOVA_S3_PATH_STYLE"]) {
+            Some(value) => parse_bool("YUNOVA_S3_PATH_STYLE", &value)?,
             None => custom_endpoint.is_some(),
         },
     };
@@ -917,7 +924,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!(
-            "novachat-storage-{label}-{}-{nonce}",
+            "yunova-storage-{label}-{}-{nonce}",
             std::process::id()
         ))
     }
@@ -943,7 +950,7 @@ mod tests {
 
         match method {
             Method::PUT => {
-                if key.contains(".novachat-storage-test-")
+                if key.contains(".yunova-storage-test-")
                     && content_length.as_deref() != Some("0")
                 {
                     return Response::builder()
@@ -1038,6 +1045,29 @@ mod tests {
     }
 
     #[test]
+    fn renamed_s3_environment_preserves_objects_and_prefers_new_settings() {
+        let mut environment = HashMap::from([
+            ("NOVACHAT_STORAGE_BACKEND", "s3"),
+            ("NOVACHAT_S3_BUCKET", "existing-media"),
+            ("NOVACHAT_S3_ACCESS_KEY_ID", "test-key"),
+            ("NOVACHAT_S3_SECRET_ACCESS_KEY", "test-secret"),
+        ]);
+        let ResolvedStorage::S3(legacy) = resolve_storage(None, |name| {
+            environment.get(name).map(ToString::to_string)
+        }).unwrap() else { panic!("expected legacy S3 configuration") };
+        assert_eq!(legacy.bucket, "existing-media");
+        assert_eq!(legacy.prefix, "novachat");
+
+        environment.insert("YUNOVA_S3_BUCKET", "new-media");
+        environment.insert("YUNOVA_S3_PREFIX", "yunova");
+        let ResolvedStorage::S3(current) = resolve_storage(None, |name| {
+            environment.get(name).map(ToString::to_string)
+        }).unwrap() else { panic!("expected renamed S3 configuration") };
+        assert_eq!(current.bucket, "new-media");
+        assert_eq!(current.prefix, "yunova");
+    }
+
+    #[test]
     fn resolves_s3_config_and_normalizes_prefix() {
         let config = StorageConfig {
             backend: "s3".into(),
@@ -1046,7 +1076,7 @@ mod tests {
             bucket: Some("media".into()),
             access_key_id: Some("key".into()),
             secret_access_key: Some("secret".into()),
-            prefix: Some("/tenant//novachat/".into()),
+            prefix: Some("/tenant//yunova/".into()),
             ..Default::default()
         };
 
@@ -1054,7 +1084,7 @@ mod tests {
         let ResolvedStorage::S3(resolved) = resolved else {
             panic!("expected S3 storage");
         };
-        assert_eq!(resolved.prefix, "tenant/novachat");
+        assert_eq!(resolved.prefix, "tenant/yunova");
         assert!(resolved.path_style);
     }
 
@@ -1072,14 +1102,14 @@ mod tests {
             ..Default::default()
         };
         let environment = HashMap::from([
-            ("NOVACHAT_STORAGE_BACKEND", "local"),
-            ("NOVACHAT_S3_ENDPOINT", "https://env.example.com"),
-            ("NOVACHAT_S3_REGION", "env-region"),
-            ("NOVACHAT_S3_BUCKET", "env-bucket"),
-            ("NOVACHAT_S3_ACCESS_KEY_ID", "env-key"),
-            ("NOVACHAT_S3_SECRET_ACCESS_KEY", "env-secret"),
-            ("NOVACHAT_S3_PREFIX", "env-prefix"),
-            ("NOVACHAT_S3_PATH_STYLE", "true"),
+            ("YUNOVA_STORAGE_BACKEND", "local"),
+            ("YUNOVA_S3_ENDPOINT", "https://env.example.com"),
+            ("YUNOVA_S3_REGION", "env-region"),
+            ("YUNOVA_S3_BUCKET", "env-bucket"),
+            ("YUNOVA_S3_ACCESS_KEY_ID", "env-key"),
+            ("YUNOVA_S3_SECRET_ACCESS_KEY", "env-secret"),
+            ("YUNOVA_S3_PREFIX", "env-prefix"),
+            ("YUNOVA_S3_PATH_STYLE", "true"),
         ]);
 
         let resolved = resolve_storage(Some(&config), |name| {
@@ -1173,7 +1203,7 @@ mod tests {
             bucket: Some("media".into()),
             access_key_id: Some("key".into()),
             secret_access_key: Some("secret".into()),
-            prefix: Some("novachat".into()),
+            prefix: Some("yunova".into()),
             path_style: Some(true),
             ..Default::default()
         };
@@ -1200,7 +1230,7 @@ mod tests {
             objects
                 .read()
                 .await
-                .get("novachat/videos/sample.mp4")
+                .get("yunova/videos/sample.mp4")
                 .unwrap(),
             b"0123456789"
         );

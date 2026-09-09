@@ -305,7 +305,7 @@ git commit -m "feat(web): 聊天页上下文上限优先用平台模型配置值
 
 - [ ] **Step 1: 合并 → 推送 → CI 构建镜像**（沿用仓库 merge 风格，push main 触发 docker workflow）
 
-- [ ] **Step 2: 生产部署**：114.66.55.93 `/opt/NovaChat/docker-compose.yml` 改 `image:` 为新 `sha-<merge短哈希>` tag → `docker compose pull novachat && docker compose up -d novachat`。启动时迁移 0029 自动应用。
+- [ ] **Step 2: 生产部署**：114.66.55.93 `/opt/Yunova/docker-compose.yml` 改 `image:` 为新 `sha-<merge短哈希>` tag → `docker compose pull yunova && docker compose up -d yunova`。启动时迁移 0029 自动应用。
 
 - [ ] **Step 3: 运行时验证矩阵**
 - 管理控制台 → 计费规则：新列「上下文」出现，编辑某 chat 模型填 1000000 保存，列表显示 `1M`。

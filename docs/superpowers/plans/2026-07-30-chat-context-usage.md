@@ -16,7 +16,7 @@
 - UI 文案用中文，与现有风格一致。
 - 不改后端、不加迁移。
 - lint 注意：组件内局部函数不能叫 `useXxx`（会被 rules-of-hooks 误判）。
-- 构建/lint 用 bun：`cd /opt/novachat/web && bun run build`、`bun run lint`。不跑 `cargo build`（本地只做检查类命令；`cargo check` 会触发 bun build，可以跑但非必需）。
+- 构建/lint 用 bun：`cd /opt/yunova/web && bun run build`、`bun run lint`。不跑 `cargo build`（本地只做检查类命令；`cargo check` 会触发 bun build，可以跑但非必需）。
 
 ---
 
@@ -81,7 +81,7 @@ export { contextLimit, DEFAULT_CONTEXT_LIMIT } from "./context-limits"
 
 - [ ] **Step 3: 验证**
 
-Run: `cd /opt/novachat/web && bun run build && bun run lint`
+Run: `cd /opt/yunova/web && bun run build && bun run lint`
 Expected: 两者通过，无新增 error（存量 `react-hooks/set-state-in-effect` warning 不管）。
 
 - [ ] **Step 4: Commit**
@@ -170,7 +170,7 @@ git commit -m "feat(web): 新增模型上下文上限表与 token 估算工具"
 
 - [ ] **Step 3: 验证**
 
-Run: `cd /opt/novachat/web && bun run build && bun run lint`
+Run: `cd /opt/yunova/web && bun run build && bun run lint`
 Expected: 通过。
 
 - [ ] **Step 4: Commit**
@@ -264,7 +264,7 @@ import { estimateMessagesTokens } from "@/lib/context-limits"
 
 - [ ] **Step 6: 验证**
 
-Run: `cd /opt/novachat/web && bun run build && bun run lint`
+Run: `cd /opt/yunova/web && bun run build && bun run lint`
 Expected: 通过，无新增 lint error。
 
 - [ ] **Step 7: Commit**

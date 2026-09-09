@@ -608,7 +608,7 @@ export default function VideoStudioPage() {
             <p className="text-[11px] leading-relaxed text-muted-foreground">
               {videoMode === "platform"
                 ? "使用管理员配置的 OpenAI 兼容视频渠道，按定价规则扣积分。"
-                : "当前浏览器直接请求本地视频服务，不经过 NovaChat 服务器。"}
+                : "当前浏览器直接请求本地视频服务，不经过 Yunova 服务器。"}
             </p>
             {videoMode === "byok" && (
               <div className="mt-1 flex flex-col gap-2">

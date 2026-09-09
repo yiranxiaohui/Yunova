@@ -15,21 +15,21 @@ const KIND_META: Record<Kind, { label: string; badge: string; port: number; plac
     label: "SQLite",
     badge: "零依赖",
     port: 0,
-    placeholder: "novachat.db",
+    placeholder: "yunova.db",
     note: "最简单。单文件、本机即跑，适合个人或小团队。",
   },
   mysql: {
     label: "MySQL",
     badge: "生产",
     port: 3306,
-    placeholder: "novachat",
+    placeholder: "yunova",
     note: "已有 MySQL 的环境选这个。",
   },
   postgres: {
     label: "PostgreSQL",
     badge: "推荐",
     port: 5432,
-    placeholder: "novachat",
+    placeholder: "yunova",
     note: "多用户或云部署的更稳选择。",
   },
 }
@@ -38,7 +38,7 @@ export default function SetupPage() {
   const nav = useNavigate()
   const [step, setStep] = useState<1 | 2>(1)
   const [kind, setKind] = useState<Kind>("sqlite")
-  const [sqlitePath, setSqlitePath] = useState("novachat.db")
+  const [sqlitePath, setSqlitePath] = useState("yunova.db")
   const [host, setHost] = useState("localhost")
   const [port, setPort] = useState<number>(3306)
   const [dbUser, setDbUser] = useState("")
@@ -68,7 +68,7 @@ export default function SetupPage() {
 
   const connection = useMemo<ConnectionForm>(() => {
     if (kind === "sqlite") {
-      return { kind: "sqlite", sqlite_path: sqlitePath.trim() || "novachat.db" }
+      return { kind: "sqlite", sqlite_path: sqlitePath.trim() || "yunova.db" }
     }
     return {
       kind,
@@ -263,7 +263,7 @@ export default function SetupPage() {
           >
             <h2 className="text-lg font-semibold">创建管理员账号</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              这是首位登录 NovaChat 的账号。之后可以在界面里再注册更多用户。
+              这是首位登录 Yunova 的账号。之后可以在界面里再注册更多用户。
             </p>
 
             <div className="mt-5 grid grid-cols-1 gap-3 sm:grid-cols-2">

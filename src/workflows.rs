@@ -1422,7 +1422,7 @@ fn workflow_temp_dir(state: &AppState) -> PathBuf {
 
 async fn run_command(mut command: tokio::process::Command, label: &str) -> Result<(), String> {
     command.kill_on_drop(true);
-    let timeout_seconds = std::env::var("NOVACHAT_MEDIA_TIMEOUT_SECONDS")
+    let timeout_seconds = crate::runtime_env::var("YUNOVA_MEDIA_TIMEOUT_SECONDS")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(7200)
@@ -1443,13 +1443,13 @@ async fn run_command(mut command: tokio::process::Command, label: &str) -> Resul
 
 fn ffmpeg_command() -> tokio::process::Command {
     tokio::process::Command::new(
-        std::env::var("NOVACHAT_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
+        crate::runtime_env::var("YUNOVA_FFMPEG").unwrap_or_else(|_| "ffmpeg".into()),
     )
 }
 
 fn ffprobe_command() -> tokio::process::Command {
     tokio::process::Command::new(
-        std::env::var("NOVACHAT_FFPROBE").unwrap_or_else(|_| "ffprobe".into()),
+        crate::runtime_env::var("YUNOVA_FFPROBE").unwrap_or_else(|_| "ffprobe".into()),
     )
 }
 
@@ -2030,7 +2030,7 @@ mod tests {
     async fn sqlite_migration_creates_workflow_tables() {
         crate::db::install_drivers();
         let path = std::env::temp_dir().join(format!(
-            "novachat-workflow-migration-{}-{}.db",
+            "yunova-workflow-migration-{}-{}.db",
             std::process::id(),
             random_hex(6)
         ));

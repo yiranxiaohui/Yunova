@@ -25,6 +25,20 @@ pub struct StoredConfig {
     pub storage: Option<crate::storage::StorageConfig>,
 }
 
+/// Reuse an existing configuration so an upgrade retains its database path.
+pub fn config_path(data_dir: &Path, explicit: Option<&str>) -> std::path::PathBuf {
+    if let Some(path) = explicit {
+        return path.into();
+    }
+    let current = data_dir.join("yunova.toml");
+    let legacy = data_dir.join("novachat.toml");
+    if !current.exists() && legacy.exists() {
+        legacy
+    } else {
+        current
+    }
+}
+
 pub fn load_config(path: &Path) -> Result<StoredConfig, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     toml::from_str(&text).map_err(|e| e.to_string())
@@ -40,7 +54,7 @@ pub fn save_config(path: &Path, cfg: &StoredConfig) -> Result<(), String> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("novachat.toml");
+        .unwrap_or("yunova.toml");
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -94,7 +108,7 @@ pub struct StatusResponse {
 #[derive(Deserialize)]
 pub struct ConnectionForm {
     pub kind: String,
-    // for sqlite: relative file path (e.g. "novachat.db")
+    // for sqlite: relative file path (e.g. "yunova.db")
     // for mysql/postgres: host, port, user, password, database, with tls optional
     pub sqlite_path: Option<String>,
 
@@ -133,7 +147,7 @@ fn build_url(form: &ConnectionForm, data_dir: &Path) -> Result<(db::DbKind, Stri
             let raw = form
                 .sqlite_path
                 .as_deref()
-                .unwrap_or("novachat.db")
+                .unwrap_or("yunova.db")
                 .trim();
             if raw.is_empty() {
                 return Err("sqlite_path is empty".into());
@@ -385,9 +399,30 @@ pub fn routes() -> Router<AppState> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::{path::Path, time::{SystemTime, UNIX_EPOCH}};
 
-    use super::{StoredConfig, load_config, save_config};
+    use super::{StoredConfig, config_path, load_config, save_config};
+
+    #[test]
+    fn config_discovery_preserves_existing_database_and_honors_overrides() {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("yunova-config-discovery-{}-{nonce}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let current = dir.join("yunova.toml");
+        let legacy = dir.join("novachat.toml");
+        assert_eq!(config_path(&dir, None), current);
+        let original = StoredConfig {
+            database_url: "sqlite://data/novachat.db".into(),
+            storage: None,
+        };
+        save_config(&legacy, &original).unwrap();
+        assert_eq!(config_path(&dir, None), legacy);
+        assert_eq!(load_config(&config_path(&dir, None)).unwrap().database_url, original.database_url);
+        save_config(&current, &original).unwrap();
+        assert_eq!(config_path(&dir, None), current);
+        assert_eq!(config_path(&dir, Some("custom.toml")), Path::new("custom.toml"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn legacy_config_without_storage_still_loads() {
@@ -419,12 +454,12 @@ mod tests {
             .unwrap()
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "novachat-config-test-{}-{nonce}",
+            "yunova-config-test-{}-{nonce}",
             std::process::id()
         ));
-        let path = dir.join("novachat.toml");
+        let path = dir.join("yunova.toml");
         let config = StoredConfig {
-            database_url: "sqlite:///data/novachat.db".into(),
+            database_url: "sqlite:///data/yunova.db".into(),
             storage: Some(crate::storage::StorageConfig {
                 backend: "s3".into(),
                 secret_access_key: Some("secret".into()),

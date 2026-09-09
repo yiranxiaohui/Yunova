@@ -1,6 +1,6 @@
 //! Persistent, multi-track browser video editing projects and server-side
 //! FFmpeg rendering. Editor snapshots deliberately keep media references as
-//! NovaChat storage paths so generated, workflow, uploaded, and public assets
+//! Yunova storage paths so generated, workflow, uploaded, and public assets
 //! can all be cut without copying large files between features.
 
 use std::{
@@ -1332,11 +1332,11 @@ async fn write_media_input(
 }
 
 fn ffmpeg_program() -> String {
-    std::env::var("NOVACHAT_FFMPEG").unwrap_or_else(|_| "ffmpeg".into())
+    crate::runtime_env::var("YUNOVA_FFMPEG").unwrap_or_else(|_| "ffmpeg".into())
 }
 
 fn ffprobe_program() -> String {
-    std::env::var("NOVACHAT_FFPROBE").unwrap_or_else(|_| "ffprobe".into())
+    crate::runtime_env::var("YUNOVA_FFPROBE").unwrap_or_else(|_| "ffprobe".into())
 }
 
 async fn has_audio_stream(path: &FsPath) -> bool {
@@ -1611,7 +1611,7 @@ async fn render_snapshot(
             .kill_on_drop(true);
 
         update_export(installed, token, "running", 40, None, None, false).await;
-        let timeout_seconds = std::env::var("NOVACHAT_MEDIA_TIMEOUT_SECONDS")
+        let timeout_seconds = crate::runtime_env::var("YUNOVA_MEDIA_TIMEOUT_SECONDS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(7200)
@@ -1732,7 +1732,7 @@ pub fn public_routes() -> Router<AppState> {
     Router::new().route("/editor-media/audio/{name}", get(serve_audio))
 }
 
-/// FFmpeg processes cannot survive a NovaChat restart. Keep persisted export
+/// FFmpeg processes cannot survive a Yunova restart. Keep persisted export
 /// history truthful instead of leaving interrupted jobs permanently pending.
 pub async fn recover(pool: &db::Pool, kind: db::DbKind) {
     let now = db::now_expr(kind);

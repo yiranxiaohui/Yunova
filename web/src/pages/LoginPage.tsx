@@ -32,7 +32,7 @@ export default function LoginPage() {
     <AuthShell
       eyebrow="欢迎回来"
       title="继续你的创作"
-      description="登录 NovaChat，回到你的对话与工作空间。"
+      description="登录 Yunova，回到你的对话与工作空间。"
       footer={
         <p>
           还没有账号？{" "}

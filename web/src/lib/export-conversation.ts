@@ -49,7 +49,7 @@ function toMarkdown(input: ExportInput): string {
 function toJson(input: ExportInput): string {
   return JSON.stringify(
     {
-      novachat_export_version: 1,
+      yunova_export_version: 1,
       exported_at: new Date().toISOString(),
       conversation: {
         id: input.conversation.id,

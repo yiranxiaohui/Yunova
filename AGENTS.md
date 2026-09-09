@@ -1,4 +1,15 @@
-# NovaChat Agent Instructions
+# Yunova Agent Instructions
+
+The repository is `git@github.com:yiranxiaohui/Yunova.git`, the local primary
+checkout is `/home/orca/projects/Yunova`, and task worktrees belong under
+`/home/orca/worktrees/Yunova`. New builds use `yunova` / `yunova-worker` and
+`ghcr.io/yiranxiaohui/yunova` (mirror: `docker.yunnet.top/github/yiranxiaohui/yunova`).
+
+The source rename does not relocate the existing production deployment:
+on `root@114.66.55.93` it still uses `/opt/NovaChat/docker-compose.yml`,
+service/container `novachat`, and host port `4300`. Inspect these live targets
+before deploying. Preserve existing database paths and mounts when switching
+to a Yunova image; do not assume `/opt/Yunova` already exists.
 
 ## Release and deployment
 
@@ -9,8 +20,8 @@ When the user asks to publish a release, remember to complete the full flow:
    release workflows to succeed.
 3. Deploy directly from the current trusted host with SSH to
    `root@114.66.55.93`; do not delegate production deployment to GitHub Actions.
-4. Back up `/opt/NovaChat/docker-compose.yml` and the SQLite database, update the
-   NovaChat image to the release tag, and recreate only the NovaChat service.
+4. Back up the current deployment's Compose file and SQLite database, update the
+   application image to the release tag, and recreate only its application service.
 5. Verify the container is healthy with zero restarts, HTTP returns 200,
    migrations and database integrity pass, and recent logs have no critical
    errors before reporting completion.

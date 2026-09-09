@@ -1,6 +1,6 @@
 name: Release worker binary
 
-# 工蜂（novachat-worker）是分发到用户自己服务器上的瘦执行器，不进服务端镜像。
+# 工蜂（yunova-worker）是分发到用户自己服务器上的瘦执行器，不进服务端镜像。
 # 打 vX.Y.Z tag 时，构建静态 musl 二进制并作为 GitHub Release 附件，用户可直接下载。
 on:
   push:
@@ -50,10 +50,10 @@ jobs:
       - name: Build & upload worker binary
         uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: novachat-worker
-          # 指到工蜂 crate；否则 action 在 workspace 根构建，默认包 novachat
-          # 里没有 novachat-worker bin（error: no bin target named ...）。
+          bin: yunova-worker
+          # 指到工蜂 crate；否则 action 在 workspace 根构建，默认包 yunova
+          # 里没有 yunova-worker bin（error: no bin target named ...）。
           manifest-path: worker/Cargo.toml
           target: ${{ matrix.target }}
-          archive: novachat-worker-$target
+          archive: yunova-worker-$target
           token: ${{ secrets.GITHUB_TOKEN }}

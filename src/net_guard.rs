@@ -170,7 +170,7 @@ pub async fn client_for_video_upstream(
     url: &str,
     timeout: Duration,
 ) -> Result<Client, Response> {
-    if std::env::var("NOVACHAT_ALLOW_PRIVATE_VIDEO_UPSTREAM")
+    if crate::runtime_env::var("YUNOVA_ALLOW_PRIVATE_VIDEO_UPSTREAM")
         .ok()
         .as_deref()
         == Some("1")

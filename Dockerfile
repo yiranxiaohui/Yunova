@@ -35,14 +35,14 @@ COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY migrations ./migrations
 # Workspace member must exist so cargo can load the workspace. We only build the
-# `novachat` server binary here (`-p novachat`); the `novachat-worker` binary is
+# `yunova` server binary here (`-p yunova`); the `yunova-worker` binary is
 # distributed separately (see CI release job + worker/README.md), not shipped in
 # the server image.
 COPY worker ./worker
 COPY --from=webbuilder /app/web/dist ./web/dist
 
-RUN cargo build --release --locked -p novachat \
-    && strip target/release/novachat
+RUN cargo build --release --locked -p yunova \
+    && strip target/release/yunova
 
 # ---- Stage 3: minimal runtime image --------------------------------------
 FROM debian:bookworm-slim AS runtime
@@ -51,19 +51,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/sbin/gosu /usr/local/bin/su-exec
 
-RUN useradd --system --uid 10001 --home /data novachat \
+RUN useradd --system --uid 10001 --home /data yunova \
     && mkdir -p /data \
-    && chown -R novachat:novachat /data
+    && chown -R yunova:yunova /data
 
-COPY --from=rustbuilder /app/target/release/novachat /usr/local/bin/novachat
+COPY --from=rustbuilder /app/target/release/yunova /usr/local/bin/yunova
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 WORKDIR /data
 VOLUME ["/data"]
-
-ENV NOVACHAT_BIND=0.0.0.0:3000 \
-    NOVACHAT_DATA_DIR=/data
 
 EXPOSE 3000
 
