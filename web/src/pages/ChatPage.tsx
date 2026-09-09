@@ -1984,7 +1984,7 @@ export default function ChatPage() {
                 </div>
                 <div>
                   <div className="mb-3 inline-flex items-center gap-1.5 rounded-full border border-primary/15 bg-primary/5 px-3 py-1 text-[11px] font-medium text-primary">
-                    <Sparkles className="size-3" /> Nova AI 助手
+                    <Sparkles className="size-3" /> Yunova AI 助手
                   </div>
                   <p className="text-2xl font-semibold tracking-[-0.035em] md:text-3xl">
                     {user?.display_name?.trim() || user?.username
