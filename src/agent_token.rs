@@ -157,6 +157,56 @@ async fn list_tokens(
     Json(out).into_response()
 }
 
+/// Mint a token for `user_id` and persist only its hash.
+///
+/// Shared by the management endpoint and by the session launcher, which needs
+/// to provision a gateway credential for a runtime it is about to start.
+/// Returns the plaintext, which is the only time it exists outside the caller.
+pub async fn mint(
+    pool: &Pool,
+    kind: DbKind,
+    user_id: i64,
+    name: &str,
+) -> Result<String, String> {
+    let token = new_token();
+    let hash = auth::token_hash(&token);
+    let prefix: String = token.chars().take(DISPLAY_PREFIX_LEN).collect();
+    let sql = db::q(
+        kind,
+        "INSERT INTO agent_tokens (user_id, name, token_hash, prefix) VALUES (?, ?, ?, ?)",
+    );
+    sqlx::query(&sql)
+        .bind(user_id)
+        .bind(name)
+        .bind(&hash)
+        .bind(&prefix)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(token)
+}
+
+/// Revoke a token by its plaintext.
+///
+/// Used to retire a session-scoped credential when its runtime exits, so a
+/// token that leaked from a stopped sandbox is already dead.
+pub async fn revoke_by_plaintext(pool: &Pool, kind: DbKind, token: &str) {
+    let sql = db::q(
+        kind,
+        &format!(
+            "UPDATE agent_tokens SET revoked = {} WHERE token_hash = ?",
+            match kind {
+                DbKind::Postgres => "TRUE",
+                _ => "1",
+            }
+        ),
+    );
+    let _ = sqlx::query(&sql)
+        .bind(auth::token_hash(token))
+        .execute(pool)
+        .await;
+}
+
 async fn create_token(
     Extension(installed): Extension<InstalledState>,
     Extension(user): Extension<CurrentUser>,
@@ -212,7 +262,7 @@ async fn create_token(
         .execute(&installed.pool)
         .await
     {
-        eprintln!("[agent-token] insert failed: {e}");
+        eprintln!("[agent-token] create endpoint insert failed: {e}");
         return (StatusCode::INTERNAL_SERVER_ERROR, "创建令牌失败").into_response();
     }
 

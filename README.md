@@ -265,6 +265,54 @@ Anthropic 拼 `/v1/messages`），因此网关额外暴露了
 `/api/proxy/openai/responses` 和 `/api/proxy/claude/v1/messages` 这两个别名，
 让未经改造的客户端可以直接指向 `/api/proxy/<protocol>`。
 
+## Agent 任务（云电脑 / 本地电脑）
+
+工作模式的任务由外部 Agent 运行时（`pi --mode rpc`）执行，而不再由服务端自己写思考循环。
+两种执行目标说的是**同一套 JSONL 协议**，因此“目标”只是传输层的差异：
+
+| target | 执行位置 | 接入方式 |
+| --- | --- | --- |
+| `cloud` | 本服务器分配的沙箱 | 服务端直接拉起子进程 |
+| `device` | 用户自己的电脑 | 桌面客户端主动连回并保持连接 |
+
+于是会话存储、事件广播、审批路由和计费只写一份，网页、桌面端和手机看到的是同一份记录。
+
+| 接口 | 说明 |
+| --- | --- |
+| `POST /api/agent/sessions` | 创建会话（`target` 为 `cloud` 或 `device`） |
+| `GET /api/agent/sessions` | 列出会话，`live` 表示当前是否挂着运行时 |
+| `POST /api/agent/sessions/{id}/start` | 启动运行时（仅 `cloud`），已启动时复用 |
+| `POST /api/agent/sessions/{id}/stop` | 停止运行时，不删记录 |
+| `GET /api/agent/sessions/{id}/events` | SSE 订阅；多端可同时订阅同一会话 |
+| `GET /api/agent/sessions/{id}/entries?since=<entry_id>` | 读取镜像的历史，`since` 为增量游标 |
+| `POST /api/agent/sessions/{id}/prompt` | 发消息；流式中需带 `streaming_behavior` |
+| `POST /api/agent/sessions/{id}/abort` | 中止当前轮次 |
+| `POST /api/agent/sessions/{id}/approve` | 应答审批对话框 |
+
+几个关键设计：
+
+- **订阅而非应答**。事件流是独立的订阅，不是某次 prompt 的响应。所以手机发指令、
+  网页看过程这种用法天然成立，刷新页面也不丢上下文。
+- **运行时持有权威会话树**，服务端在每次 `agent_settled` 时用 `get_entries {since}`
+  增量镜像到 `agent_entries`。`(session_id, entry_id)` 唯一索引使重连后的重叠拉取幂等。
+- **只有 `agent_settled` 算结束**，`agent_end` 之后还可能有自动重试、压缩重试和排队消息。
+- **审批广播到所有在线端，任一端批准即生效**；重复应答返回 409，避免两个设备
+  同时点“允许”时向运行时发两次答案。新订阅者会先收到待处理的审批请求，
+  不会看到一个原因不明的停顿。
+- **运行时拿不到上游 key**。子进程的 `models.json` 由 `model_pricing` 生成，
+  指向本站 `/api/proxy/*` 并带一个会话级 Agent 令牌（文件权限 `0600`）。
+- **重启后 `running` 会话重置为 `idle`**。活会话绑定在子进程或设备套接字上，
+  不可能跨重启存活；不重置的话那些会话会永远拒绝新消息。
+
+相关环境变量：
+
+| 环境变量 | 说明 |
+| --- | --- |
+| `YUNOVA_PI_BIN` | Agent 运行时可执行文件，默认 `pi` |
+| `YUNOVA_AGENT_GATEWAY_URL` | 运行时回调的网关地址；容器化后需填容器内可解析的地址 |
+
+旧的工蜂（`/api/worker/*`）仍然可用，与新链路并行，历史会话不受影响。
+
 ## 部署
 
 正式版本镜像 tag：`docker.yunnet.top/github/yiranxiaohui/yunova:X.Y.Z`。

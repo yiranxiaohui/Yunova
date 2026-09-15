@@ -1,4 +1,8 @@
 mod admin;
+mod agent_api;
+mod agent_driver;
+mod agent_rpc;
+mod agent_session;
 mod agent_token;
 mod auth;
 mod channels;
@@ -76,6 +80,11 @@ pub struct AppState {
     pub guest_proxy_limiter: std::sync::Arc<rate_limit::RateLimiter>,
     /// Online worker registry: worker_id -> handle with WS send channel.
     pub workers: crate::worker::WorkerRegistry,
+    /// Live agent sessions (`pi --mode rpc`) keyed by session id. In-memory
+    /// because a live session is bound to a child process or an open device
+    /// socket, neither of which survives a restart; durable state lives in
+    /// `agent_sessions` / `agent_entries`.
+    pub agent_sessions: crate::agent_session::SessionRegistry,
     /// Bounds CPU-heavy FFmpeg trim/merge work across all workflow runs.
     pub media_process_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// Human-in-the-loop approval map: call_id -> oneshot used by the agent
@@ -1238,6 +1247,7 @@ fn build_router(state: AppState) -> Router {
         .merge(settings::routes())
         .merge(profile::routes())
         .merge(admin::routes())
+        .merge(agent_api::routes())
         .merge(agent_token::routes())
         .merge(quota::user_routes())
         .merge(quota::admin_routes())
@@ -1376,6 +1386,7 @@ async fn main() {
             lim
         },
         workers: crate::worker::WorkerRegistry::new(),
+        agent_sessions: crate::agent_session::SessionRegistry::new(),
         media_process_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::runtime_env::var("YUNOVA_MEDIA_CONCURRENCY")
                 .ok()
@@ -1410,6 +1421,10 @@ async fn main() {
                 studio::cleanup_stale_jobs(&s.pool, s.kind).await;
                 workflows::recover(&s.pool, s.kind).await;
                 video_editor::recover(&s.pool, s.kind).await;
+                // A live agent session is bound to a child process or a device
+                // socket, so nothing survives a restart. Clear the `running`
+                // rows or those sessions would refuse new prompts forever.
+                agent_session::reset_running_sessions(&s.pool, s.kind).await;
                 *state.installed.write().await = Some(s.clone());
                 println!("  database: {} ({})", s.kind.as_str(), url);
             }

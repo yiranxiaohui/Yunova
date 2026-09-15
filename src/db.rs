@@ -107,6 +107,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (40, include_str!("../migrations/sqlite/0040_quota_in_cny.sql")),
     (41, include_str!("../migrations/sqlite/0041_message_reasoning.sql")),
     (42, include_str!("../migrations/sqlite/0042_agent_tokens.sql")),
+    (43, include_str!("../migrations/sqlite/0043_agent_sessions.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -151,6 +152,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (40, include_str!("../migrations/mysql/0040_quota_in_cny.sql")),
     (41, include_str!("../migrations/mysql/0041_message_reasoning.sql")),
     (42, include_str!("../migrations/mysql/0042_agent_tokens.sql")),
+    (43, include_str!("../migrations/mysql/0043_agent_sessions.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -195,6 +197,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (40, include_str!("../migrations/postgres/0040_quota_in_cny.sql")),
     (41, include_str!("../migrations/postgres/0041_message_reasoning.sql")),
     (42, include_str!("../migrations/postgres/0042_agent_tokens.sql")),
+    (43, include_str!("../migrations/postgres/0043_agent_sessions.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -783,6 +786,92 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, 0, "a deleted account must not keep usable credentials");
+
+        pool.close().await;
+    }
+
+    /// Migration 43 adds the target-agnostic session model. Two cascade
+    /// choices carry product meaning and must not drift:
+    /// removing a machine keeps its transcript readable, while removing the
+    /// account removes everything.
+    #[tokio::test]
+    async fn agent_session_migration_keeps_transcripts_when_a_device_is_removed() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+        pool.execute("PRAGMA foreign_keys = ON").await.unwrap();
+
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .await
+            .unwrap();
+        pool.execute(
+            "INSERT INTO agent_devices (id, user_id, name, token_hash) \
+             VALUES (1, 1, 'laptop', 'h1')",
+        )
+        .await
+        .unwrap();
+        pool.execute(
+            "INSERT INTO agent_sessions (id, user_id, target, device_id, title) \
+             VALUES (1, 1, 'device', 1, 't')",
+        )
+        .await
+        .unwrap();
+        pool.execute(
+            "INSERT INTO agent_entries (session_id, entry_id, kind, payload) \
+             VALUES (1, 'a1', 'message', '{}')",
+        )
+        .await
+        .unwrap();
+
+        // A session starts idle and without a cursor: nothing is mirrored yet.
+        let (status, cursor): (String, Option<String>) =
+            sqlx::query_as("SELECT status, cursor FROM agent_sessions WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "idle");
+        assert_eq!(cursor, None);
+
+        // Mirroring is idempotent: replaying an overlapping range after a
+        // reconnect must not duplicate an entry.
+        let dup = sqlx::query(
+            "INSERT INTO agent_entries (session_id, entry_id, kind, payload) \
+             VALUES (1, 'a1', 'message', '{}')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(dup.is_err(), "(session_id, entry_id) must be unique");
+
+        // Removing the machine must not destroy the user's history.
+        pool.execute("DELETE FROM agent_devices WHERE id = 1").await.unwrap();
+        let (device_id,): (Option<i64>,) =
+            sqlx::query_as("SELECT device_id FROM agent_sessions WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(device_id, None, "the session survives with no machine bound");
+        let (entries,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM agent_entries WHERE session_id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(entries, 1, "the transcript must remain readable");
+
+        // Removing the account removes its sessions and their entries.
+        pool.execute("DELETE FROM users WHERE id = 1").await.unwrap();
+        let (sessions,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agent_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (entries,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agent_entries")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((sessions, entries), (0, 0));
 
         pool.close().await;
     }
