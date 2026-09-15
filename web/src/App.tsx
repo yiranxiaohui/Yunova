@@ -32,6 +32,20 @@ function Loading() {
   )
 }
 
+/** Fallback for the work-mode chunk.
+ *
+ *  Switching modes is a state change from the user's point of view, so it must
+ *  not flash the branded app-launch screen: that reads as "the app restarted".
+ *  This keeps the shell's background and shows nothing but a quiet hint, and in
+ *  practice it is rarely seen at all because the switch prefetches the chunk. */
+function ModeLoading() {
+  return (
+    <div className="app-shell grid min-h-svh place-items-center bg-background text-muted-foreground">
+      <span className="text-xs tracking-[0.12em]">正在进入工作模式…</span>
+    </div>
+  )
+}
+
 function Protected({ children }: { children: React.ReactNode }) {
   const { state } = useAuth()
   if (state.status === "loading") return <Loading />
@@ -111,7 +125,9 @@ export default function App() {
               path="/t"
               element={
                 <Protected>
-                  <AgentTaskPage />
+                  <Suspense fallback={<ModeLoading />}>
+                    <AgentTaskPage />
+                  </Suspense>
                 </Protected>
               }
             />
@@ -119,7 +135,9 @@ export default function App() {
               path="/t/:id"
               element={
                 <Protected>
-                  <AgentTaskPage />
+                  <Suspense fallback={<ModeLoading />}>
+                    <AgentTaskPage />
+                  </Suspense>
                 </Protected>
               }
             />

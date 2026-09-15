@@ -28,6 +28,7 @@ import { searchApi, type SearchHit } from "@/lib/search"
 import { agentApi, type AgentSession, type AgentTarget } from "@/lib/agent"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
+import { prefetchWorkMode } from "@/lib/mode"
 import { useConfirm } from "@/lib/confirm-context"
 import { BrandMark } from "./BrandMark"
 import { ProfileDialog } from "./ProfileDialog"
@@ -298,7 +299,16 @@ export function Sidebar({
           variant="outline"
           className="h-10 w-full justify-start gap-2.5 rounded-xl px-3.5"
         >
-          <Link to="/t" onClick={() => onNavigate?.()} title="启动可执行命令的 Agent 任务">
+          <Link
+            to="/t"
+            onClick={() => onNavigate?.()}
+            // Same warming as the in-page switch, so whichever entry point the
+            // user takes, work mode does not open on a loading screen.
+            onPointerEnter={prefetchWorkMode}
+            onFocus={prefetchWorkMode}
+            viewTransition
+            title="启动可执行命令的 Agent 任务"
+          >
             <span className="grid size-6 place-items-center rounded-md bg-primary/10 text-primary">
               <Cloud className="size-4" />
             </span>

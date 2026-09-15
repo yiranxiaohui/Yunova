@@ -62,6 +62,12 @@ import { SettingsDialog } from "@/components/app/SettingsDialog"
 import { RechargeDialog } from "@/components/app/RechargeDialog"
 import { QuotaLedgerDialog } from "@/components/app/QuotaLedgerDialog"
 import { Sidebar } from "@/components/app/Sidebar"
+import { ModeSwitch } from "@/components/app/ModeSelector"
+import {
+  prefetchWorkModeWhenIdle,
+  readModeDraft,
+  useModeSwitch,
+} from "@/lib/mode"
 import { SystemPromptDialog } from "@/components/app/SystemPromptBar"
 import { PromptLibrary } from "@/components/app/PromptLibrary"
 import { SkillsDialog } from "@/components/app/SkillsDialog"
@@ -800,7 +806,9 @@ export default function ChatPage() {
   const [platformContextMap, setPlatformContextMap] = useState<Map<string, number>>(new Map())
   const [systemPrompt, setSystemPrompt] = useState("")
   const [loadingMessages, setLoadingMessages] = useState(false)
-  const [input, setInput] = useState("")
+  // Seeded from the prompt carried over from work mode: adopting it in an
+  // effect would render an empty box first and visibly retype the text.
+  const [input, setInput] = useState(readModeDraft)
   const [streaming, setStreaming] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [sidebarReload, setSidebarReload] = useState(0)
@@ -1094,6 +1102,16 @@ export default function ChatPage() {
     setShowJumpToBottom(false)
     bottomRef.current?.scrollIntoView({ behavior: "smooth" })
   }
+
+  // ── 对话 / 工作模式切换 ──
+  //
+  // The two modes are separate routes, so the switch has to carry the things
+  // the user would expect to survive a mere state change.
+  const switchMode = useModeSwitch("chat")
+
+  // Fetch the work-mode chunk while the user reads this page, so the first
+  // switch does not pay for a network round trip.
+  useEffect(() => prefetchWorkModeWhenIdle(), [])
 
   const configured =
     settings.chatMode === "platform"
@@ -1652,6 +1670,11 @@ export default function ChatPage() {
   }
 
   const lastIdx = messages.length - 1
+  // The large centred switch belongs to the empty state; the composer keeps a
+  // compact one for every other moment. Exactly one is mounted at a time, so
+  // the control never appears twice on the same screen.
+  const heroSwitch =
+    Boolean(user) && !loadingMessages && messages.length === 0 && configured
 
   return (
     <div className="app-shell flex h-svh bg-background text-foreground">
@@ -1859,6 +1882,21 @@ export default function ChatPage() {
                       : ""}
                   </p>
                 </div>
+                {/* The mode switch sits under the greeting, where the user is
+                    already deciding what this session will be. Offered only to
+                    signed-in users: work mode needs an account, and a control
+                    that bounces to the login page is not a switch.
+
+                    Hidden once the transcript exists, because a chat's mode is
+                    fixed by then — the toggle would imply the current thread
+                    could be converted. */}
+                {user && (
+                  <ModeSwitch
+                    mode="chat"
+                    size="lg"
+                    onModeChange={(m) => switchMode(m, input)}
+                  />
+                )}
                 <div className="grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2">
                   {SAMPLE_PROMPTS.map((p) => {
                     const Icon = p.icon
@@ -1964,6 +2002,9 @@ export default function ChatPage() {
         <div className="border-t border-border/40 bg-background/70 px-3 pb-3 pt-2.5 backdrop-blur-xl md:px-6 md:pb-4">
           <div className="mx-auto max-w-4xl">
             <div className="mb-2 flex flex-wrap items-center gap-2.5 px-1 text-sm">
+              {user && !heroSwitch && (
+                <ModeSwitch mode="chat" onModeChange={(m) => switchMode(m, input)} />
+              )}
               {(() => {
                 const limit =
                   (settings.chatMode === "platform"

@@ -361,6 +361,56 @@
   }
 }
 
+/* Chat ↔ work is a mode change that happens to be a route change. The
+ * default view transition slides the whole screen, which reads as navigation;
+ * a short cross-fade reads as the same screen changing state, which is what
+ * the switch promises. */
+::view-transition-old(root) {
+  animation: mode-fade-out 140ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+::view-transition-new(root) {
+  animation: mode-fade-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* The switch is lifted out of the page snapshot and matched by name across
+ * the two screens, so the browser morphs the one the user just tapped into
+ * the one on the destination instead of fading it out and drawing a second
+ * copy somewhere else. That continuity is what makes a route change feel
+ * like a toggle. Exactly one switch is mounted per screen, which the name
+ * requires: a duplicate would make the browser skip the transition. */
+.mode-switch {
+  view-transition-name: mode-switch;
+}
+
+@keyframes mode-fade-out {
+  to {
+    opacity: 0;
+  }
+}
+
+@keyframes mode-fade-in {
+  from {
+    opacity: 0;
+    transform: scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+  }
+
+  .mode-switch {
+    view-transition-name: none;
+  }
+}
+
 /* scrollbar: slim, theme-aware, applied globally */
 * {
   scrollbar-width: thin;

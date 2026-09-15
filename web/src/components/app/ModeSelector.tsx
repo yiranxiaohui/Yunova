@@ -8,20 +8,9 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import type { AgentTarget } from "@/lib/agent"
+import { prefetchWorkMode, type WorkMode } from "@/lib/mode"
 
-/**
- * Chat versus work is a real behavioural split, not a cosmetic one, so it is
- * surfaced as a mode rather than hidden in settings:
- *
- * - chat has no tools and bills tokens only; it stays on the existing
- *   `/api/chat` path, which is cheaper and needs no runtime.
- * - work starts an agent runtime that can run commands, so it additionally
- *   needs an execution target and an approval story.
- *
- * Presenting them as one continuum would mislead: picking "work" decides
- * *where code runs*, which the user must choose deliberately.
- */
-export type WorkMode = "chat" | "work"
+export type { WorkMode } from "@/lib/mode"
 
 export interface DeviceOption {
   id: number
@@ -29,89 +18,164 @@ export interface DeviceOption {
   online: boolean
 }
 
-export function ModeSelector({
+const MODES: Array<{
+  value: WorkMode
+  label: string
+  icon: React.ReactNode
+  hint: string
+}> = [
+  {
+    value: "chat",
+    label: "对话",
+    icon: <MessageSquare className="size-3.5" />,
+    hint: "直接提问、上传文件，只按 token 计费",
+  },
+  {
+    value: "work",
+    label: "工作",
+    icon: <Cloud className="size-3.5" />,
+    hint: "启动可执行命令的 Agent，需要选择运行位置",
+  },
+]
+
+/**
+ * The chat/work switch.
+ *
+ * One segmented control shared by both pages, because the switch is the only
+ * place the two modes meet: if each page drew its own toggle they would drift
+ * in position and size, and the change would read as a page jump rather than
+ * a state change.
+ *
+ * The moving part is a single absolutely-positioned thumb rather than a
+ * per-button background. Restyling two buttons makes the active half appear
+ * to blink at the new location; sliding one element makes the destination
+ * visible during the transition, which is what makes the control feel
+ * continuous even though a route change happens underneath.
+ */
+export function ModeSwitch({
   mode,
+  onModeChange,
+  size = "sm",
+  className,
+}: {
+  mode: WorkMode
+  onModeChange: (m: WorkMode) => void
+  /** `lg` for the empty-state hero, `sm` next to the composer. */
+  size?: "sm" | "lg"
+  className?: string
+}) {
+  const index = mode === "work" ? 1 : 0
+  const large = size === "lg"
+
+  return (
+    <div
+      role="tablist"
+      aria-label="模式"
+      aria-orientation="horizontal"
+      className={cn(
+        "mode-switch relative inline-grid grid-cols-2 rounded-full border border-border/70 bg-muted/50 p-1 shadow-sm backdrop-blur",
+        large && "w-[19rem] max-w-full",
+        className
+      )}
+    >
+      {/* The thumb is driven by a transform so the browser animates it on the
+          compositor; animating `left` would relayout the row on every frame
+          and stutter next to a streaming transcript. */}
+      <span
+        aria-hidden
+        className={cn(
+          "pointer-events-none absolute inset-y-1 left-1 w-[calc(50%-0.25rem)] rounded-full bg-background shadow-[0_2px_10px_-4px_color-mix(in_oklch,var(--foreground)_45%,transparent)] ring-1 ring-border/60",
+          "transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+        )}
+        style={{ transform: `translateX(${index * 100}%)` }}
+      />
+      {MODES.map((m) => {
+        const active = m.value === mode
+        return (
+          <button
+            key={m.value}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            // Roving focus: one stop for the pair, then arrows move within it,
+            // which is how a two-state switch is expected to behave.
+            tabIndex={active ? 0 : -1}
+            title={m.hint}
+            onClick={() => onModeChange(m.value)}
+            // Warm the work-mode chunk on intent rather than on click: by the
+            // time the pointer lands the code is usually already parsed, so
+            // the switch does not fall back to a loading screen.
+            onPointerEnter={() => {
+              if (m.value === "work") prefetchWorkMode()
+            }}
+            onFocus={() => {
+              if (m.value === "work") prefetchWorkMode()
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return
+              e.preventDefault()
+              onModeChange(mode === "chat" ? "work" : "chat")
+            }}
+            className={cn(
+              "tap-target-sm relative z-10 inline-flex items-center justify-center gap-1.5 rounded-full font-medium transition-colors duration-200",
+              large ? "px-6 py-2 text-sm" : "px-4 py-1.5 text-xs",
+              active
+                ? "text-foreground"
+                : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {m.icon}
+            {m.label}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+/**
+ * Work mode's control strip: the switch plus where the task runs.
+ *
+ * The switch stays live even inside a running task: leaving for chat is
+ * always allowed, because it starts a separate conversation and does not
+ * touch the task. Only the execution target locks once a session exists,
+ * since its runtime and transcript already belong to one machine.
+ */
+export function ModeSelector({
   onModeChange,
   target,
   onTargetChange,
   devices,
   deviceId,
   onDeviceChange,
-  disabled,
+  targetLocked,
+  /** Hidden when the page already shows the large empty-state switch, so the
+   *  control never appears twice on one screen. */
+  hideSwitch,
   className,
 }: {
-  mode: WorkMode
   onModeChange: (m: WorkMode) => void
   target: AgentTarget
   onTargetChange: (t: AgentTarget) => void
   devices: DeviceOption[]
   deviceId: number | null
   onDeviceChange: (id: number | null) => void
-  disabled?: boolean
+  targetLocked?: boolean
+  hideSwitch?: boolean
   className?: string
 }) {
   return (
     <div className={cn("flex flex-wrap items-center gap-2", className)}>
-      <div className="inline-flex rounded-lg border bg-muted/40 p-0.5">
-        <ModeTab
-          active={mode === "chat"}
-          disabled={disabled}
-          onClick={() => onModeChange("chat")}
-          icon={<MessageSquare className="size-3.5" />}
-          label="对话"
-        />
-        <ModeTab
-          active={mode === "work"}
-          disabled={disabled}
-          onClick={() => onModeChange("work")}
-          icon={<Cloud className="size-3.5" />}
-          label="工作"
-        />
-      </div>
-      {mode === "work" && (
-        <TargetPicker
-          target={target}
-          onTargetChange={onTargetChange}
-          devices={devices}
-          deviceId={deviceId}
-          onDeviceChange={onDeviceChange}
-          disabled={disabled}
-        />
-      )}
+      {!hideSwitch && <ModeSwitch mode="work" onModeChange={onModeChange} />}
+      <TargetPicker
+        target={target}
+        onTargetChange={onTargetChange}
+        devices={devices}
+        deviceId={deviceId}
+        onDeviceChange={onDeviceChange}
+        disabled={targetLocked}
+      />
     </div>
-  )
-}
-
-function ModeTab({
-  active,
-  disabled,
-  onClick,
-  icon,
-  label,
-}: {
-  active: boolean
-  disabled?: boolean
-  onClick: () => void
-  icon: React.ReactNode
-  label: string
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      aria-pressed={active}
-      className={cn(
-        "tap-target-sm inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
-        active
-          ? "bg-background text-foreground shadow-sm"
-          : "text-muted-foreground hover:text-foreground",
-        disabled && "pointer-events-none opacity-50"
-      )}
-    >
-      {icon}
-      {label}
-    </button>
   )
 }
 
@@ -156,7 +220,10 @@ function TargetPicker({
         }
       }}
     >
-      <SelectTrigger size="sm" className="tap-target-sm h-8 w-[10.5rem] text-xs">
+      <SelectTrigger
+        size="sm"
+        className="tap-target-sm h-8 w-[10.5rem] rounded-full text-xs"
+      >
         <SelectValue placeholder="选择执行位置" />
       </SelectTrigger>
       <SelectContent>

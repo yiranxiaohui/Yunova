@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
-import { Loader2, Menu, Laptop, Send, Square } from "lucide-react"
+import { Cloud, Loader2, Menu, Laptop, Send, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { Sidebar } from "@/components/app/Sidebar"
 import { AgentTranscript, ApprovalCard } from "@/components/app/AgentTranscript"
 import { DeviceDialog } from "@/components/app/DeviceDialog"
-import { ModeSelector, TargetBadge, type DeviceOption } from "@/components/app/ModeSelector"
+import {
+  ModeSelector,
+  ModeSwitch,
+  TargetBadge,
+  type DeviceOption,
+} from "@/components/app/ModeSelector"
+import { readModeDraft, useModeSwitch } from "@/lib/mode"
 import {
   agentApi,
   entriesToItems,
@@ -53,12 +59,21 @@ export default function AgentTaskPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [approvals, setApprovals] = useState<any[]>([])
   const [answering, setAnswering] = useState(false)
-  const [input, setInput] = useState("")
+  // Seeded from the prompt carried over from chat mode, and only on the
+  // compose route: dropping unrelated text in front of a live agent would be
+  // worse than losing it. Seeded rather than adopted in an effect so the
+  // composer never renders empty and then visibly fills itself in.
+  const [input, setInput] = useState(() =>
+    sessionId == null ? readModeDraft() : ""
+  )
   const [target, setTarget] = useState<AgentTarget>("cloud")
   const [deviceId, setDeviceId] = useState<number | null>(null)
   const [devices, setDevices] = useState<DeviceOption[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [devicesOpen, setDevicesOpen] = useState(false)
+
+  // ── 对话 / 工作模式切换 ──
+  const switchMode = useModeSwitch("work")
 
   const bottomRef = useRef<HTMLDivElement>(null)
   // Latest mirrored entry id, used as the incremental cursor.
@@ -344,8 +359,7 @@ export default function AgentTaskPage() {
     [sessionId]
   )
 
-  const stop = useCallback(async () => {
-    if (sessionId == null) return
+  const stop = useCallback(async () => {    if (sessionId == null) return
     try {
       await agentApi.abort(sessionId)
       setRunning(false)
@@ -354,9 +368,16 @@ export default function AgentTaskPage() {
     }
   }, [sessionId])
 
+  // Exactly one switch on screen: the large one in the empty state, otherwise
+  // the compact one in the composer strip.
+  const heroSwitch = sessionId == null && items.length === 0
+
   const header = useMemo(
     () => (
-      <div className="safe-top flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
+      // Same height and treatment as chat's header (`min-h-16`), so the
+      // content below — including the mode switch — starts at the same y on
+      // both screens and the switch does not jump when modes change.
+      <div className="safe-top relative z-30 flex min-h-16 flex-wrap items-center gap-2 border-b border-border/60 bg-background/65 px-2.5 py-2.5 backdrop-blur-xl md:px-6">
         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
           <SheetTrigger asChild>
             <Button variant="ghost" size="icon-sm" className="tap-target md:hidden">
@@ -391,7 +412,10 @@ export default function AgentTaskPage() {
   )
 
   return (
-    <div className="app-shell flex min-h-svh">
+    // `h-svh` rather than `min-h-svh`: the composer is bottom-anchored, so a
+    // growing page would push it past the viewport instead of scrolling the
+    // transcript. Matches chat, which is why the two screens line up.
+    <div className="app-shell flex h-svh bg-background text-foreground">
       {/* Sidebar sets its own 18rem width; the wrapper must match or the
           main column starts underneath it. */}
       <aside className="hidden shrink-0 md:block">
@@ -401,14 +425,38 @@ export default function AgentTaskPage() {
       <main className="flex min-w-0 flex-1 flex-col">
         {header}
 
-        <div className="flex-1 overflow-y-auto px-4 py-4">
-          <div className="mx-auto w-full max-w-3xl space-y-3">
+        <div className="nc-scroll flex-1 overflow-y-auto px-3 py-5 md:px-6 md:py-8">
+          <div className="mx-auto w-full max-w-4xl space-y-3">
             {sessionId == null && items.length === 0 && (
-              <div className="py-16 text-center">
-                <h1 className="text-2xl font-semibold">今天有什么工作要处理？</h1>
-                <p className="mt-2 text-sm text-muted-foreground">
-                  工作模式会启动一个能执行命令的 Agent，请选择它运行的位置。
-                </p>
+              <div className="fade-up mx-auto mt-8 flex w-full max-w-2xl flex-col items-center gap-7 text-center md:mt-14">
+                {/* Same hero skeleton as chat's empty state — mark, heading,
+                    switch — so the switch lands in the same place on screen
+                    before and after the route change. Shifting it by a hundred
+                    pixels is what made the toggle feel like a page load. */}
+                <div className="relative">
+                  <div className="absolute inset-2 rounded-3xl bg-primary/30 blur-2xl" />
+                  <img
+                    src="/logo.png"
+                    alt=""
+                    className="relative size-16 rounded-[1.35rem] ring-1 ring-white/15 shadow-panel md:size-[4.5rem]"
+                  />
+                </div>
+                <div>
+                  <div className="mb-3 inline-flex items-center gap-1.5 rounded-full border border-primary/15 bg-primary/5 px-3 py-1 text-[11px] font-medium text-primary">
+                    <Cloud className="size-3" /> Yunova 工作 Agent
+                  </div>
+                  <p className="text-2xl font-semibold tracking-[-0.035em] md:text-3xl">
+                    今天有什么工作要处理？
+                  </p>
+                  <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">
+                    工作模式会启动一个能执行命令的 Agent，请先选择它运行的位置。
+                  </p>
+                </div>
+                <ModeSwitch
+                  mode="work"
+                  size="lg"
+                  onModeChange={(m) => switchMode(m, input)}
+                />
               </div>
             )}
 
@@ -436,22 +484,18 @@ export default function AgentTaskPage() {
         {/* `safe-bottom` keeps the composer clear of the home indicator; a
             bottom-anchored control would otherwise be partly untappable in
             the packaged app. */}
-        <div className="safe-bottom border-t px-4 py-3">
-          <div className="mx-auto w-full max-w-3xl space-y-2">
-            {/* The target cannot change once a session exists: its runtime and
-                transcript already belong to one machine. */}
+        <div className="safe-bottom border-t border-border/40 bg-background/70 px-3 pb-3 pt-2.5 backdrop-blur-xl md:px-6 md:pb-4">
+          <div className="mx-auto w-full max-w-4xl space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <ModeSelector
-                mode="work"
-                onModeChange={(m) => {
-                  if (m === "chat") nav("/")
-                }}
+                onModeChange={(m) => switchMode(m, input)}
                 target={session?.target ?? target}
                 onTargetChange={setTarget}
                 devices={devices}
                 deviceId={deviceId}
                 onDeviceChange={setDeviceId}
-                disabled={sessionId != null}
+                targetLocked={sessionId != null}
+                hideSwitch={heroSwitch}
               />
               {/* Pairing lives next to the picker: "no local computers" is
                   only actionable if the fix is one click away. */}
