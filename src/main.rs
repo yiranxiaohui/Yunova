@@ -7,6 +7,7 @@ mod email;
 mod images;
 mod invites;
 mod net_guard;
+mod newapi_sync;
 mod payments;
 mod profile;
 mod prompts;

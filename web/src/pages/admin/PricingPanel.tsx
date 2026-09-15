@@ -3,6 +3,7 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
+  CloudDownload,
   CircleAlert,
   LoaderCircle,
   Pencil,
@@ -46,6 +47,7 @@ import {
   type PricingInput,
   type VideoSizeRule,
 } from "@/lib/channels"
+import { NewApiImportDialog } from "./NewApiImportDialog"
 import {
   adminQuotaApi,
   formatQuota,
@@ -155,6 +157,7 @@ export function PricingPanel() {
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState("")
   const [dialog, setDialog] = useState<DialogMode>(null)
+  const [importOpen, setImportOpen] = useState(false)
 
   async function load() {
     setLoading(true)
@@ -249,6 +252,14 @@ export function PricingPanel() {
         </Button>
         <Button size="sm" onClick={() => setDialog({ kind: "create" })}>
           <Plus /> 新建模型
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => setImportOpen(true)}
+          title="从 NewAPI 站点批量导入模型价格"
+        >
+          <CloudDownload /> 从 NewAPI 导入
         </Button>
         <span className="ml-auto text-xs text-muted-foreground">
           共 {rows.length} 条
@@ -366,6 +377,12 @@ export function PricingPanel() {
           }}
         />
       )}
+
+      <NewApiImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={load}
+      />
     </div>
   )
 }

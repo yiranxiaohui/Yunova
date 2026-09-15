@@ -1107,6 +1107,11 @@ async fn admin_delete_pricing(
     }
 }
 
+/// Protocol validation for callers outside this module (pricing import).
+pub fn validate_protocol_public(protocol: &str) -> Result<(), String> {
+    validate_protocol(protocol)
+}
+
 fn validate_protocol(protocol: &str) -> Result<(), String> {
     if !matches!(protocol, "openai" | "claude" | "gemini") {
         return Err("protocol must be openai/claude/gemini".into());
@@ -1135,6 +1140,10 @@ pub fn admin_routes() -> Router<AppState> {
         )
         .route("/admin/channels/all-models", get(admin_list_all_channel_models))
         .route("/admin/pricing", get(admin_list_pricing).post(admin_upsert_pricing))
+        .route(
+            "/admin/pricing/sync-newapi",
+            axum::routing::post(crate::newapi_sync::admin_sync_pricing),
+        )
         .route("/admin/pricing/{model}", delete(admin_delete_pricing))
         .route_layer(middleware::from_fn(admin::require_admin))
 }

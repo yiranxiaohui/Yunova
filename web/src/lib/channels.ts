@@ -115,6 +115,48 @@ export type PricingInput = {
   size_rules?: VideoSizeRule[] | null
 }
 
+/**
+ * 从 NewAPI 站点的 `/api/pricing` 导入模型价格。
+ * NewAPI 以倍率存价（1 倍率 = $0.002/1K tokens），后端换算成微美元后入库，
+ * 与手工录入的价格完全等价。
+ */
+export type NewApiSyncRequest = {
+  base_url: string
+  protocol?: ChannelProtocol
+  channel_ids?: number[]
+  /** 只导入该 NewAPI 分组开放的模型；留空表示全部 */
+  group?: string
+  /** 预演：返回将要写入的结果但不落库 */
+  dry_run?: boolean
+  /** 覆盖已存在的模型价格；默认跳过，避免冲掉手工调整 */
+  overwrite_existing?: boolean
+  /** 导入后直接启用；默认导入为停用，便于先复核再开放 */
+  enable_imported?: boolean
+}
+
+export type NewApiSyncedModel = {
+  model: string
+  kind: ChannelKind
+  input_price: number
+  output_price: number
+  cached_input_price: number | null
+  per_call_price: number
+  existed: boolean
+  applied: boolean
+}
+
+export type NewApiSyncResult = {
+  dry_run: boolean
+  fetched: number
+  imported: number
+  updated: number
+  skipped_existing: number
+  /** 上游计费方式与本站不兼容、已跳过的模型数（详见 warnings） */
+  skipped_unsupported: number
+  models: NewApiSyncedModel[]
+  warnings: string[]
+}
+
 export type AllChannelModel = {
   model: string
   /** channels that advertise this model — function is chosen in model pricing */
@@ -219,6 +261,16 @@ export const channelsAdminApi = {
     await okOrThrow(
       await fetch(`/api/admin/pricing/${encodeURIComponent(model)}`, {
         method: "DELETE",
+        credentials: "same-origin",
+      })
+    )
+  },
+  async syncNewApiPricing(req: NewApiSyncRequest): Promise<NewApiSyncResult> {
+    return jsonOrThrow(
+      await fetch("/api/admin/pricing/sync-newapi", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
         credentials: "same-origin",
       })
     )

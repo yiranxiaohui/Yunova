@@ -66,10 +66,32 @@ POST /api/proxy/openai {model:"gpt-5",...}
 ### 后台管理
 
 `Admin → Channels`：CRUD 渠道、启用/停用、绑定 model 列表（每行 `model` 或 `model=client_model=upstream_id`）。
-`Admin → Pricing`：CRUD model 白名单 + 官方美元单价（录入时实时预览折算后的额度）。
+`Admin → Pricing`：CRUD model 白名单 + 官方美元单价（录入时实时预览折算后的额度），
+或点「从 NewAPI 导入」批量拉取上游价格（见下）。
 `Admin → 设置 → 额度换算`：调整 `quota_per_usd`、全局加价倍率、注册与邀请赠送额度。
 
 旧的「Shared Backend」面板与 KV (`shared_chat_openai_*` 等) 暂时保留只用于历史 seed，新链路不再读它们。
+
+### 从 NewAPI 导入价格
+
+若上游是 NewAPI / One-API 系的中转站，可直接读它的 `GET /api/pricing`，免去逐个录价：
+
+- **倍率换算**：NewAPI 以倍率存价，源码锚定 `1 === $0.002/1K tokens`，即
+  `输入 $/1M = model_ratio × 2`、`输出 = model_ratio × completion_ratio × 2`、
+  `缓存 = 输入 × cache_ratio`；`quota_type=1` 时改用 `model_price`（已是美元）。
+  换算后统一落成微美元，和手工录入的价格完全等价。
+  顺带一提，NewAPI 的 `QuotaPerUnit = 500000` 与本站 `quota_per_usd` 默认值天然一致。
+- **不兼容的计费方式会被跳过而不是按 0 导入**：上游「按次计费的对话模型」和
+  「按 token 计费的图像模型」在本站没有对应计费模式，若强行导入会变成免费，
+  因此只报告原因、不写库，由管理员手动定价。
+- **默认停用 + 默认不覆盖**：导入的模型默认 `enabled=false`，便于复核后再开放；
+  已存在的模型默认跳过，避免冲掉手工调整过的价格（勾选「覆盖」才更新）。
+- **先预演再写入**：`dry_run` 返回与实际导入完全一致的结果，可先看清将要写什么。
+- 可按 NewAPI 分组过滤，并一次性绑定到指定渠道。
+
+接口：`POST /api/admin/pricing/sync-newapi`
+`{base_url, group?, channel_ids?, dry_run?, overwrite_existing?, enable_imported?}`。
+管理员提供的 URL 会走 SSRF 防护，无法用于探测内网。
 
 ## 三库并行 migration
 
