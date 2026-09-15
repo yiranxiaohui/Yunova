@@ -106,6 +106,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (39, include_str!("../migrations/sqlite/0039_disable_unpriced_chat_models.sql")),
     (40, include_str!("../migrations/sqlite/0040_quota_in_cny.sql")),
     (41, include_str!("../migrations/sqlite/0041_message_reasoning.sql")),
+    (42, include_str!("../migrations/sqlite/0042_agent_tokens.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -149,6 +150,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (39, include_str!("../migrations/mysql/0039_disable_unpriced_chat_models.sql")),
     (40, include_str!("../migrations/mysql/0040_quota_in_cny.sql")),
     (41, include_str!("../migrations/mysql/0041_message_reasoning.sql")),
+    (42, include_str!("../migrations/mysql/0042_agent_tokens.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -192,6 +194,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (39, include_str!("../migrations/postgres/0039_disable_unpriced_chat_models.sql")),
     (40, include_str!("../migrations/postgres/0040_quota_in_cny.sql")),
     (41, include_str!("../migrations/postgres/0041_message_reasoning.sql")),
+    (42, include_str!("../migrations/postgres/0042_agent_tokens.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -720,6 +723,66 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((reasoning.as_str(), ms), ("let me think", 1200));
+
+        pool.close().await;
+    }
+
+    /// Agent tokens are bearer credentials usable from outside the browser, so
+    /// migration 42 must create them hash-only and tie them to the account:
+    /// deleting a user has to take their agent credentials with it, otherwise
+    /// a closed account could still spend quota through the chat gateway.
+    #[tokio::test]
+    async fn agent_token_migration_stores_hashes_and_cascades_on_user_delete() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+        pool.execute("PRAGMA foreign_keys = ON").await.unwrap();
+
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_tokens (user_id, name, token_hash, prefix) VALUES (?, ?, ?, ?)",
+        )
+        .bind(1_i64)
+        .bind("laptop")
+        .bind("deadbeef")
+        .bind("yna_dead")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // New tokens are live by default; nothing stores the plaintext.
+        let (revoked,): (i64,) =
+            sqlx::query_as("SELECT revoked FROM agent_tokens WHERE token_hash = 'deadbeef'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(revoked, 0);
+
+        // The same hash must not be insertable twice: a duplicate would make
+        // one plaintext resolve to two accounts.
+        let dup = sqlx::query(
+            "INSERT INTO agent_tokens (user_id, name, token_hash, prefix) VALUES (?, ?, ?, ?)",
+        )
+        .bind(1_i64)
+        .bind("other")
+        .bind("deadbeef")
+        .bind("yna_dead")
+        .execute(&pool)
+        .await;
+        assert!(dup.is_err(), "token_hash must be unique");
+
+        pool.execute("DELETE FROM users WHERE id = 1").await.unwrap();
+        let (left,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agent_tokens")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "a deleted account must not keep usable credentials");
 
         pool.close().await;
     }

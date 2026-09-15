@@ -211,6 +211,60 @@ Yunova 会代理读取并保留原有 `/api/images/...`、`/api/videos/...` 地�
 Range 播放。启用后新图片、视频和头像只写入 S3；切换前的本地媒体仍可回退读取，
 但不会自动上传或删除。普通聊天文档附件仍保存在本地 `files/` 目录。
 
+## Agent 令牌（外部 Agent 运行时接入）
+
+浏览器之外的 Agent 运行时——桌面客户端里内嵌的 `pi`、云沙箱容器里的 `pi`——
+需要访问平台的模型网关，但它既没有 `nc_session` cookie，也**不能**拿到管理员
+配置的上游渠道 key（那会绕过模型白名单、渠道 fallback 和 token 计量，
+并把管理员的 key 放到用户自己的机器上）。
+
+Agent 令牌是为此提供的 bearer 凭据：只绑定一个用户，数据库里只存 SHA-256
+哈希，明文仅在创建时返回一次。它解析出的用户与 cookie 路径完全一致，因此
+现有的「白名单 → 授权 → 按 token 计费」链路一行都不用改。
+
+| 接口 | 说明 |
+| --- | --- |
+| `GET /api/agent/tokens` | 列出本人令牌（只返回前缀，不回显明文） |
+| `POST /api/agent/tokens` | 创建令牌，响应中的 `token` 是唯一一次明文 |
+| `DELETE /api/agent/tokens/{id}` | 撤销（保留记录以便追溯，不物理删除） |
+| `POST /api/agent/runtime-config` | 生成运行时用的 `models.json` |
+
+令牌以 `yna_` 开头，可通过 `Authorization: Bearer`、`x-api-key` 或
+`x-goog-api-key` 提交——`pi` 会按 provider 的 `api` 类型选择请求头。用户自己的
+上游 key（BYOK）不带这个前缀，因此不会被误认成 Agent 令牌，BYOK 仍然完全绕过
+平台计费。
+
+`POST /api/agent/runtime-config` 按 `model_pricing` 生成配置，所以运行时只能
+看到管理员已启用并定价的模型，`baseUrl` 指向本站的 `/api/proxy/*` 而不是真实
+上游：
+
+```bash
+curl -X POST https://yunnet.top/api/agent/runtime-config \
+  -H 'content-type: application/json' \
+  -d '{"base_url":"https://yunnet.top","token":"yna_..."}' \
+  > ~/.pi/agent/models.json
+```
+
+生成的 provider 形如：
+
+```json
+{
+  "providers": {
+    "yunova-claude": {
+      "baseUrl": "https://yunnet.top/api/proxy/claude",
+      "api": "anthropic-messages",
+      "apiKey": "yna_...",
+      "models": [{ "id": "claude-opus-4-5", "contextWindow": 200000 }]
+    }
+  }
+}
+```
+
+运行时的 SDK 会自己在 `baseUrl` 后拼接厂商的固定路径（OpenAI 拼 `/responses`，
+Anthropic 拼 `/v1/messages`），因此网关额外暴露了
+`/api/proxy/openai/responses` 和 `/api/proxy/claude/v1/messages` 这两个别名，
+让未经改造的客户端可以直接指向 `/api/proxy/<protocol>`。
+
 ## 部署
 
 正式版本镜像 tag：`docker.yunnet.top/github/yiranxiaohui/yunova:X.Y.Z`。

@@ -1,4 +1,5 @@
 mod admin;
+mod agent_token;
 mod auth;
 mod channels;
 mod conversations;
@@ -538,6 +539,12 @@ async fn require_auth(
 /// still allowing anonymous requests through. Used only by BYOK proxy routes:
 /// anonymous callers may forward their own upstream credentials, but shared
 /// platform channels remain account-only.
+///
+/// Also accepts an agent token (`Authorization: Bearer yna_…`, `x-api-key`,
+/// `x-goog-api-key`). That is how a headless agent runtime — pi in the desktop
+/// client or in a cloud sandbox — authenticates: it has no cookie jar, and
+/// giving it an upstream provider key instead would bypass the model whitelist
+/// and token metering this proxy enforces.
 async fn optional_auth(
     State(state): State<AppState>,
     jar: CookieJar,
@@ -552,6 +559,14 @@ async fn optional_auth(
     if let Some(c) = jar.get(auth::SESSION_COOKIE)
         && let Some((id, _)) =
             auth::user_for_token(&installed.pool, installed.kind, c.value()).await
+    {
+        req.extensions_mut().insert(CurrentUser { id });
+        authenticated = true;
+    }
+    if !authenticated
+        && let Some(token) = agent_token::token_from_headers(req.headers())
+        && let Some(id) =
+            agent_token::user_for_token(&installed.pool, installed.kind, &token).await
     {
         req.extensions_mut().insert(CurrentUser { id });
         authenticated = true;
@@ -1223,6 +1238,7 @@ fn build_router(state: AppState) -> Router {
         .merge(settings::routes())
         .merge(profile::routes())
         .merge(admin::routes())
+        .merge(agent_token::routes())
         .merge(quota::user_routes())
         .merge(quota::admin_routes())
         .merge(channels::admin_routes())
@@ -1246,6 +1262,15 @@ fn build_router(state: AppState) -> Router {
         .route("/proxy/openai/models", get(proxy_openai_models))
         .route("/proxy/claude/models", get(proxy_claude_models))
         .route("/proxy/gemini/models", get(proxy_gemini_models))
+        // Path aliases for SDK-shaped agent runtimes. The browser posts the
+        // bare endpoint above, but an SDK client is given only a `baseUrl` and
+        // appends the vendor's canonical path itself: the OpenAI SDK posts
+        // `<baseUrl>/responses`, the Anthropic SDK `<baseUrl>/v1/messages`.
+        // Exposing those shapes lets pi point at `/api/proxy/<protocol>`
+        // unmodified instead of requiring a patched client.
+        .route("/proxy/openai/responses", post(proxy_openai))
+        .route("/proxy/claude/v1/messages", post(proxy_claude))
+        .route("/proxy/claude/v1/models", get(proxy_claude_models))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth));
 
     let public = Router::new()
