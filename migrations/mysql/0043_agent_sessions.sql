@@ -10,7 +10,7 @@
 -- A registered execution endpoint owned by a user. `kind='cloud'` is a sandbox
 -- this server allocates; `kind='device'` is the user's own machine running the
 -- desktop client, which dials in and holds the socket open (NAT-friendly, the
--- same reason the legacy worker did it this way).
+-- NAT-friendly: the machine needs no reachable address).
 CREATE TABLE agent_devices (
     id            BIGINT NOT NULL AUTO_INCREMENT PRIMARY KEY,
     user_id       BIGINT NOT NULL,

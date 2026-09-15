@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom"
 import {
   BookMarked,
-  Bot,
   Clapperboard,
   ImageIcon,
   Library,
@@ -26,7 +25,6 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { conversationsApi, type Conversation } from "@/lib/conversations"
 import { searchApi, type SearchHit } from "@/lib/search"
-import { workerApi, type WorkerSession } from "@/lib/worker"
 import { agentApi, type AgentSession, type AgentTarget } from "@/lib/agent"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
@@ -48,7 +46,6 @@ type Props = {
 
 type SidebarItem =
   | { kind: "chat"; id: number; title: string; updated_at: string }
-  | { kind: "worker"; id: number; title: string; updated_at: string }
   | { kind: "agent"; id: number; title: string; updated_at: string; target: AgentTarget }
 
 function relativeTime(iso: string): string {
@@ -81,7 +78,6 @@ export function Sidebar({
   const { id: paramId } = useParams()
   const activeId = paramId ? Number(paramId) : null
   const location = useLocation()
-  const activeWorker = location.pathname.startsWith("/w/")
   const activeAgent = location.pathname.startsWith("/t/")
   const nav = useNavigate()
   const auth = useAuth()
@@ -113,10 +109,9 @@ export function Sidebar({
     setLoading(true)
     Promise.all([
       conversationsApi.list().catch(() => [] as Conversation[]),
-      workerApi.sessions().catch(() => [] as WorkerSession[]),
       agentApi.sessions().catch(() => [] as AgentSession[]),
     ])
-      .then(([convs, sessions, agents]) => {
+      .then(([convs, agents]) => {
         if (cancelled) return
         const merged: SidebarItem[] = [
           ...convs.map((c) => ({
@@ -124,12 +119,6 @@ export function Sidebar({
             id: c.id,
             title: c.title,
             updated_at: c.updated_at,
-          })),
-          ...sessions.map((s) => ({
-            kind: "worker" as const,
-            id: s.id,
-            title: s.title,
-            updated_at: s.updated_at,
           })),
           ...agents.map((s) => ({
             kind: "agent" as const,
@@ -224,9 +213,7 @@ export function Sidebar({
     const title = next.trim()
     if (!title || title === c.title) return
     try {
-      if (c.kind === "worker") {
-        await workerApi.renameSession(c.id, title)
-      } else if (c.kind === "agent") {
+      if (c.kind === "agent") {
         // Agent tasks have no rename endpoint yet; their title comes from the
         // first prompt. Skip rather than show a misleading success.
         setError("工作任务暂不支持重命名")
@@ -251,9 +238,7 @@ export function Sidebar({
     })
     if (!ok) return
     try {
-      if (c.kind === "worker") {
-        await workerApi.removeSession(c.id)
-      } else if (c.kind === "agent") {
+      if (c.kind === "agent") {
         // Stopping releases the runtime and its container. The transcript is
         // kept: there is no delete endpoint yet, and silently dropping the
         // row from the list would hide work the user can still open.
@@ -264,12 +249,8 @@ export function Sidebar({
         await conversationsApi.remove(c.id)
       }
       setItems((s) => s.filter((x) => !(x.kind === c.kind && x.id === c.id)))
-      // `agent` returned above, so only chat and worker reach here.
-      const isActive =
-        c.kind === "worker"
-          ? activeWorker && activeId === c.id
-          : !activeWorker && !activeAgent && activeId === c.id
-      if (isActive) nav("/")
+      // `agent` returned above, so only chat reaches here.
+      if (!activeAgent && activeId === c.id) nav("/")
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
@@ -429,11 +410,9 @@ export function Sidebar({
         <ul className="flex flex-col gap-1">
           {filtered.map((c) => {
             const active =
-              activeWorker
-                ? c.kind === "worker" && activeId === c.id
-                : activeAgent
-                  ? c.kind === "agent" && activeId === c.id
-                  : c.kind === "chat" && activeId === c.id
+              activeAgent
+                ? c.kind === "agent" && activeId === c.id
+                : c.kind === "chat" && activeId === c.id
             const itemKey = `${c.kind}-${c.id}`
             return (
               <li key={itemKey} className="relative">
@@ -449,13 +428,7 @@ export function Sidebar({
                     <span className="absolute left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-sidebar-primary" />
                   )}
                   <Link
-                    to={
-                      c.kind === "worker"
-                        ? `/w/${c.id}`
-                        : c.kind === "agent"
-                          ? `/t/${c.id}`
-                          : `/c/${c.id}`
-                    }
+                    to={c.kind === "agent" ? `/t/${c.id}` : `/c/${c.id}`}
                     className="min-w-0 flex-1 px-3 py-2.5"
                     title={c.title}
                     onClick={() => {
@@ -464,9 +437,6 @@ export function Sidebar({
                     }}
                   >
                     <div className="flex items-center gap-1.5 truncate text-[13px] font-medium">
-                      {c.kind === "worker" && (
-                        <Bot className="size-3.5 shrink-0 text-primary" />
-                      )}
                       {c.kind === "agent" &&
                         (c.target === "cloud" ? (
                           <Cloud className="size-3.5 shrink-0 text-primary" />

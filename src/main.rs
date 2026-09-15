@@ -31,7 +31,6 @@ mod studio;
 mod usage;
 mod video_editor;
 mod videos;
-mod worker;
 mod workflows;
 
 use axum::{
@@ -80,8 +79,6 @@ pub struct AppState {
     /// Per-IP limiter for anonymous BYOK proxy traffic. Authenticated users
     /// keep the existing unrestricted proxy behavior.
     pub guest_proxy_limiter: std::sync::Arc<rate_limit::RateLimiter>,
-    /// Online worker registry: worker_id -> handle with WS send channel.
-    pub workers: crate::worker::WorkerRegistry,
     /// Live agent sessions (`pi --mode rpc`) keyed by session id. In-memory
     /// because a live session is bound to a child process or an open device
     /// socket, neither of which survives a restart; durable state lives in
@@ -105,9 +102,6 @@ pub struct AppState {
     >,
     /// Bounds CPU-heavy FFmpeg trim/merge work across all workflow runs.
     pub media_process_slots: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Human-in-the-loop approval map: call_id -> oneshot used by the agent
-    /// loop to pause on shell/write_file until the user approves via REST.
-    pub approvals: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, tokio::sync::oneshot::Sender<bool>>>>,
 }
 
 #[derive(Clone)]
@@ -1282,7 +1276,6 @@ fn build_router(state: AppState) -> Router {
         .merge(invites::routes())
         .merge(search::routes())
         .merge(sharing::user_routes())
-        .merge(worker::routes())
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
 
     let proxy = Router::new()
@@ -1315,7 +1308,6 @@ fn build_router(state: AppState) -> Router {
         .merge(setup::routes())
         .merge(images::public_routes())
         .merge(sharing::public_routes())
-        .merge(worker::public_routes())
         .merge(agent_device::public_routes())
         .merge(videos::public_routes())
         .merge(video_editor::public_routes());
@@ -1406,7 +1398,6 @@ async fn main() {
             });
             lim
         },
-        workers: crate::worker::WorkerRegistry::new(),
         agent_sessions: crate::agent_session::SessionRegistry::new(),
         agent_devices: crate::agent_device::DeviceRegistry::new(),
         agent_device_frames: Default::default(),
@@ -1417,7 +1408,6 @@ async fn main() {
                 .unwrap_or(2)
                 .clamp(1, 8),
         )),
-        approvals: Default::default(),
     };
 
     let effective_url = match env_url {

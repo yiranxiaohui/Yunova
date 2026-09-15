@@ -1,14 +1,14 @@
 # Yunova
 
 Yunova 是基于 Rust Axum + React 的自托管 Agent 整合平台，将多模型对话、
-工蜂工具执行、图片与视频创作、媒体剪辑和工作流放在统一工作空间中，内置按 token 计费的额度体系。
+Agent 任务执行、图片与视频创作、媒体剪辑和工作流放在统一工作空间中，内置按 token 计费的额度体系。
 
 源码仓库：[yiranxiaohui/Yunova](https://github.com/yiranxiaohui/Yunova)。
 
 ## 从旧版本升级
 
-项目品牌由 NovaChat 更名为 Yunova，服务端程序名为 `yunova`，工蜂程序名为
-`yunova-worker`，镜像为 `ghcr.io/yiranxiaohui/yunova`。旧 GitHub 仓库地址会重定向，
+项目品牌由 NovaChat 更名为 Yunova，服务端程序名为 `yunova`，
+镜像为 `ghcr.io/yiranxiaohui/yunova`。旧 GitHub 仓库地址会重定向，
 建议将 Git remote 更新为 `git@github.com:yiranxiaohui/Yunova.git`。
 
 - 新配置使用 `YUNOVA_*` 环境变量，仍兼容对应的 `NOVACHAT_*` 旧名称；同时设置时新名称优先。
@@ -442,7 +442,8 @@ export default function (pi: ExtensionAPI) {
 | `YUNOVA_PI_BIN` | Agent 运行时可执行文件，默认 `pi` |
 | `YUNOVA_AGENT_GATEWAY_URL` | 运行时回调的网关地址；容器化后需填容器内可解析的地址 |
 
-旧的工蜂（`/api/worker/*`）仍然可用，与新链路并行，历史会话不受影响。
+旧的工蜂（`/api/worker/*`）已下线，其数据表由 migration 44 删除；远程执行全部由
+上述 Agent 任务链路接管。已发生的额度流水仍保留在额度明细里。
 
 ## 云电脑沙箱
 
@@ -506,7 +507,7 @@ docker build -f docker/sandbox.Dockerfile -t yunova-sandbox:latest .
 正式版本镜像 tag：`docker.yunnet.top/github/yiranxiaohui/yunova:X.Y.Z`。
 
 - push `main` → GitHub Actions 构建开发镜像
-- push `vX.Y.Z` → GitHub Actions 构建正式镜像与 Worker 多平台附件
+- push `vX.Y.Z` → GitHub Actions 构建正式镜像
 - 两个发布工作流成功后，由 Codex 从可信服务器 SSH 部署生产环境
 - migration 在容器启动时自动跑
 - 默认版本策略只递增最后一位：`vX.Y.Z` → `vX.Y.(Z+1)`

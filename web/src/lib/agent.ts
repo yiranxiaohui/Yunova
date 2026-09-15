@@ -1,7 +1,6 @@
 // Agent task API client (work mode).
 //
-// Distinct from `lib/worker.ts`, which drives the legacy in-house agent loop.
-// Here the loop runs in an external `pi` runtime and the backend only relays,
+// The loop runs in an external `pi` runtime and the backend only relays,
 // so the client subscribes to a session rather than awaiting a reply to its
 // own request. That is what lets a task started on a phone be watched from the
 // browser: every client opens its own stream against the same session.

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react"
-import { Check, Cloud, Copy, Film, ImageIcon, KeyRound, MessageSquare, RefreshCw, Trash2 } from "lucide-react"
+import { Cloud, Film, ImageIcon, KeyRound, MessageSquare, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
   Dialog,
@@ -28,7 +28,6 @@ import {
   type PlatformModel,
 } from "@/lib/platform-models"
 import { cn } from "@/lib/utils"
-import { workerApi, type Worker } from "@/lib/worker"
 
 type Props = {
   open: boolean
@@ -39,7 +38,7 @@ type Props = {
   onSave: (s: UpstreamSettings) => void
 }
 
-type Tab = "chat" | "image" | "video" | "worker"
+type Tab = "chat" | "image" | "video"
 
 const PROTOCOL_OPTIONS: Protocol[] = ["openai", "claude", "gemini"]
 const IMAGE_PROTOCOL_OPTIONS: ImageProtocol[] = ["openai", "gemini"]
@@ -323,9 +322,6 @@ export function SettingsDialog({
             </TabsTrigger>
             <TabsTrigger value="video">
               <Film className="size-3.5" /> 视频
-            </TabsTrigger>
-            <TabsTrigger value="worker" disabled={!isAuthenticated}>
-              工蜂
             </TabsTrigger>
           </TabsList>
 
@@ -666,12 +662,6 @@ export function SettingsDialog({
               )}
             </div>
           </TabsContent>
-
-          <TabsContent value="worker">
-            <div className="mt-4">
-              <WorkerSettings />
-            </div>
-          </TabsContent>
         </Tabs>
 
         <label className="mt-4 flex items-start gap-2 text-sm">
@@ -722,95 +712,6 @@ export function SettingsDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  )
-}
-
-function WorkerSettings() {
-  const [workers, setWorkers] = useState<Worker[]>([])
-  const [token, setToken] = useState<string | null>(null)
-  const [pairing, setPairing] = useState(false)
-  const [copied, setCopied] = useState(false)
-  const refresh = () => workerApi.list().then(setWorkers).catch(() => {})
-  useEffect(() => {
-    refresh()
-    const t = setInterval(refresh, 5000)
-    return () => clearInterval(t)
-  }, [])
-  const deployCmd = (tok: string) =>
-    `YUNOVA_WORKER_URL=wss://你的域名/api/worker/connect YUNOVA_WORKER_TOKEN=${tok} ./yunova-worker`
-  async function pair() {
-    if (pairing) return
-    setPairing(true)
-    try {
-      const r = await workerApi.pair()
-      setToken(r.token)
-      setCopied(false)
-      refresh()
-    } finally {
-      setPairing(false)
-    }
-  }
-  async function copyDeploy() {
-    if (!token) return
-    try {
-      await navigator.clipboard.writeText(deployCmd(token))
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    } catch {
-      /* 忽略 */
-    }
-  }
-  async function removeWorker(id: number) {
-    await workerApi.remove(id).catch(() => {})
-    refresh()
-  }
-  return (
-    <div className="space-y-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <Button size="sm" onClick={pair} disabled={pairing}>
-          {pairing ? "生成中…" : "生成配对码"}
-        </Button>
-        <span className="text-xs text-muted-foreground">部署到你的服务器，连回本站受你操控</span>
-      </div>
-      {token && (
-        <div className="space-y-2 rounded-md border bg-muted/40 p-3 text-sm">
-          <div className="font-medium">配对码（仅显示一次，请妥善保存）</div>
-          <code className="block break-all rounded bg-background p-2 font-mono text-xs">{token}</code>
-          <div className="text-xs text-muted-foreground">部署命令：</div>
-          <div className="flex items-start gap-2">
-            <code className="block flex-1 break-all rounded bg-background p-2 font-mono text-xs">
-              {deployCmd(token)}
-            </code>
-            <Button variant="outline" size="icon" className="shrink-0" onClick={copyDeploy} title="复制部署命令">
-              {copied ? <Check className="size-4 text-green-500" /> : <Copy className="size-4" />}
-            </Button>
-          </div>
-        </div>
-      )}
-      <ul className="space-y-1">
-        {workers.map((w) => (
-          <li key={w.id} className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm">
-            <span
-              className={cn(
-                "size-2.5 shrink-0 rounded-full",
-                w.online ? "bg-green-500" : "bg-muted-foreground/50"
-              )}
-              aria-hidden
-            />
-            <span className="flex-1 truncate">{w.name}</span>
-            <span className="shrink-0 text-xs text-muted-foreground">{w.online ? "在线" : "离线"}</span>
-            <Button variant="ghost" size="icon" className="shrink-0" onClick={() => removeWorker(w.id)} title="删除工蜂">
-              <Trash2 className="size-4" />
-            </Button>
-          </li>
-        ))}
-        {workers.length === 0 && (
-          <li className="rounded-md border border-dashed px-3 py-4 text-center text-sm text-muted-foreground">
-            还没有工蜂，点上面「生成配对码」并部署。
-          </li>
-        )}
-      </ul>
-    </div>
   )
 }
 

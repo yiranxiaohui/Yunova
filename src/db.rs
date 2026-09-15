@@ -90,9 +90,8 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (23, include_str!("../migrations/sqlite/0023_shared_conversations.sql")),
     (24, include_str!("../migrations/sqlite/0024_model_pricing_protocol.sql")),
     (25, include_str!("../migrations/sqlite/0025_studio_source_paths.sql")),
-    (26, include_str!("../migrations/sqlite/0026_workers.sql")),
-    (27, include_str!("../migrations/sqlite/0027_worker_sessions.sql")),
-    (28, include_str!("../migrations/sqlite/0028_worker_messages.sql")),
+    // 26–28 created the legacy worker tables; the feature is gone, so fresh
+    // installs skip them and migration 44 drops them where they exist.
     (29, include_str!("../migrations/sqlite/0029_model_pricing_context.sql")),
     (30, include_str!("../migrations/sqlite/0030_video_generation.sql")),
     (31, include_str!("../migrations/sqlite/0031_unify_video_pricing.sql")),
@@ -108,6 +107,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (41, include_str!("../migrations/sqlite/0041_message_reasoning.sql")),
     (42, include_str!("../migrations/sqlite/0042_agent_tokens.sql")),
     (43, include_str!("../migrations/sqlite/0043_agent_sessions.sql")),
+    (44, include_str!("../migrations/sqlite/0044_drop_workers.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -135,9 +135,6 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (23, include_str!("../migrations/mysql/0023_shared_conversations.sql")),
     (24, include_str!("../migrations/mysql/0024_model_pricing_protocol.sql")),
     (25, include_str!("../migrations/mysql/0025_studio_source_paths.sql")),
-    (26, include_str!("../migrations/mysql/0026_workers.sql")),
-    (27, include_str!("../migrations/mysql/0027_worker_sessions.sql")),
-    (28, include_str!("../migrations/mysql/0028_worker_messages.sql")),
     (29, include_str!("../migrations/mysql/0029_model_pricing_context.sql")),
     (30, include_str!("../migrations/mysql/0030_video_generation.sql")),
     (31, include_str!("../migrations/mysql/0031_unify_video_pricing.sql")),
@@ -153,6 +150,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (41, include_str!("../migrations/mysql/0041_message_reasoning.sql")),
     (42, include_str!("../migrations/mysql/0042_agent_tokens.sql")),
     (43, include_str!("../migrations/mysql/0043_agent_sessions.sql")),
+    (44, include_str!("../migrations/mysql/0044_drop_workers.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -180,9 +178,6 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (23, include_str!("../migrations/postgres/0023_shared_conversations.sql")),
     (24, include_str!("../migrations/postgres/0024_model_pricing_protocol.sql")),
     (25, include_str!("../migrations/postgres/0025_studio_source_paths.sql")),
-    (26, include_str!("../migrations/postgres/0026_workers.sql")),
-    (27, include_str!("../migrations/postgres/0027_worker_sessions.sql")),
-    (28, include_str!("../migrations/postgres/0028_worker_messages.sql")),
     (29, include_str!("../migrations/postgres/0029_model_pricing_context.sql")),
     (30, include_str!("../migrations/postgres/0030_video_generation.sql")),
     (31, include_str!("../migrations/postgres/0031_unify_video_pricing.sql")),
@@ -198,6 +193,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (41, include_str!("../migrations/postgres/0041_message_reasoning.sql")),
     (42, include_str!("../migrations/postgres/0042_agent_tokens.sql")),
     (43, include_str!("../migrations/postgres/0043_agent_sessions.sql")),
+    (44, include_str!("../migrations/postgres/0044_drop_workers.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {

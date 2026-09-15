@@ -3,8 +3,7 @@
 //! The desktop client dials in and holds a WebSocket open, rather than the
 //! server connecting to it. A personal machine is usually behind NAT with no
 //! reachable address, so an outbound connection is the only option that works
-//! without port forwarding — the same reason the legacy worker did it this
-//! way.
+//! without port forwarding.
 //!
 //! What crosses the socket is the *same* pi RPC JSONL the cloud sandbox
 //! speaks. The desktop client runs `pi --mode rpc` locally and pipes its stdio

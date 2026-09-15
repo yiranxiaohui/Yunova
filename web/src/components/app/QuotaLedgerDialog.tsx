@@ -108,8 +108,10 @@ function prettifyReason(raw: string): string {
     return `图像 · ${PROTOCOL_LABEL[rest] ?? rest}`
   }
   if (raw.startsWith("video_")) return `视频 · ${raw.slice("video_".length)}`
-  if (raw === "worker_agent") return "工蜂 · 执行"
-  if (raw === "worker_compact") return "工蜂 · 压缩上下文"
+  // Legacy rows from the removed worker feature. The feature is gone, but its
+  // ledger entries stay, so keep the label instead of showing a raw reason.
+  if (raw === "worker_agent") return "远程执行（已下线）"
+  if (raw === "worker_compact") return "远程执行 · 压缩上下文（已下线）"
   if (raw === "studio_generate") return "工作室生图"
 
   // admin manual adjustments (admin-supplied reasons get the literal text)

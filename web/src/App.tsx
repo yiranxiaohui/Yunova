@@ -40,7 +40,7 @@ function Protected({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-/** `/`、`/c/:id` 和 `/w/:id` 必须用同一个组件类型包裹。
+/** `/` 和 `/c/:id` 必须用同一个组件类型包裹。
  *
  * 在首页发送第一条消息时，ChatPage 会先建会话再 navigate 到
  * `/c/<id>`。若两条路由的 element 包裹类型不同（以前分别是 `Ready`
@@ -203,7 +203,6 @@ export default function App() {
             />
             <Route path="/plaza" element={<Navigate to="/library" replace />} />
 
-            <Route path="/w/:id" element={<ChatRoute requireAuth />} />
             <Route path="/s/:token" element={<SharedConversationPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>

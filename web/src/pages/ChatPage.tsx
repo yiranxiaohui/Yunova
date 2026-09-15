@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom"
+import { useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   ArrowUp,
   ArrowUpRight,
   ArrowDown,
   BookMarked,
-  Bot,
   Check,
   ClipboardCheck,
   Copy,
@@ -37,18 +36,9 @@ import { ReasoningBlock } from "@/components/app/ReasoningBlock"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 
-// Radix 的 SelectItem 不接受空字符串作为 value，用哨兵值代表「未选择工蜂」。
-const WORKER_NONE = "__none__"
 import { streamChat, type ChatMessage } from "@/lib/chat-stream"
-import { estimateMessagesTokens } from "@/lib/context-limits"
+import { estimateMessagesTokens, contextLimit } from "@/lib/context-limits"
 import { listModels } from "@/lib/models"
 import {
   describeModelQuota,
@@ -91,15 +81,6 @@ import {
   quotaApi,
   type QuotaMe,
 } from "@/lib/quota"
-import {
-  workerApi,
-  sendAgentMessage,
-  replayMessages,
-  contextLimit,
-  type Worker,
-  type AgentEvent,
-} from "@/lib/worker"
-import { WorkerLog, type WorkerLogItem } from "@/components/app/WorkerEvents"
 
 // reasoning / reasoningMs 随消息一起落库（messages.reasoning /
 // messages.reasoning_ms），所以刷新页面后仍能看到思考过程。
@@ -784,10 +765,7 @@ export default function ChatPage() {
   const settingsOwnerId = user?.id ?? GUEST_SETTINGS_ID
   const nav = useNavigate()
   const { id: paramId } = useParams()
-  const location = useLocation()
-  const isWorkerRoute = location.pathname.startsWith("/w/")
-  const workerSessionId = isWorkerRoute && paramId ? Number(paramId) : null
-  const conversationId = !isWorkerRoute && paramId ? Number(paramId) : null
+  const conversationId = paramId ? Number(paramId) : null
   const [searchParams] = useSearchParams()
   const msgAnchorParam = searchParams.get("msg")
   const targetMsgId = msgAnchorParam ? Number(msgAnchorParam) : null
@@ -847,23 +825,6 @@ export default function ChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const attachInputRef = useRef<HTMLInputElement>(null)
 
-  // ── 工蜂模式（与普通对话完全隔离，仅在 /w/:id 或手动开关时启用） ──
-  const [workerMode, setWorkerMode] = useState(false)
-  const [workers, setWorkers] = useState<Worker[]>([])
-  const [workerId, setWorkerId] = useState<number | null>(null)
-  const [workerModel, setWorkerModel] = useState("claude-opus-4-8")
-  const [autoApprove, setAutoApprove] = useState(false)
-  const [workerLog, setWorkerLog] = useState<WorkerLogItem[]>([])
-  const [activeWorkerSession, setActiveWorkerSession] = useState<number | null>(
-    null
-  )
-  const [workerSending, setWorkerSending] = useState(false)
-  const [contextTokens, setContextTokens] = useState(0)
-  const workerSeq = useRef(0)
-  const workerAbort = useRef<(() => void) | null>(null)
-  const pushWorker = (e: AgentEvent) =>
-    setWorkerLog((l) => [...l, { ...e, id: workerSeq.current++ }])
-
   // Release object URLs for removed / unmounted previews.
   useEffect(() => {
     return () => {
@@ -916,7 +877,7 @@ export default function ChatPage() {
   }, [user])
 
   useEffect(() => {
-    if (!user || settings.chatMode !== "platform" || workerMode) return
+    if (!user || settings.chatMode !== "platform") return
     let cancelled = false
     listPlatformModels("chat")
       .then((list) => {
@@ -933,7 +894,7 @@ export default function ChatPage() {
     return () => {
       cancelled = true
     }
-  }, [settings.chatMode, workerMode, user])
+  }, [settings.chatMode, user])
 
   async function refreshCredits() {
     if (!user) return
@@ -1064,54 +1025,6 @@ export default function ChatPage() {
   }, [highlightedMsgId])
 
   // 进入工蜂会话：拉历史回看并进入工蜂模式
-  useEffect(() => {
-    if (workerSessionId == null) return
-    setWorkerMode(true)
-    if (workerSessionId === activeWorkerSession) return // 自己 nav 进来的当前会话，别清空在跑的日志
-    // 切到另一个工蜂会话：先中断上一个会话在跑的流，避免事件串台
-    workerAbort.current?.()
-    workerAbort.current = null
-    setWorkerSending(false)
-    setActiveWorkerSession(workerSessionId)
-    setWorkerLog([])
-    setContextTokens(0)
-    workerApi
-      .messages(workerSessionId)
-      .then((rows) => {
-        const events = replayMessages(rows)
-        setWorkerLog(events.map((ev) => ({ ...ev, id: workerSeq.current++ })))
-      })
-      .catch(() => {})
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workerSessionId])
-
-  // 离开工蜂路由：退出工蜂模式并中断在跑的流
-  useEffect(() => {
-    if (isWorkerRoute) return
-    workerAbort.current?.()
-    workerAbort.current = null
-    setWorkerMode(false)
-    setWorkerSending(false)
-    setActiveWorkerSession(null)
-    setWorkerLog([])
-    setContextTokens(0)
-  }, [isWorkerRoute])
-
-  // 工蜂模式下加载在线工蜂
-  useEffect(() => {
-    if (!workerMode) return
-    workerApi.list().then(setWorkers).catch(() => {})
-  }, [workerMode])
-
-  // 卸载时中断进行中的工蜂会话
-  useEffect(() => () => workerAbort.current?.(), [])
-
-  // 工蜂日志增长时跟随到底部（与普通消息一致的 sticky-bottom）
-  useEffect(() => {
-    if (!workerMode) return
-    if (!atBottomRef.current) return
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" })
-  }, [workerLog, workerMode])
 
   async function refreshAttachedSkills(convId: number) {
     try {
@@ -1367,16 +1280,6 @@ export default function ChatPage() {
   }
 
   async function send() {
-    if (workerMode) {
-      const text = input
-      setInput("")
-      if (text.trim() === "/compact") {
-        await compactWorker()
-        return
-      }
-      await sendWorker(text)
-      return
-    }
     if (!canSend) return
     if (!user && settings.chatMode === "platform") {
       nav("/login?next=/")
@@ -1726,85 +1629,9 @@ export default function ChatPage() {
     setTimeout(() => textareaRef.current?.focus(), 0)
   }
 
-  async function sendWorker(text: string) {
-    if (workerId == null || !text.trim() || workerSending) return
-    let s = activeWorkerSession
-    try {
-      if (s == null) {
-        s = (await workerApi.createSession(workerId)).id
-        setActiveWorkerSession(s)
-        nav(`/w/${s}`, { replace: true })
-        setSidebarReload((x) => x + 1)
-      }
-    } catch (e) {
-      pushWorker({ type: "error", data: `创建会话失败：${String(e)}` })
-      return
-    }
-    pushWorker({ type: "text", data: `🧑 ${text.trim()}` })
-    setWorkerSending(true)
-    workerAbort.current = sendAgentMessage(
-      s,
-      {
-        worker_id: workerId,
-        model: workerModel,
-        text: text.trim(),
-        auto_approve: autoApprove,
-      },
-      (ev) => {
-        if (ev.type === "usage") {
-          const it = Number(ev.data?.input_tokens ?? 0)
-          const ot = Number(ev.data?.output_tokens ?? 0)
-          setContextTokens(it + ot)
-          return // usage 不入日志
-        }
-        pushWorker(ev)
-        if (ev.type === "done" || ev.type === "error") {
-          setWorkerSending(false)
-          workerAbort.current = null
-        }
-      }
-    )
-  }
-
   function formatTokens(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`
     return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n)
-  }
-
-  async function compactWorker() {
-    if (workerId == null || activeWorkerSession == null) {
-      pushWorker({ type: "error", data: "请先在会话中发起对话再压缩" })
-      return
-    }
-    if (workerSending) return
-    pushWorker({ type: "text", data: "🗜️ 正在压缩上下文…" })
-    try {
-      const r = await workerApi.compact(activeWorkerSession, {
-        model: workerModel,
-      })
-      if (!r.ok) {
-        pushWorker({ type: "error", data: r.message ?? "压缩失败" })
-        return
-      }
-      const after = Number(r.after_estimate ?? 0)
-      pushWorker({
-        type: "text",
-        data: `✅ 已压缩，上下文约 ${formatTokens(contextTokens)} → ${formatTokens(after)}`,
-      })
-      setContextTokens(after)
-    } catch (e) {
-      pushWorker({ type: "error", data: `压缩失败：${String(e)}` })
-    }
-  }
-
-  async function decideWorker(item: WorkerLogItem, decision: boolean) {
-    if (activeWorkerSession == null) return
-    await workerApi
-      .approve(activeWorkerSession, String(item.data?.call_id ?? ""), decision)
-      .catch(() => {})
-    setWorkerLog((l) =>
-      l.map((x) => (x.id === item.id ? { ...x, resolved: true } : x))
-    )
   }
 
   async function copyText(content: string, key: string) {
@@ -2008,11 +1835,7 @@ export default function ChatPage() {
             {loadingMessages && (
               <p className="text-center text-sm text-muted-foreground">加载中…</p>
             )}
-            {workerMode ? (
-              <WorkerLog items={workerLog} onDecide={decideWorker} />
-            ) : (
-              <>
-                {!loadingMessages && messages.length === 0 && configured && (
+            {!loadingMessages && messages.length === 0 && configured && (
               <div className="fade-up mx-auto mt-8 flex w-full max-w-2xl flex-col items-center gap-7 text-center md:mt-14">
                 <div className="relative">
                   <div className="absolute inset-2 rounded-3xl bg-primary/30 blur-2xl" />
@@ -2121,8 +1944,6 @@ export default function ChatPage() {
                 </div>
               )
             })}
-              </>
-            )}
             {error && (
               <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-2.5 text-sm text-destructive">
                 {error}
@@ -2145,61 +1966,7 @@ export default function ChatPage() {
         <div className="border-t border-border/40 bg-background/70 px-3 pb-3 pt-2.5 backdrop-blur-xl md:px-6 md:pb-4">
           <div className="mx-auto max-w-4xl">
             <div className="mb-2 flex flex-wrap items-center gap-2.5 px-1 text-sm">
-              <label className="flex cursor-pointer items-center gap-1.5 rounded-full border border-border/70 bg-card/55 px-2.5 py-1 text-xs shadow-sm transition-colors hover:border-primary/20">
-                <input
-                  type="checkbox"
-                  className="size-4 accent-primary"
-                  checked={workerMode}
-                  onChange={(e) => setWorkerMode(e.target.checked)}
-                  disabled={workerSessionId != null}
-                />
-                <Bot className="size-4" /> <span>工蜂模式</span>
-              </label>
-              {workerMode && (
-                <>
-                  <Select
-                    value={workerId === null ? WORKER_NONE : String(workerId)}
-                    onValueChange={(v) =>
-                      setWorkerId(v === WORKER_NONE ? null : Number(v))
-                    }
-                  >
-                    <SelectTrigger size="sm">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={WORKER_NONE}>选择工蜂…</SelectItem>
-                      {workers
-                        .filter((w) => w.online)
-                        .map((w) => (
-                          <SelectItem key={w.id} value={String(w.id)}>
-                            {w.name}
-                          </SelectItem>
-                        ))}
-                    </SelectContent>
-                  </Select>
-                  <Input
-                    className="h-8 w-44"
-                    value={workerModel}
-                    onChange={(e) => setWorkerModel(e.target.value)}
-                    placeholder="模型"
-                  />
-                  <label className="flex cursor-pointer items-center gap-1.5">
-                    <input
-                      type="checkbox"
-                      className="size-4 accent-primary"
-                      checked={autoApprove}
-                      onChange={(e) => setAutoApprove(e.target.checked)}
-                    />
-                    <span>自动批准</span>
-                  </label>
-                  {workers.filter((w) => w.online).length === 0 && (
-                    <span className="text-xs text-muted-foreground">
-                      没有在线工蜂，去设置里配对
-                    </span>
-                  )}
-                </>
-              )}
-              {!workerMode && (() => {
+              {(() => {
                 const limit =
                   (settings.chatMode === "platform"
                     ? platformContextMap.get(settings.model)
@@ -2281,34 +2048,6 @@ export default function ChatPage() {
                 e.target.value = ""
               }}
             />
-            {workerMode && (() => {
-              const limit = contextLimit(workerModel)
-              const pct = Math.min(100, Math.round((contextTokens / limit) * 100))
-              const warn = pct >= 80
-              return (
-                <div className="mb-1.5 px-1">
-                  <div
-                    className={`flex items-center justify-between text-xs ${
-                      warn ? "text-orange-500" : "text-muted-foreground"
-                    }`}
-                  >
-                    <span>
-                      {warn
-                        ? `上下文已用 ${pct}%，输入 /compact 压缩历史`
-                        : `上下文 ${formatTokens(contextTokens)} / ${formatTokens(limit)} (${pct}%)`}
-                    </span>
-                  </div>
-                  <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-muted">
-                    <div
-                      className={`h-full rounded-full transition-all ${
-                        warn ? "bg-orange-500" : "bg-primary/50"
-                      }`}
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                </div>
-              )
-            })()}
             <div className="glass-surface flex items-end gap-1.5 rounded-[1.35rem] p-2.5 transition-all focus-within:border-primary/35 focus-within:shadow-[0_18px_48px_-24px_color-mix(in_oklch,var(--primary)_45%,transparent)] focus-within:ring-2 focus-within:ring-ring">
               <Button
                 type="button"
@@ -2401,11 +2140,7 @@ export default function ChatPage() {
               ) : (
                 <Button
                   onClick={() => void send()}
-                  disabled={
-                    workerMode
-                      ? workerSending || workerId == null || !input.trim()
-                      : !canSend
-                  }
+                  disabled={!canSend}
                   size="icon"
                   className="size-10 shrink-0 rounded-xl shadow-md shadow-primary/20"
                   aria-label="发送"

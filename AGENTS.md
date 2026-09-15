@@ -2,7 +2,7 @@
 
 The repository is `git@github.com:yiranxiaohui/Yunova.git`, the local primary
 checkout is `/home/orca/projects/Yunova`, and task worktrees belong under
-`/home/orca/worktrees/Yunova`. New builds use `yunova` / `yunova-worker` and
+`/home/orca/worktrees/Yunova`. New builds use `yunova` and
 `ghcr.io/yiranxiaohui/yunova` (mirror: `docker.yunnet.top/github/yiranxiaohui/yunova`).
 
 The source rename does not relocate the existing production deployment:
@@ -16,8 +16,8 @@ to a Yunova image; do not assume `/opt/Yunova` already exists.
 When the user asks to publish a release, remember to complete the full flow:
 
 1. Default to incrementing only the patch version: `vX.Y.Z` → `vX.Y.(Z+1)`.
-2. Publish the tag and GitHub Release, then wait for the container and Worker
-   release workflows to succeed.
+2. Publish the tag and GitHub Release, then wait for the container release
+   workflow to succeed.
 3. Deploy directly from the current trusted host with SSH to
    `root@114.66.55.93`; do not delegate production deployment to GitHub Actions.
 4. Back up the current deployment's Compose file and SQLite database, update the

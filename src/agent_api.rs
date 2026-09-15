@@ -1,9 +1,8 @@
 //! HTTP surface for agent sessions.
 //!
-//! Deliberately split from the legacy `worker` module: that one couples the
-//! thinking loop, the tool protocol and the transcript into one flow. Here the
-//! server only relays — the runtime owns the loop — so these handlers are
-//! identical for the cloud sandbox and for a user's own machine.
+//! The server only relays here — the runtime owns the thinking loop and the
+//! tool protocol — so these handlers are identical for the cloud sandbox and
+//! for a user's own machine.
 //!
 //! The event stream is a *subscription*, not a response to a prompt. That is
 //! what lets a phone, a browser and the desktop client watch the same session:

@@ -19,8 +19,8 @@ mod tests {
     use super::value_with;
 
     #[test]
-    fn new_names_override_legacy_server_and_worker_configuration() {
-        for suffix in ["BIND", "DATABASE_URL", "S3_BUCKET", "WORKER_TOKEN"] {
+    fn new_names_override_legacy_server_configuration() {
+        for suffix in ["BIND", "DATABASE_URL", "S3_BUCKET", "DATA_DIR"] {
             let name = format!("YUNOVA_{suffix}");
             let legacy = format!("NOVACHAT_{suffix}");
             let get = |key: &str| match key {

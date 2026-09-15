@@ -16,10 +16,9 @@ FROM chef AS planner
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY migrations ./migrations
-# Workspace members `worker` and `desktop` are not built into this image, but
-# cargo refuses to load a workspace whose members are missing, so their
-# manifests must be present.
-COPY worker ./worker
+# Workspace member `desktop` is not built into this image, but cargo refuses
+# to load a workspace whose members are missing, so its manifest must be
+# present.
 COPY desktop ./desktop
 RUN cargo chef prepare --recipe-path recipe.json
 
@@ -37,10 +36,8 @@ COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY migrations ./migrations
 # Workspace members must exist so cargo can load the workspace. We only build
-# the `yunova` server binary here (`-p yunova`); `yunova-worker` and
-# `yunova-desktop` run on the user's own machines and are distributed
-# separately (see CI release job, worker/README.md), not shipped in this image.
-COPY worker ./worker
+# the `yunova` server binary here (`-p yunova`); `yunova-desktop` runs on the
+# user's own machine and is distributed separately, not shipped in this image.
 COPY desktop ./desktop
 COPY --from=webbuilder /app/web/dist ./web/dist
 
