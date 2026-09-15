@@ -3,6 +3,11 @@
 target
 web/node_modules
 web/dist
+# Capacitor native projects: generated locally by `cap add`, never needed by
+# the server image, and several MB of Gradle/Xcode scaffolding that would
+# otherwise enter the build context and invalidate the web layer cache.
+web/android
+web/ios
 data
 yunova.db
 yunova.db-*
