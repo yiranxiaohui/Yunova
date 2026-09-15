@@ -88,16 +88,23 @@ async fn resolve_image_upstream(
     // Pick highest-priority enabled channel that serves (model, "image").
     // Chain fallback is deferred to a follow-up task — image generation
     // already has retry/refund semantics that complicate mid-flight failover.
-    let chain = channels::select_chain(&installed.pool, installed.kind, &client_model)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("channels query: {e}")).into_response())?;
+    // The chain is narrowed to the channels whose catalog still lists the
+    // model, matching what the model picker offers.
+    let chain = channels::select_chain_by_advertised_model(
+        &state.http,
+        &installed.pool,
+        installed.kind,
+        &client_model,
+    )
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("channels query: {e}")).into_response())?;
     let choice = chain
         .into_iter()
         .find(|c| c.channel.protocol == protocol)
         .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
-                format!("模型 {client_model} 未绑定任何 {protocol} 图像渠道；请联系管理员在后台「渠道/模型定价」中添加"),
+                format!("模型 {client_model} 当前没有可用的 {protocol} 图像渠道；请联系管理员在后台「渠道/模型定价」中检查"),
             )
                 .into_response()
         })?;

@@ -40,8 +40,10 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
   channelsAdminApi,
+  type AdminModelPrice,
   type AllChannelModel,
   type ChannelKind,
+  type ChannelProbeError,
   type ChannelProtocol,
   type ModelPrice,
   type PricingInput,
@@ -152,18 +154,22 @@ type DialogMode =
   | null
 
 export function PricingPanel() {
-  const [rows, setRows] = useState<ModelPrice[]>([])
+  const [rows, setRows] = useState<AdminModelPrice[]>([])
+  const [probeErrors, setProbeErrors] = useState<ChannelProbeError[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState("")
   const [dialog, setDialog] = useState<DialogMode>(null)
   const [importOpen, setImportOpen] = useState(false)
 
-  async function load() {
+  /** `refresh` 重新探测每个上游的模型列表，而不是复用服务端缓存。 */
+  async function load(refresh = false) {
     setLoading(true)
     setError(null)
     try {
-      setRows(await channelsAdminApi.listPricing())
+      const res = await channelsAdminApi.listPricing(refresh)
+      setRows(res.models)
+      setProbeErrors(res.errors)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -174,8 +180,10 @@ export function PricingPanel() {
     let cancelled = false
     channelsAdminApi
       .listPricing()
-      .then((nextRows) => {
-        if (!cancelled) setRows(nextRows)
+      .then((res) => {
+        if (cancelled) return
+        setRows(res.models)
+        setProbeErrors(res.errors)
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e))
@@ -197,6 +205,7 @@ export function PricingPanel() {
           r.kind.includes(q)
       )
     : rows
+  const unavailableCount = rows.filter((r) => !r.upstream_available).length
 
   async function onDelete(r: ModelPrice) {
     if (!confirm(`确认删除「${r.model}」的计费规则？删除后该模型将不再被白名单包含。`)) return
@@ -208,7 +217,14 @@ export function PricingPanel() {
     }
   }
 
-  async function onToggle(r: ModelPrice) {
+  async function onToggle(r: AdminModelPrice) {
+    // 没有上游的模型已经等同于停用，开启它只会让用户收到上游报错。
+    if (!r.upstream_available) {
+      alert(
+        `模型「${r.model}」当前没有任何上游渠道提供，已自动停用。请先在「渠道」中添加或恢复提供该模型的 ${r.protocol} 渠道。`
+      )
+      return
+    }
     try {
       await channelsAdminApi.upsertPricing({
         model: r.model,
@@ -239,6 +255,11 @@ export function PricingPanel() {
         站点按「额度换算」中的汇率与倍率折算成额度。价格填 0 即免费白名单。
         修改 <code>model</code> 字段请先删除再新建。
       </p>
+      <p className="text-sm text-muted-foreground">
+        模型是否可用由上游渠道决定：没有任何启用渠道提供该模型时，它会被自动禁用，
+        不再出现在用户的模型列表里，调用也会直接被拒绝（否则只会在发送时收到上游报错）。
+        探测结果有缓存，刚调整完渠道可以点「刷新」立即重新探测。
+      </p>
 
       <div className="flex items-center gap-2">
         <Input
@@ -247,7 +268,12 @@ export function PricingPanel() {
           placeholder="搜索模型名 / 显示名 / 功能…"
           className="max-w-xs"
         />
-        <Button variant="outline" size="sm" onClick={() => void load()}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => void load(true)}
+          title="重新探测所有启用渠道的模型列表"
+        >
           <RefreshCw /> 刷新
         </Button>
         <Button size="sm" onClick={() => setDialog({ kind: "create" })}>
@@ -263,12 +289,27 @@ export function PricingPanel() {
         </Button>
         <span className="ml-auto text-xs text-muted-foreground">
           共 {rows.length} 条
+          {unavailableCount > 0 && (
+            <span className="ml-2 text-amber-600 dark:text-amber-400">
+              其中 {unavailableCount} 条无上游
+            </span>
+          )}
         </span>
       </div>
 
       {error && (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
           {error}
+        </div>
+      )}
+
+      {probeErrors.length > 0 && (
+        <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-300">
+          <CircleAlert className="mt-0.5 size-4 shrink-0" />
+          <span>
+            {probeErrors.map((e) => e.channel).join("、")}
+            的模型列表读取失败。为避免误封，这些渠道上的模型仍视为可用。
+          </span>
         </div>
       )}
 
@@ -284,20 +325,21 @@ export function PricingPanel() {
               <TableHead className="text-right">价格（美元）</TableHead>
               <TableHead className="text-right">上下文</TableHead>
               <TableHead>启用</TableHead>
+              <TableHead>上游</TableHead>
               <TableHead className="text-right">操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody className="[&_td]:px-3 [&_td]:py-2">
             {loading && (
               <TableRow>
-                <TableCell colSpan={8} className="py-6 text-center text-muted-foreground">
+                <TableCell colSpan={9} className="py-6 text-center text-muted-foreground">
                   加载中…
                 </TableCell>
               </TableRow>
             )}
             {!loading && filtered.length === 0 && (
               <TableRow>
-                <TableCell colSpan={8} className="py-6 text-center text-muted-foreground">
+                <TableCell colSpan={9} className="py-6 text-center text-muted-foreground">
                   暂无计费规则。点击「新建模型」添加白名单条目。
                 </TableCell>
               </TableRow>
@@ -331,17 +373,46 @@ export function PricingPanel() {
                     : "自动"}
                 </TableCell>
                 <TableCell>
+                  {/* 无上游的模型已经不可用，展示为禁用并禁止开启，
+                      以免管理员误以为它还能调用。 */}
                   <button
                     onClick={() => void onToggle(r)}
+                    disabled={!r.upstream_available}
+                    title={
+                      r.upstream_available
+                        ? r.enabled
+                          ? "点击停用"
+                          : "点击启用"
+                        : "无上游渠道，已自动禁用"
+                    }
                     className={
                       "rounded px-2 py-0.5 text-xs " +
-                      (r.enabled
-                        ? "bg-emerald-500/20 text-emerald-600"
-                        : "bg-muted text-muted-foreground")
+                      (!r.upstream_available
+                        ? "cursor-not-allowed bg-muted text-muted-foreground line-through"
+                        : r.enabled
+                          ? "bg-emerald-500/20 text-emerald-600"
+                          : "bg-muted text-muted-foreground")
                     }
                   >
-                    {r.enabled ? "启用" : "禁用"}
+                    {r.upstream_available && r.enabled ? "启用" : "禁用"}
                   </button>
+                </TableCell>
+                <TableCell>
+                  {r.upstream_available ? (
+                    <span
+                      className="text-xs text-muted-foreground"
+                      title={r.upstream_channels.join("、")}
+                    >
+                      {r.upstream_channels.length > 0
+                        ? `${r.upstream_channels.length} 个渠道`
+                        : "—"}
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-700 dark:text-amber-300">
+                      <CircleAlert className="size-3" />
+                      无上游
+                    </span>
+                  )}
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="inline-flex items-center gap-1">

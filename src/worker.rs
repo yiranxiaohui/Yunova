@@ -639,7 +639,9 @@ async fn compact(
     }
 
     // 2. 解析渠道链
-    let route = channels::resolve_route(&pool, kind, &headers, "chat", "claude", &req.model).await;
+    let route =
+        channels::resolve_route(&state.http, &pool, kind, &headers, "chat", "claude", &req.model)
+            .await;
     let chain = match route {
         Ok(channels::Route::Channels { chain, .. }) => chain,
         Ok(channels::Route::Byok(_)) => fail!("请使用服务端渠道（暂不支持 BYOK）"),
@@ -806,6 +808,7 @@ async fn session_message(
 
     // 把路由解析放到 spawn 之前，便于把 headers 留在外面。
     let route = channels::resolve_route(
+        &state.http,
         &installed.pool,
         installed.kind,
         &headers,

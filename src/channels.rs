@@ -249,26 +249,65 @@ pub async fn select_chain(
 }
 
 /// Resolve a model against the catalogs advertised by otherwise eligible
-/// channels. Explicit `channel_models` bindings remain authoritative; live
-/// probing is only used for the automatic-routing fallback.
+/// channels.
+///
+/// Explicit `channel_models` bindings still decide *which* channels are
+/// eligible — `select_chain` applies them first — but they can't vouch for a
+/// model the upstream no longer offers, so the catalog check runs either way.
+/// That keeps this in step with `resolve_route` and the user-facing listings,
+/// which apply the same rule.
 pub async fn select_chain_by_advertised_model(
     http: &reqwest::Client,
     pool: &Pool,
     kind: DbKind,
     model: &str,
 ) -> Result<Vec<ChannelChoice>, sqlx::Error> {
-    let explicitly_bound = model_has_explicit_binding(pool, kind, model).await?;
     let candidates = select_chain(pool, kind, model).await?;
-    if explicitly_bound || candidates.is_empty() {
+    if candidates.is_empty() {
         return Ok(candidates);
     }
 
-    let probes = candidates.into_iter().map(|choice| async move {
-        let advertised = probe_channel_models(http, &choice.channel).await;
+    Ok(narrow_to_advertised(
+        probe_chain_catalogs(http, candidates).await,
+    ))
+}
+
+/// Attach each candidate channel's cached catalog to it.
+async fn probe_chain_catalogs(
+    http: &reqwest::Client,
+    chain: Vec<ChannelChoice>,
+) -> Vec<(ChannelChoice, Result<Vec<String>, String>)> {
+    let probes = chain.into_iter().map(|choice| async move {
+        let advertised = cached_channel_catalog(http, &choice.channel, false).await;
         (choice, advertised)
     });
-    let results = futures_util::future::join_all(probes).await;
-    Ok(filter_advertised_choices(results))
+    futures_util::future::join_all(probes).await
+}
+
+/// Narrow a chain to the channels that can still serve the model, so a request
+/// is never sent to an upstream whose catalog no longer lists it. Priority
+/// order is preserved.
+///
+/// Channels that advertise the model win. Only when none of them does do the
+/// channels with an unreadable catalog stand in, so a provider that hides or
+/// rate-limits its `/models` endpoint can't make a working model unusable. The
+/// chain therefore empties only when every catalog was readable and none of
+/// them advertised the model.
+fn narrow_to_advertised(
+    results: Vec<(ChannelChoice, Result<Vec<String>, String>)>,
+) -> Vec<ChannelChoice> {
+    let mut advertising: Vec<ChannelChoice> = Vec::new();
+    let mut unknown: Vec<ChannelChoice> = Vec::new();
+    for (choice, advertised) in results {
+        match advertised {
+            Ok(models) if models.iter().any(|m| m == &choice.upstream_model) => {
+                advertising.push(choice);
+            }
+            Ok(_) => {}
+            Err(_) => unknown.push(choice),
+        }
+    }
+    if advertising.is_empty() { unknown } else { advertising }
 }
 
 /// Convenience: pick the top-priority channel that advertises `model`.
@@ -282,21 +321,6 @@ pub async fn select_one_by_advertised_model(
         .await?
         .into_iter()
         .next())
-}
-
-fn filter_advertised_choices(
-    results: Vec<(ChannelChoice, Result<Vec<String>, String>)>,
-) -> Vec<ChannelChoice> {
-    results
-        .into_iter()
-        .filter_map(|(choice, advertised)| {
-            let models = advertised.ok()?;
-            models
-                .iter()
-                .any(|m| m == &choice.upstream_model)
-                .then_some(choice)
-        })
-        .collect()
 }
 
 /// Convenience: just the top-priority enabled channel, or None.
@@ -851,7 +875,12 @@ async fn admin_patch_channel(
         }
     }
     match update_channel(&s.pool, s.kind, id, &patch).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        // The edit may point the channel at a different upstream or key, so its
+        // cached catalog no longer describes it.
+        Ok(_) => {
+            invalidate_catalog(id);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -861,7 +890,10 @@ async fn admin_delete_channel(
     Path(id): Path<i64>,
 ) -> Response {
     match delete_channel(&s.pool, s.kind, id).await {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => {
+            invalidate_catalog(id);
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -901,6 +933,210 @@ struct AllChannelModelChannel {
     id: i64,
     name: String,
     protocol: String,
+}
+
+// ---------------------------------------------------------------------------
+// upstream availability
+// ---------------------------------------------------------------------------
+//
+// A priced model is only usable when some enabled channel actually serves it.
+// Listing a model whose upstream disappeared just produces a 404/400 from the
+// provider, so the catalogs advertised by the channels decide what the user
+// sees: a model without any upstream is reported as unavailable and is left
+// out of every user-facing listing.
+//
+// Catalogs are cached per channel because the pricing list and the model
+// pickers ask for them on every page load, and a cold probe costs one HTTP
+// round trip per channel.
+
+/// How long a successful catalog probe is reused.
+const CATALOG_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+/// Failed probes are retried sooner so a recovered upstream comes back fast.
+const CATALOG_ERROR_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+struct CachedCatalog {
+    /// Connection fingerprint; an edited channel invalidates its own entry.
+    signature: u64,
+    fetched_at: std::time::Instant,
+    models: Result<Vec<String>, String>,
+}
+
+fn catalog_cache() -> &'static std::sync::Mutex<std::collections::HashMap<i64, CachedCatalog>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<i64, CachedCatalog>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Hash of everything that decides what a channel advertises. The API key is
+/// hashed rather than stored so the cache never holds a second copy of it.
+fn channel_signature(ch: &Channel) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ch.protocol.hash(&mut h);
+    ch.base_url.hash(&mut h);
+    ch.api_key.hash(&mut h);
+    h.finish()
+}
+
+/// Drop a channel's cached catalog after an edit or removal.
+fn invalidate_catalog(channel_id: i64) {
+    if let Ok(mut cache) = catalog_cache().lock() {
+        cache.remove(&channel_id);
+    }
+}
+
+/// Probe a channel's catalog, reusing a recent result when possible.
+async fn cached_channel_catalog(
+    http: &reqwest::Client,
+    ch: &Channel,
+    refresh: bool,
+) -> Result<Vec<String>, String> {
+    let signature = channel_signature(ch);
+    if !refresh {
+        if let Ok(cache) = catalog_cache().lock() {
+            if let Some(hit) = cache.get(&ch.id) {
+                let ttl = if hit.models.is_ok() {
+                    CATALOG_TTL
+                } else {
+                    CATALOG_ERROR_TTL
+                };
+                if hit.signature == signature && hit.fetched_at.elapsed() < ttl {
+                    return hit.models.clone();
+                }
+            }
+        }
+    }
+    let models = probe_channel_models(http, ch).await;
+    if let Ok(mut cache) = catalog_cache().lock() {
+        cache.insert(
+            ch.id,
+            CachedCatalog {
+                signature,
+                fetched_at: std::time::Instant::now(),
+                models: models.clone(),
+            },
+        );
+    }
+    models
+}
+
+/// One enabled channel plus the catalog it advertises.
+pub struct ChannelCatalog {
+    pub channel: Channel,
+    /// `Err` means the catalog is unknown (timeout, 4xx, unparsable body).
+    pub models: Result<Vec<String>, String>,
+}
+
+/// Which channels serve a model, and under which upstream alias.
+type Bindings = std::collections::HashMap<String, Vec<(i64, Option<String>)>>;
+
+async fn load_bindings(pool: &Pool, kind: DbKind) -> Result<Bindings, sqlx::Error> {
+    let sql = db::q(kind, "SELECT model, channel_id, upstream_id FROM channel_models");
+    let rows: Vec<(String, i64, Option<String>)> = sqlx::query_as(&sql).fetch_all(pool).await?;
+    let mut out: Bindings = std::collections::HashMap::new();
+    for (model, channel_id, upstream_id) in rows {
+        out.entry(model).or_default().push((channel_id, upstream_id));
+    }
+    Ok(out)
+}
+
+/// Snapshot used to answer "does this model still have an upstream?" for a
+/// whole list of models without re-probing per model.
+pub struct AvailabilityIndex {
+    catalogs: Vec<ChannelCatalog>,
+    bindings: Bindings,
+    /// Channels whose catalog could not be read, for admin-facing display.
+    pub errors: Vec<(String, String)>,
+}
+
+impl AvailabilityIndex {
+    /// Build an index from the enabled channels, probing their catalogs
+    /// concurrently. `refresh` bypasses the cache (admin "refresh" action).
+    pub async fn load(
+        http: &reqwest::Client,
+        pool: &Pool,
+        kind: DbKind,
+        refresh: bool,
+    ) -> Result<Self, sqlx::Error> {
+        let channels: Vec<Channel> = list_channels(pool, kind)
+            .await?
+            .into_iter()
+            .filter(|c| c.enabled)
+            .collect();
+        let probes = channels.into_iter().map(|channel| async move {
+            let models = cached_channel_catalog(http, &channel, refresh).await;
+            ChannelCatalog { channel, models }
+        });
+        let catalogs: Vec<ChannelCatalog> = futures_util::future::join_all(probes).await;
+        let errors = catalogs
+            .iter()
+            .filter_map(|c| {
+                c.models
+                    .as_ref()
+                    .err()
+                    .map(|e| (c.channel.name.clone(), e.clone()))
+            })
+            .collect();
+        let bindings = load_bindings(pool, kind).await?;
+        Ok(Self {
+            catalogs,
+            bindings,
+            errors,
+        })
+    }
+
+    /// Channels of `protocol` that can currently serve `model`.
+    pub fn serving_channels(&self, model: &str, protocol: &str) -> Vec<&Channel> {
+        serving_channels(
+            model,
+            protocol,
+            self.bindings.get(model).map(|v| v.as_slice()),
+            &self.catalogs,
+        )
+    }
+
+    /// True when at least one enabled channel serves the model. A channel whose
+    /// catalog could not be read counts as "might serve it": a provider that
+    /// hides or rate-limits `/models` must not disable a working model.
+    pub fn is_available(&self, model: &str, protocol: &str) -> bool {
+        !self.serving_channels(model, protocol).is_empty()
+    }
+}
+
+/// Pure core of the availability rule, kept separate so it can be unit tested.
+///
+/// `bindings` is `Some` only when the model has explicit `channel_models` rows;
+/// those rows restrict routing, so an unbound channel is never a candidate even
+/// if it advertises the model.
+fn serving_channels<'a>(
+    model: &str,
+    protocol: &str,
+    bindings: Option<&[(i64, Option<String>)]>,
+    catalogs: &'a [ChannelCatalog],
+) -> Vec<&'a Channel> {
+    let mut out: Vec<&Channel> = Vec::new();
+    for catalog in catalogs {
+        if !catalog.channel.enabled || catalog.channel.protocol != protocol {
+            continue;
+        }
+        let upstream_model = match bindings {
+            Some(bound) => match bound.iter().find(|(id, _)| *id == catalog.channel.id) {
+                Some((_, alias)) => alias.clone().unwrap_or_else(|| model.to_string()),
+                None => continue,
+            },
+            None => model.to_string(),
+        };
+        let serves = match &catalog.models {
+            Ok(list) => list.iter().any(|m| m == &upstream_model),
+            // Unknown catalog: keep the channel as a candidate (fail open).
+            Err(_) => true,
+        };
+        if serves {
+            out.push(&catalog.channel);
+        }
+    }
+    out
 }
 
 /// Probe a single channel's upstream `/models` endpoint and return the list of
@@ -966,24 +1202,37 @@ async fn probe_channel_models(
 mod tests {
     use super::*;
 
+    fn channel(id: i64, protocol: &str) -> Channel {
+        Channel {
+            id,
+            name: format!("channel-{id}"),
+            protocol: protocol.to_string(),
+            base_url: format!("https://channel-{id}.example"),
+            api_key: "test-key".to_string(),
+            enabled: true,
+            priority: id,
+        }
+    }
+
     fn choice(id: i64, model: &str) -> ChannelChoice {
         ChannelChoice {
-            channel: Channel {
-                id,
-                name: format!("channel-{id}"),
-                protocol: "openai".to_string(),
-                base_url: format!("https://channel-{id}.example"),
-                api_key: "test-key".to_string(),
-                enabled: true,
-                priority: id,
-            },
+            channel: channel(id, "openai"),
             upstream_model: model.to_string(),
+        }
+    }
+
+    fn catalog(id: i64, protocol: &str, models: Result<&[&str], &str>) -> ChannelCatalog {
+        ChannelCatalog {
+            channel: channel(id, protocol),
+            models: models
+                .map(|list| list.iter().map(|m| m.to_string()).collect())
+                .map_err(|e| e.to_string()),
         }
     }
 
     #[test]
     fn advertised_model_filter_skips_higher_priority_channel_without_model() {
-        let selected = filter_advertised_choices(vec![
+        let selected = narrow_to_advertised(vec![
             (choice(1, "video-b"), Ok(vec!["video-a".to_string()])),
             (choice(2, "video-b"), Ok(vec!["video-b".to_string()])),
         ]);
@@ -993,8 +1242,8 @@ mod tests {
     }
 
     #[test]
-    fn advertised_model_filter_ignores_failed_catalog_probes() {
-        let selected = filter_advertised_choices(vec![
+    fn advertised_model_filter_prefers_channels_that_list_the_model() {
+        let selected = narrow_to_advertised(vec![
             (choice(1, "video-b"), Err("timeout".to_string())),
             (choice(2, "video-b"), Ok(vec!["video-b".to_string()])),
         ]);
@@ -1002,58 +1251,104 @@ mod tests {
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].channel.id, 2);
     }
+
+    /// A hidden or rate-limited `/models` endpoint must not take a working
+    /// model offline, so an unreadable catalog still routes.
+    #[test]
+    fn advertised_model_filter_falls_back_to_unreadable_catalogs() {
+        let selected = narrow_to_advertised(vec![
+            (choice(1, "video-b"), Err("timeout".to_string())),
+            (choice(2, "video-b"), Ok(vec!["video-a".to_string()])),
+        ]);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].channel.id, 1);
+    }
+
+    #[test]
+    fn model_without_any_advertising_channel_has_no_upstream() {
+        let catalogs = vec![catalog(1, "openai", Ok(&["gpt-5"]))];
+
+        assert!(serving_channels("gpt-5", "openai", None, &catalogs).len() == 1);
+        assert!(serving_channels("gpt-4o", "openai", None, &catalogs).is_empty());
+    }
+
+    /// The channel's protocol must match the one the model declares, otherwise
+    /// a same-named model on a different protocol would look available.
+    #[test]
+    fn availability_requires_a_matching_protocol() {
+        let catalogs = vec![catalog(1, "openai", Ok(&["claude-sonnet-4"]))];
+
+        assert!(serving_channels("claude-sonnet-4", "claude", None, &catalogs).is_empty());
+        assert_eq!(
+            serving_channels("claude-sonnet-4", "openai", None, &catalogs).len(),
+            1
+        );
+    }
+
+    /// Explicit bindings restrict routing, so an unbound channel can't make a
+    /// model available even when it advertises it.
+    #[test]
+    fn availability_honours_explicit_bindings_and_aliases() {
+        let catalogs = vec![
+            catalog(1, "openai", Ok(&["gpt-5"])),
+            catalog(2, "openai", Ok(&["vendor-gpt-5"])),
+        ];
+
+        let bound_to_alias = [(2i64, Some("vendor-gpt-5".to_string()))];
+        let serving = serving_channels("gpt-5", "openai", Some(&bound_to_alias), &catalogs);
+        assert_eq!(serving.len(), 1);
+        assert_eq!(serving[0].id, 2);
+
+        let bound_without_alias = [(2i64, None)];
+        assert!(
+            serving_channels("gpt-5", "openai", Some(&bound_without_alias), &catalogs).is_empty()
+        );
+    }
+
+    #[test]
+    fn unreadable_catalog_keeps_the_model_available() {
+        let catalogs = vec![catalog(1, "openai", Err("upstream 403"))];
+
+        assert_eq!(
+            serving_channels("gpt-5", "openai", None, &catalogs).len(),
+            1
+        );
+    }
 }
 
 async fn admin_list_all_channel_models(
     axum::extract::State(state): axum::extract::State<AppState>,
     Extension(s): Extension<InstalledState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    let channels = match list_channels(&s.pool, s.kind).await {
+    // `?refresh=1` re-probes every upstream; the default reuses the cached
+    // catalogs so opening the pricing dialog doesn't hit every provider.
+    let refresh = matches!(q.get("refresh").map(String::as_str), Some("1" | "true"));
+    let index = match AvailabilityIndex::load(&state.http, &s.pool, s.kind, refresh).await {
         Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    let channels: Vec<Channel> = channels
-        .into_iter()
-        .filter(|c| c.enabled)
-        .collect();
-
-    // Probe all channels concurrently.
-    let http = state.http.clone();
-    let mut futs = Vec::with_capacity(channels.len());
-    for ch in &channels {
-        let http = http.clone();
-        let ch_clone = ch.clone();
-        futs.push(async move {
-            let res = probe_channel_models(&http, &ch_clone).await;
-            (ch_clone, res)
-        });
-    }
-    let results = futures_util::future::join_all(futs).await;
 
     let mut map: std::collections::BTreeMap<String, Vec<AllChannelModelChannel>> =
         std::collections::BTreeMap::new();
-    let mut errors: Vec<serde_json::Value> = Vec::new();
-    for (ch, res) in results {
-        match res {
-            Ok(models) => {
-                for model in models {
-                    map.entry(model)
-                        .or_default()
-                        .push(AllChannelModelChannel {
-                            id: ch.id,
-                            name: ch.name.clone(),
-                            protocol: ch.protocol.clone(),
-                        });
-                }
-            }
-            Err(e) => {
-                errors.push(serde_json::json!({
-                    "channel": ch.name,
-                    "error": e,
-                }));
-            }
+    for catalog in &index.catalogs {
+        let Ok(models) = &catalog.models else { continue };
+        for model in models {
+            map.entry(model.clone())
+                .or_default()
+                .push(AllChannelModelChannel {
+                    id: catalog.channel.id,
+                    name: catalog.channel.name.clone(),
+                    protocol: catalog.channel.protocol.clone(),
+                });
         }
     }
+    let errors: Vec<serde_json::Value> = index
+        .errors
+        .iter()
+        .map(|(channel, error)| serde_json::json!({ "channel": channel, "error": error }))
+        .collect();
     let models: Vec<AllChannelModel> = map
         .into_iter()
         .map(|(model, channels)| AllChannelModel { model, channels })
@@ -1065,11 +1360,58 @@ async fn admin_list_all_channel_models(
     .into_response()
 }
 
-async fn admin_list_pricing(Extension(s): Extension<InstalledState>) -> Response {
-    match list_pricing(&s.pool, s.kind).await {
-        Ok(v) => Json(v).into_response(),
-        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    }
+/// A priced model plus whether an upstream still serves it. The admin list
+/// shows unavailable models as disabled, because calling one only produces an
+/// upstream error.
+#[derive(Serialize)]
+struct AdminModelPrice {
+    #[serde(flatten)]
+    price: ModelPrice,
+    /// False when no enabled channel of the model's protocol serves it.
+    upstream_available: bool,
+    /// Names of the channels that currently serve it, for the admin UI.
+    upstream_channels: Vec<String>,
+}
+
+async fn admin_list_pricing(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Extension(s): Extension<InstalledState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let refresh = matches!(q.get("refresh").map(String::as_str), Some("1" | "true"));
+    let pricing = match list_pricing(&s.pool, s.kind).await {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    // A probe failure must not break the pricing table: fall back to reporting
+    // every model as available so the admin can still edit prices.
+    let index = AvailabilityIndex::load(&state.http, &s.pool, s.kind, refresh)
+        .await
+        .ok();
+    let errors: Vec<serde_json::Value> = index
+        .as_ref()
+        .map(|i| {
+            i.errors
+                .iter()
+                .map(|(channel, error)| serde_json::json!({ "channel": channel, "error": error }))
+                .collect()
+        })
+        .unwrap_or_default();
+    let models: Vec<AdminModelPrice> = pricing
+        .into_iter()
+        .map(|price| {
+            let serving = index
+                .as_ref()
+                .map(|i| i.serving_channels(&price.model, &price.protocol))
+                .unwrap_or_default();
+            AdminModelPrice {
+                upstream_available: index.is_none() || !serving.is_empty(),
+                upstream_channels: serving.into_iter().map(|c| c.name.clone()).collect(),
+                price,
+            }
+        })
+        .collect();
+    Json(serde_json::json!({ "models": models, "errors": errors })).into_response()
 }
 
 async fn admin_upsert_pricing(
@@ -1174,6 +1516,7 @@ struct PlatformModel {
 }
 
 async fn user_list_platform_models(
+    axum::extract::State(state): axum::extract::State<AppState>,
     Extension(s): Extension<InstalledState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
@@ -1182,6 +1525,11 @@ async fn user_list_platform_models(
         Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
+    // Availability decides what the picker may offer. A probe failure leaves
+    // `None`, which keeps every model listed rather than emptying the picker.
+    let index = AvailabilityIndex::load(&state.http, &s.pool, s.kind, false)
+        .await
+        .ok();
     let rate = crate::quota::QuotaRate::load(&s.pool, s.kind).await;
     let mut out: Vec<PlatformModel> = Vec::new();
     for p in pricing {
@@ -1192,12 +1540,12 @@ async fn user_list_platform_models(
             if &p.kind != f { continue; }
         }
         // Auto-routing: a priced model declares its protocol in model_pricing.
-        // Show it only when at least one enabled channel of that protocol
-        // exists, so the picker never lists a model the client can't route.
-        match any_enabled_channel(&s.pool, s.kind, &p.protocol).await {
-            Ok(Some(_)) => {}
-            Ok(None) => continue,
-            Err(_) => continue,
+        // Offer it only while an enabled channel of that protocol still serves
+        // it, so the picker never lists a model the client can't route.
+        if let Some(index) = &index {
+            if !index.is_available(&p.model, &p.protocol) {
+                continue;
+            }
         }
         out.push(PlatformModel {
             model: p.model.clone(),
@@ -1321,7 +1669,14 @@ fn balance_chain(chain: Vec<ChannelChoice>, key_prefix: &str) -> Vec<ChannelChoi
 /// channels of that exact protocol so a request is never sent to a channel that
 /// speaks a different protocol. `model` is the user-requested model name.
 /// For BYOK requests `model` may be empty — it's only used to look up channels.
+///
+/// The chain is finally narrowed to the channels whose (cached) catalog still
+/// advertises the model, so a model whose upstream disappeared fails with a
+/// clear "no upstream" message instead of an opaque provider error. This is the
+/// same rule the user-facing model listings apply, so anything offered in the
+/// picker is routable.
 pub async fn resolve_route(
+    http: &reqwest::Client,
     pool: &Pool,
     kind: DbKind,
     headers: &HeaderMap,
@@ -1363,6 +1718,14 @@ pub async fn resolve_route(
         return Err((
             StatusCode::BAD_REQUEST,
             format!("模型 {model} 未配置任何可用的 {protocol} 渠道"),
+        )
+            .into_response());
+    }
+    let chain = narrow_to_advertised(probe_chain_catalogs(http, chain).await);
+    if chain.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!("模型 {model} 当前没有上游渠道提供，已暂停使用；请联系管理员"),
         )
             .into_response());
     }

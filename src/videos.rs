@@ -243,23 +243,32 @@ struct UserVideoModel {
     size_rules: Vec<SizeRule>,
 }
 
-/// Enabled video-pricing rows, gated on at least one enabled `openai`/`video`
-/// channel existing. The video channel protocol is fixed to openai, so this
-/// is a single check rather than a per-model lookup.
-async fn user_list_models(Extension(s): Extension<InstalledState>) -> Response {
+/// Enabled video-pricing rows, restricted to the models an enabled
+/// `openai` channel still serves. The video channel protocol is fixed to
+/// openai. A model whose upstream dropped it is left out rather than offered
+/// and failed at generation time.
+async fn user_list_models(
+    State(state): State<AppState>,
+    Extension(s): Extension<InstalledState>,
+) -> Response {
     let pricing = match channels::list_pricing(&s.pool, s.kind).await {
         Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
-    match channels::any_enabled_channel(&s.pool, s.kind, "openai").await {
-        Ok(Some(_)) => {}
-        Ok(None) => return Json(Vec::<UserVideoModel>::new()).into_response(),
-        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-    }
+    // A probe failure leaves `None`, which keeps the full list rather than
+    // hiding every video model.
+    let index = channels::AvailabilityIndex::load(&state.http, &s.pool, s.kind, false)
+        .await
+        .ok();
     let rate = QuotaRate::load(&s.pool, s.kind).await;
     let out: Vec<UserVideoModel> = pricing
         .into_iter()
         .filter(|p| p.enabled && p.kind == "video")
+        .filter(|p| {
+            index
+                .as_ref()
+                .is_none_or(|i| i.is_available(&p.model, "openai"))
+        })
         .map(|p| {
             let allowed_seconds = effective_allowed_seconds(&p);
             UserVideoModel {

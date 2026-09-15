@@ -163,10 +163,28 @@ export type AllChannelModel = {
   channels: { id: number; name: string; protocol: ChannelProtocol }[]
 }
 
+/** per-channel probe failure (timeout, 4xx, parse error) */
+export type ChannelProbeError = { channel: string; error: string }
+
 export type AllChannelModelsResponse = {
   models: AllChannelModel[]
-  /** per-channel probe failures (timeout, 4xx, parse errors) */
-  errors: { channel: string; error: string }[]
+  errors: ChannelProbeError[]
+}
+
+/**
+ * 计费规则 + 它当前是否还有上游渠道提供。
+ * 没有上游的模型会被视为禁用：用户端列表不再展示，调用也会被拒绝，
+ * 否则只会在真正请求时收到上游报错。
+ */
+export type AdminModelPrice = ModelPrice & {
+  upstream_available: boolean
+  /** 当前提供该模型的渠道名，用于后台展示 */
+  upstream_channels: string[]
+}
+
+export type AdminPricingResponse = {
+  models: AdminModelPrice[]
+  errors: ChannelProbeError[]
 }
 
 // ---------------------------------------------------------------------------
@@ -232,19 +250,25 @@ export const channelsAdminApi = {
   },
 
   // aggregated model list across all enabled channels, by live-probing each
-  // upstream's /models endpoint (no DB whitelist required).
-  async listAllChannelModels(): Promise<AllChannelModelsResponse> {
+  // upstream's /models endpoint (no DB whitelist required). Catalogs are
+  // cached server-side; `refresh` forces a re-probe.
+  async listAllChannelModels(
+    refresh = false
+  ): Promise<AllChannelModelsResponse> {
     return jsonOrThrow(
-      await fetch("/api/admin/channels/all-models", {
-        credentials: "same-origin",
-      })
+      await fetch(
+        `/api/admin/channels/all-models${refresh ? "?refresh=1" : ""}`,
+        { credentials: "same-origin" }
+      )
     )
   },
 
   // pricing
-  async listPricing(): Promise<ModelPrice[]> {
+  async listPricing(refresh = false): Promise<AdminPricingResponse> {
     return jsonOrThrow(
-      await fetch("/api/admin/pricing", { credentials: "same-origin" })
+      await fetch(`/api/admin/pricing${refresh ? "?refresh=1" : ""}`, {
+        credentials: "same-origin",
+      })
     )
   },
   async upsertPricing(input: PricingInput): Promise<void> {

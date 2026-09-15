@@ -83,18 +83,24 @@ async fn resolve_openai_image_upstream(
         }
     }
     let installed = state.require_installed().await?;
-    // Pick highest-priority enabled OpenAI image channel that serves `model`.
-    let choice = channels::select_chain(&installed.pool, installed.kind, model)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("channels query: {e}")))?
-        .into_iter()
-        .find(|c| c.channel.protocol == "openai")
-        .ok_or_else(|| {
-            err(
-                StatusCode::BAD_REQUEST,
-                format!("模型 {model} 未绑定任何 OpenAI 图像渠道；请联系管理员在后台「渠道/模型定价」中添加"),
-            )
-        })?;
+    // Pick highest-priority enabled OpenAI image channel whose catalog still
+    // lists `model`, matching what the model picker offers.
+    let choice = channels::select_chain_by_advertised_model(
+        &state.http,
+        &installed.pool,
+        installed.kind,
+        model,
+    )
+    .await
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("channels query: {e}")))?
+    .into_iter()
+    .find(|c| c.channel.protocol == "openai")
+    .ok_or_else(|| {
+        err(
+            StatusCode::BAD_REQUEST,
+            format!("模型 {model} 当前没有可用的 OpenAI 图像渠道；请联系管理员在后台「渠道/模型定价」中检查"),
+        )
+    })?;
     let base = choice.channel.base_url.trim_end_matches('/');
     let path = if edit { "/v1/images/edits" } else { "/v1/images/generations" };
     let upstream_model = if choice.upstream_model.is_empty() {

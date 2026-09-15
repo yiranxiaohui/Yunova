@@ -737,6 +737,7 @@ async fn proxy_forward(
 
     // Resolve route: BYOK (client headers) or server channel chain.
     let route = match channels::resolve_route(
+        &state.http,
         &installed.pool,
         installed.kind,
         headers,

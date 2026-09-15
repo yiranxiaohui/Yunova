@@ -51,6 +51,13 @@ Three dialects share one schema. Conventions in [src/db.rs](src/db.rs):
 - **Safe defaults**: imports land `enabled = false` and skip models already in `model_pricing` unless `overwrite_existing` is set, so a resync can't silently start billing or clobber a hand-tuned price. `dry_run` returns exactly what a real run would write.
 - The admin-supplied base URL goes through `net_guard::client_for_upstream` — this endpoint takes a URL from an authenticated admin and must not become an internal-network probe.
 
+### Multi-channel routing + model availability
+[src/channels.rs](src/channels.rs) owns `upstream_channels`, `model_pricing` and `channel_models`. A priced model is only usable while an enabled channel actually serves it, because listing a model whose upstream dropped it just produces an opaque provider error at send time:
+- **The upstream catalogs decide availability.** `AvailabilityIndex::load` probes each enabled channel's `/models` endpoint and answers "does this model still have an upstream?". `GET /api/channels/models`, `GET /api/videos/models` and `resolve_route` all apply the same rule, so anything the picker offers is routable. Unavailable models are omitted from the user listings and rejected with 400 instead of being forwarded. `GET /api/admin/pricing` keeps them but adds `upstream_available` / `upstream_channels`, and the admin table renders them as disabled and refuses to re-enable them.
+- **An unreadable catalog fails open.** A probe timeout, 4xx or unparsable body leaves the channel as a candidate and the model available — a provider that hides or rate-limits `/models` must not take working models offline. The failures are reported in the `errors` array so the admin can see why. Availability only shrinks when every catalog was readable and none advertised the model.
+- **Explicit `channel_models` bindings stay authoritative.** They restrict routing, so an unbound channel never makes a model available even when it advertises it, and a bound channel is matched on its `upstream_id` alias rather than the public model name.
+- **Catalogs are cached** for 5 minutes (1 minute after a failure) keyed by channel id, invalidated when the channel is edited or deleted, and bypassed by `?refresh=1` on the two admin endpoints. Without the cache, every page load would fan out one HTTP request per channel.
+
 ### Route composition
 Everything mounts under `/api` in [src/main.rs](src/main.rs) `build_router`. Public routes (health, auth, setup). Protected routes (everything else) sit behind `require_auth`; admin-only endpoints compose an additional `admin::require_admin` middleware. When adding a feature module, it exposes `pub fn routes() -> Router<AppState>` and `main.rs` `.merge(...)`'s it in.
 
