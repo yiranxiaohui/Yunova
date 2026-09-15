@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Yunova is a self-hosted Agent platform combining multi-model chat, remote tool execution, media creation, and workflows. Its Rust/Axum backend serves a React SPA, proxies OpenAI / Anthropic / Gemini calls, and stores conversations, skills, prompts, images, and credits in a SQLite/MySQL/Postgres database. The frontend is embedded into the Rust binary at build time via `rust-embed`, so a single `cargo build` produces one shippable executable.
+Yunova is a self-hosted Agent platform combining multi-model chat, remote tool execution, media creation, and workflows. Its Rust/Axum backend serves a React SPA, proxies OpenAI / Anthropic / Gemini calls, and stores conversations, skills, prompts, images, and quota balances in a SQLite/MySQL/Postgres database. The frontend is embedded into the Rust binary at build time via `rust-embed`, so a single `cargo build` produces one shippable executable.
 
 ## Commands
 
@@ -37,12 +37,13 @@ Three dialects share one schema. Conventions in [src/db.rs](src/db.rs):
 - Inserts returning the new id differ per dialect: Sqlite/Postgres use `RETURNING id`, MySQL uses `LAST_INSERT_ID()` inside a transaction. See [src/skills.rs](src/skills.rs#L213-L282) for the canonical pattern.
 - Case-insensitive username lookup: `db::ci_eq(kind, "username")` — SQLite uses `COLLATE NOCASE` on the column, others wrap in `LOWER()`.
 
-### Shared-backend + credits system
-[src/credits.rs](src/credits.rs) is the nerve center. Two tables (`app_settings` K/V, `user_credits`, `credit_ledger`) plus these hooks:
-- **Fallback resolution**: when the client sends empty `X-Upstream-Url`/`X-Upstream-Key` headers, [src/main.rs](src/main.rs) `resolve_chat_upstream` and [src/images.rs](src/images.rs) `resolve_image_upstream` look up admin-configured `shared_chat_{protocol}_url/key` / `shared_image_…` from `app_settings` and set `used_shared=true`.
-- **Deduction is atomic**: `credits::try_deduct` runs `UPDATE user_credits SET balance = balance - ? WHERE user_id = ? AND balance >= ?` — zero rows affected means insufficient funds, returned as **402 Payment Required** with a Chinese message the UI surfaces directly.
-- **Refund on failure**: both chat and image proxies refund via `credits::grant` when the upstream connection fails or returns non-2xx. The refund uses the *current* cost setting, so a mid-request config change can cause a tiny skew — acceptable.
-- **Invites** ([src/invites.rs](src/invites.rs)): every user has a 7-char code from a Crockford-ish alphabet (no 0/O/1/I/L). Generated lazily by `ensure_code` (race-safe via `UPDATE … WHERE invite_code IS NULL`). Successful referral at registration grants both parties via `credits::grant`, writing reasons like `invite_reward_inviter:<username>` to the ledger.
+### Quota + billing system
+[src/quota.rs](src/quota.rs) is the nerve center. Three tables (`app_settings` K/V, `user_balances`, `balance_ledger`) plus [src/usage.rs](src/usage.rs) for token extraction:
+- **Quota is the site's own unit** — an integer rendered directly in the UI with no currency symbol. Model prices live in `model_pricing` as **micro-USD** (1 USD = 1_000_000) transcribed from each provider's published rate: `input_price` / `output_price` / `cached_input_price` per 1M tokens for chat, `per_call_price` for image, `base_price` + `per_second_price` for video. Two settings convert cost to quota: `quota_per_usd` (default 500000) and `price_multiplier_percent` (default 100). `QuotaRate::load` re-reads both on every billing decision so admin edits apply immediately.
+- **Chat bills after the response.** `channels::authorize_chat` only checks the whitelist and that the balance is positive — it deducts nothing, because token counts aren't known until the upstream replies. `MeteredStream` in [src/main.rs](src/main.rs) forwards SSE bytes untouched while feeding them to `usage::UsageAccumulator`, buffering partial frames across chunk boundaries. Its `Drop` impl calls `channels::settle_chat`, so billing runs exactly once whether the stream ended cleanly, errored, or the client disconnected. **An upstream that reports no usage is never billed** — never guess a token count.
+- **`quota::settle` may go negative** by at most one request (the tokens were already consumed upstream); the next `authorize_chat` then refuses until the user tops up. `quota::try_deduct` is the strict variant still used by image/video, which do pre-deduct and refund on failure because those APIs report no tokens.
+- **Usage parsing is protocol-specific** ([src/usage.rs](src/usage.rs)): OpenAI Responses nests it under `response.usage`, Anthropic splits input across `message_start` and output across `message_delta`, Gemini uses `usageMetadata` and counts `thoughtsTokenCount` as output. The accumulator takes the max of each counter since every provider reports cumulative totals. Anthropic's `cache_read_input_tokens` are added back into `input` and marked as the cached subset so they bill at the discounted rate exactly once.
+- **Invites** ([src/invites.rs](src/invites.rs)): every user has a 7-char code from a Crockford-ish alphabet (no 0/O/1/I/L). Generated lazily by `ensure_code` (race-safe via `UPDATE … WHERE invite_code IS NULL`). Successful referral at registration grants both parties via `quota::grant`, writing reasons like `invite_reward_inviter:<username>` to the ledger.
 
 ### Route composition
 Everything mounts under `/api` in [src/main.rs](src/main.rs) `build_router`. Public routes (health, auth, setup). Protected routes (everything else) sit behind `require_auth`; admin-only endpoints compose an additional `admin::require_admin` middleware. When adding a feature module, it exposes `pub fn routes() -> Router<AppState>` and `main.rs` `.merge(...)`'s it in.
@@ -50,7 +51,7 @@ Everything mounts under `/api` in [src/main.rs](src/main.rs) `build_router`. Pub
 ### Frontend
 React 19 + Vite 8 + Tailwind 4 + shadcn/ui (under `web/src/components/ui/`). Single auth context ([web/src/lib/auth-context.tsx](web/src/lib/auth-context.tsx)) switches between `loading`/`setup`/`anon`/`authed` states on boot, driven by `GET /api/setup/status` then `/api/auth/me`.
 
-- **ChatPage** is the big one — ~1000 lines, handles both chat and image modes, skill attachment, image plaza publish overlays, credit badge, shared-backend fallback UI.
+- **ChatPage** is the big one — ~1000 lines, handles both chat and image modes, skill attachment, image plaza publish overlays, quota badge, shared-backend fallback UI.
 - Per-feature API clients live in `web/src/lib/<feature>.ts`. Upstream proxy helpers (`chat-stream.ts`, `image-gen.ts`, `models.ts`) always send `X-Upstream-Url/Key` headers; leaving them empty is how the backend knows to use shared credentials.
 - **Settings are dual-storage**: localStorage by default, with optional cloud sync when `settings.cloudSync` is set (server stores in `user_settings` table, never returns keys to other clients). See [web/src/lib/settings.ts](web/src/lib/settings.ts) `loadEffectiveSettings`.
 - The UI is Chinese throughout — labels, error messages, admin panels. Match that when adding user-facing strings.
@@ -70,4 +71,5 @@ For a typical "public + private library" feature (mirroring how skills/prompts/p
 - **Windows CRLF noise**: git will emit `LF will be replaced by CRLF` warnings on commit. They're harmless; don't rewrite files to silence them.
 - **Concurrent linter edits**: this repo's workflow sometimes produces `<system-reminder>` notes saying another agent/linter modified a file. When you see an in-flight change to `db.rs` (new migration ids) or `image_plaza.rs` (new columns), assume it's intentional and work around it — don't revert unless the user asks.
 - **Keys never come back**: admin `GET /api/admin/app-settings` returns `*_key_set: bool` instead of the actual value. Frontend treats empty input as "don't change" and the literal string `"-"` as "clear". Preserve this contract.
-- **Credit costs change over time**: when computing refunds, always re-read `cost_chat` / `cost_image` from `app_settings`; don't cache the value across a request boundary.
+- **Prices change over time**: always re-read `model_pricing` and `QuotaRate` at the moment you bill or refund; don't cache them across a request boundary. Image/video refunds must use the amount actually deducted, not a fresh lookup.
+- **Never bill a chat call without upstream usage.** If `UsageAccumulator` comes back empty, the request is free — inventing an estimate would silently overcharge users on every provider that omits usage frames.

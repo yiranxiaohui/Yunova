@@ -50,7 +50,11 @@ const WORKER_NONE = "__none__"
 import { streamChat, type ChatMessage } from "@/lib/chat-stream"
 import { estimateMessagesTokens } from "@/lib/context-limits"
 import { listModels } from "@/lib/models"
-import { listPlatformModels, type PlatformModel } from "@/lib/platform-models"
+import {
+  describeModelQuota,
+  listPlatformModels,
+  type PlatformModel,
+} from "@/lib/platform-models"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
 import {
@@ -66,7 +70,7 @@ import {
 } from "@/lib/settings"
 import { SettingsDialog } from "@/components/app/SettingsDialog"
 import { RechargeDialog } from "@/components/app/RechargeDialog"
-import { CreditsLedgerDialog } from "@/components/app/CreditsLedgerDialog"
+import { QuotaLedgerDialog } from "@/components/app/QuotaLedgerDialog"
 import { Sidebar } from "@/components/app/Sidebar"
 import { SystemPromptDialog } from "@/components/app/SystemPromptBar"
 import { PromptLibrary } from "@/components/app/PromptLibrary"
@@ -81,7 +85,12 @@ import {
 } from "@/lib/skills"
 import { filenameFromPath } from "@/lib/media-path"
 import { videoEditorApi } from "@/lib/video-editor"
-import { creditsApi, type CreditsMe } from "@/lib/credits"
+import {
+  formatQuota,
+  formatQuotaCompact,
+  quotaApi,
+  type QuotaMe,
+} from "@/lib/quota"
 import {
   workerApi,
   sendAgentMessage,
@@ -158,9 +167,13 @@ function ModelPicker({
               model,
               display_name: null,
               kind: "chat" as const,
-              cost_credits: 0,
               protocol: fetchProtocol as Protocol,
               context_limit: null,
+              // BYOK 模型由用户自己的 Key 付费，站内不计额度。
+              input_quota_per_1m: 0,
+              output_quota_per_1m: 0,
+              cached_input_quota_per_1m: null,
+              per_call_quota: 0,
             }))
       setModels(list)
     } catch (e) {
@@ -279,7 +292,7 @@ function ModelPicker({
                         </span>
                         {chatMode === "platform" && (
                           <span className="block truncate text-[10px] text-muted-foreground">
-                            {m.protocol} · {m.cost_credits} 积分/次
+                            {m.protocol} · {describeModelQuota(m)}
                           </span>
                         )}
                       </span>
@@ -292,7 +305,7 @@ function ModelPicker({
           </div>
           <div className="mt-2 border-t border-border pt-2 text-[10px] text-muted-foreground">
             {chatMode === "platform"
-              ? "云端积分 · 从管理员开放的模型获取"
+              ? "云端额度 · 从管理员开放的模型获取"
               : "自带 Key · 从你配置的上游获取"}
           </div>
         </div>
@@ -785,7 +798,7 @@ export default function ChatPage() {
   const [publishingFilename, setPublishingFilename] = useState<string | null>(
     null
   )
-  const [creditsMe, setCreditsMe] = useState<CreditsMe | null>(null)
+  const [quotaMe, setQuotaMe] = useState<QuotaMe | null>(null)
   const [attachedSkills, setAttachedSkills] = useState<Skill[]>([])
   const [systemPromptOpen, setSystemPromptOpen] = useState(false)
   const [messages, setMessages] = useState<UiMessage[]>([])
@@ -848,7 +861,7 @@ export default function ChatPage() {
   useEffect(() => {
     if (!user) {
       setSettings(loadSettings(GUEST_SETTINGS_ID))
-      setCreditsMe(null)
+      setQuotaMe(null)
       setPublishedFilenames(new Set())
       return
     }
@@ -857,11 +870,11 @@ export default function ChatPage() {
     loadEffectiveSettings(user.id).then((s) => {
       if (!cancelled) setSettings(s)
     })
-    creditsApi
+    quotaApi
       .me()
       .then((m) => {
         if (cancelled) return
-        setCreditsMe(m)
+        setQuotaMe(m)
       })
       .catch(() => {
         /* non-fatal */
@@ -911,8 +924,8 @@ export default function ChatPage() {
   async function refreshCredits() {
     if (!user) return
     try {
-      const me = await creditsApi.me()
-      setCreditsMe(me)
+      const me = await quotaApi.me()
+      setQuotaMe(me)
     } catch {
       /* ignore */
     }
@@ -1267,7 +1280,7 @@ export default function ChatPage() {
         <div className="rounded-xl border border-amber-500/40 bg-amber-500/5 px-4 py-3">
           <p className="text-sm">
             {settings.chatMode === "platform"
-              ? <>尚未选择模型。点击右上角 <b>设置</b> 在「云端积分」模式下选择一个模型。</>
+              ? <>尚未选择模型。点击右上角 <b>设置</b> 在「云端额度」模式下选择一个模型。</>
               : <>尚未配置模型。点击右上角 <b>设置</b> 填入 Base URL、Key 和模型名。</>}
           </p>
           <Button
@@ -1862,23 +1875,23 @@ export default function ChatPage() {
             />
           </div>
           <div className="flex shrink-0 items-center">
-            {creditsMe && (
+            {quotaMe && (
               <div className="mr-1 inline-flex items-center overflow-hidden rounded-xl border border-border/70 bg-card/65 text-xs tabular-nums shadow-sm backdrop-blur transition-colors hover:border-primary/30">
                 <button
                   type="button"
                   onClick={() => setLedgerOpen(true)}
                   className="inline-flex items-center gap-1 px-2 py-1.5 hover:bg-primary/10 md:px-2.5"
-                  title={`剩余积分 ${creditsMe.balance}｜点击查看积分明细`}
+                  title={`剩余额度 ${formatQuota(quotaMe.balance)}｜点击查看额度明细`}
                 >
-                  <span className="hidden text-muted-foreground md:inline">积分</span>
-                  <span className="font-medium">{creditsMe.balance}</span>
+                  <span className="hidden text-muted-foreground md:inline">额度</span>
+                  <span className="font-medium">{formatQuotaCompact(quotaMe.balance)}</span>
                 </button>
                 <button
                   type="button"
                   onClick={() => setRechargeOpen(true)}
                   className="inline-flex items-center border-l border-border px-2 py-1 text-muted-foreground hover:bg-primary/10 hover:text-primary"
-                  title="充值积分"
-                  aria-label="充值积分"
+                  title="充值额度"
+                  aria-label="充值额度"
                 >
                   <Plus className="size-3" />
                 </button>
@@ -2422,7 +2435,7 @@ export default function ChatPage() {
         onPaid={() => void refreshCredits()}
       />
 
-      <CreditsLedgerDialog
+      <QuotaLedgerDialog
         open={ledgerOpen}
         onClose={() => setLedgerOpen(false)}
       />

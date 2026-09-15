@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    AppState, CurrentUser, InstalledState, channels, credits, db,
+    AppState, CurrentUser, InstalledState, channels, db, quota,
     net_guard,
     storage::{MediaKind, MediaStorage, StorageError},
 };
@@ -511,7 +511,7 @@ async fn submit_generate(
 
     // Credits.
     if used_shared {
-        match channels::try_deduct_for_model(
+        match channels::try_deduct_per_call(
             &installed.pool,
             installed.kind,
             user.id,
@@ -532,7 +532,7 @@ async fn submit_generate(
             Err(channels::DeductError::Insufficient { balance, cost }) => {
                 return err(
                     StatusCode::PAYMENT_REQUIRED,
-                    format!("积分不足：当前 {balance}，本次需要 {cost}"),
+                    format!("额度不足：当前剩余 {balance}，本次需要 {cost}"),
                 );
             }
         }
@@ -593,15 +593,15 @@ async fn submit_generate(
             Err(_) => {
                 finalize_failed(&pool, kind, &token_c, "HTTP client 构建失败").await;
                 if used_shared {
-                    let cost = channels::cost_for_model(&pool, kind, &model_c, "image").await.unwrap_or(0);
+                    let cost = channels::per_call_quota(&pool, kind, &model_c, "image").await.unwrap_or(0);
                     if cost > 0 {
-                        let _ = credits::grant(
+                        let _ = quota::grant(
                             &pool,
                             kind,
                             user.id,
                             cost,
                             "refund_studio_error",
-                            &credits::LedgerMeta::refund_image(&model_c),
+                            &quota::LedgerMeta::refund_image(&model_c),
                         )
                         .await;
                     }
@@ -645,15 +645,15 @@ async fn submit_generate(
                 if let Some(msg) = part_err {
                     finalize_failed(&pool, kind, &token_c, &msg).await;
                     if used_shared {
-                        let cost = channels::cost_for_model(&pool, kind, &model_c, "image").await.unwrap_or(0);
+                        let cost = channels::per_call_quota(&pool, kind, &model_c, "image").await.unwrap_or(0);
                         if cost > 0 {
-                            let _ = credits::grant(
+                            let _ = quota::grant(
                                 &pool,
                                 kind,
                                 user.id,
                                 cost,
                                 "refund_studio_error",
-                                &credits::LedgerMeta::refund_image(&model_c),
+                                &quota::LedgerMeta::refund_image(&model_c),
                             )
                             .await;
                         }
@@ -757,15 +757,15 @@ async fn submit_generate(
                         };
                         finalize_failed(&pool, kind, &token_c, &msg).await;
                         if used_shared {
-                            let cost = channels::cost_for_model(&pool, kind, &model_c, "image").await.unwrap_or(0);
+                            let cost = channels::per_call_quota(&pool, kind, &model_c, "image").await.unwrap_or(0);
                     if cost > 0 {
-                        let _ = credits::grant(
+                        let _ = quota::grant(
                             &pool,
                             kind,
                             user.id,
                             cost,
                             "refund_studio_error",
-                            &credits::LedgerMeta::refund_image(&model_c),
+                            &quota::LedgerMeta::refund_image(&model_c),
                         )
                         .await;
                     }
@@ -793,15 +793,15 @@ async fn submit_generate(
             };
             finalize_failed(&pool, kind, &token_c, &msg).await;
             if used_shared {
-                let cost = channels::cost_for_model(&pool, kind, &model_c, "image").await.unwrap_or(0);
+                let cost = channels::per_call_quota(&pool, kind, &model_c, "image").await.unwrap_or(0);
                     if cost > 0 {
-                        let _ = credits::grant(
+                        let _ = quota::grant(
                             &pool,
                             kind,
                             user.id,
                             cost,
                             "refund_studio_error",
-                            &credits::LedgerMeta::refund_image(&model_c),
+                            &quota::LedgerMeta::refund_image(&model_c),
                         )
                         .await;
                     }
@@ -824,15 +824,15 @@ async fn submit_generate(
         let Some(item) = first else {
             finalize_failed(&pool, kind, &token_c, "上游未返回图像数据").await;
             if used_shared {
-                let cost = channels::cost_for_model(&pool, kind, &model_c, "image").await.unwrap_or(0);
+                let cost = channels::per_call_quota(&pool, kind, &model_c, "image").await.unwrap_or(0);
                     if cost > 0 {
-                        let _ = credits::grant(
+                        let _ = quota::grant(
                             &pool,
                             kind,
                             user.id,
                             cost,
                             "refund_studio_error",
-                            &credits::LedgerMeta::refund_image(&model_c),
+                            &quota::LedgerMeta::refund_image(&model_c),
                         )
                         .await;
                     }

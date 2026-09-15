@@ -2,7 +2,6 @@ mod admin;
 mod auth;
 mod channels;
 mod conversations;
-mod credits;
 mod db;
 mod email;
 mod images;
@@ -11,6 +10,7 @@ mod net_guard;
 mod payments;
 mod profile;
 mod prompts;
+mod quota;
 mod rate_limit;
 mod runtime_env;
 mod search;
@@ -18,10 +18,11 @@ mod settings;
 mod setup;
 mod sharing;
 mod skills;
-mod studio;
 mod storage;
-mod videos;
+mod studio;
+mod usage;
 mod video_editor;
+mod videos;
 mod worker;
 mod workflows;
 
@@ -185,7 +186,7 @@ async fn register(
         Ok(s) => s,
         Err(r) => return r,
     };
-    let registration_enabled = credits::get_setting_bool(
+    let registration_enabled = quota::get_setting_bool(
         &installed.pool,
         installed.kind,
         "registration_enabled",
@@ -201,7 +202,7 @@ async fn register(
 
     // Email verification gate. When the admin has turned it on, registration
     // requires a previously-issued code that matches the supplied address.
-    let require_email = credits::get_setting_bool(
+    let require_email = quota::get_setting_bool(
         &installed.pool,
         installed.kind,
         "email_verification_required",
@@ -304,7 +305,7 @@ async fn register(
     };
 
     let is_admin = admin::is_admin(&installed.pool, installed.kind, user_id).await;
-    let _ = credits::ensure_account(&installed.pool, installed.kind, user_id).await;
+    let _ = quota::ensure_account(&installed.pool, installed.kind, user_id).await;
     let _ = invites::ensure_code(&installed.pool, installed.kind, user_id).await;
 
     if let Some(raw) = creds.invite_code.as_deref() {
@@ -315,39 +316,39 @@ async fn register(
                 invites::set_invited_by(&installed.pool, installed.kind, user_id, inviter_id)
                     .await
                     .unwrap_or(false);
-            let inviter_grant = credits::get_setting_i64(
+            let inviter_grant = quota::get_setting_i64(
                 &installed.pool,
                 installed.kind,
                 "invite_grant_inviter",
-                100,
+                quota::DEFAULT_INVITE_GRANT,
             )
             .await;
-            let invitee_grant = credits::get_setting_i64(
+            let invitee_grant = quota::get_setting_i64(
                 &installed.pool,
                 installed.kind,
                 "invite_grant_invitee",
-                100,
+                quota::DEFAULT_INVITE_GRANT,
             )
             .await;
             if claimed && inviter_grant > 0 {
-                let _ = credits::grant(
+                let _ = quota::grant(
                     &installed.pool,
                     installed.kind,
                     inviter_id,
                     inviter_grant,
                     &format!("invite_reward_inviter:{username}"),
-                    &credits::LedgerMeta::grant(),
+                    &quota::LedgerMeta::grant(),
                 )
                 .await;
             }
             if claimed && invitee_grant > 0 {
-                let _ = credits::grant(
+                let _ = quota::grant(
                     &installed.pool,
                     installed.kind,
                     user_id,
                     invitee_grant,
                     "invite_reward_invitee",
-                    &credits::LedgerMeta::grant(),
+                    &quota::LedgerMeta::grant(),
                 )
                 .await;
             }
@@ -444,7 +445,7 @@ async fn auth_config(State(state): State<AppState>) -> Response {
             .into_response();
         }
     };
-    let email_verification_required = credits::get_setting_bool(
+    let email_verification_required = quota::get_setting_bool(
         &installed.pool,
         installed.kind,
         "email_verification_required",
@@ -719,39 +720,25 @@ async fn proxy_forward(
             let Some(user) = user else {
                 return (StatusCode::UNAUTHORIZED, "云端模型需要登录").into_response();
             };
-            // Deduct based on per-model pricing (whitelist gate).
-            // Refund on hard failure.
-            let cost = match channels::try_deduct_for_model(
-                &installed.pool,
-                installed.kind,
-                user.id,
-                &model,
-                "chat",
-                protocol.name(),
-                &format!("chat_{}", protocol.name()),
-            )
-            .await
+            // Whitelist gate + "not already overdrawn" check. Chat is billed
+            // after the fact from the upstream's own token counts, so nothing
+            // is deducted here and there is no refund path to get wrong.
+            if let Err(e) =
+                channels::authorize_chat(&installed.pool, installed.kind, user.id, &model).await
             {
-                // Use the amount actually deducted for any later refund — never
-                // re-read the price (an admin price change mid-request would
-                // otherwise refund a different amount than was charged).
-                Ok((_new_bal, deducted)) => deducted,
-                Err(channels::DeductError::NotWhitelisted) => {
-                    return (
+                return match e {
+                    channels::DeductError::NotWhitelisted => (
                         StatusCode::FORBIDDEN,
                         format!("模型 {model} 未启用：管理员尚未在「模型计费」中开放此模型，或请在设置里使用自己的 API Key"),
                     )
-                        .into_response();
-                }
-                Err(channels::DeductError::Insufficient { balance, cost }) => {
-                    return (
+                        .into_response(),
+                    channels::DeductError::Insufficient { balance, .. } => (
                         StatusCode::PAYMENT_REQUIRED,
-                        format!("积分不足：当前 {balance}，本次请求需要 {cost}；请在设置里填入自己的 API Key，或联系管理员充值"),
+                        format!("额度不足：当前剩余 {balance}；请在设置里填入自己的 API Key，或联系管理员充值"),
                     )
-                        .into_response();
-                }
-            };
-
+                        .into_response(),
+                };
+            }
 
             // Iterate chain. Fall back on:
             //   * connect error
@@ -809,41 +796,30 @@ async fn proxy_forward(
                     continue;
                 }
 
-                // Wrap the upstream stream so that if the channel returned 200
-                // but then died before sending any bytes, the deducted cost is
-                // refunded — otherwise the user pays full price for nothing.
-                let guarded = GuardedStream {
+                // Wrap the upstream stream so the token usage it reports is
+                // metered and charged once the response finishes.
+                let metered = MeteredStream {
                     inner: Box::pin(resp.bytes_stream()),
-                    guard: StreamRefundGuard {
+                    meter: Some(ChatMeter {
                         pool: installed.pool.clone(),
                         kind: installed.kind,
                         user_id: user.id,
-                        cost,
                         protocol: protocol.name().to_string(),
                         model: model.to_string(),
-                        streamed: false,
-                    },
+                        accumulator: usage::UsageAccumulator::new(),
+                    }),
+                    pending: String::new(),
                 };
                 return Response::builder()
                     .header(header::CONTENT_TYPE, "text/event-stream")
                     .header(header::CACHE_CONTROL, "no-cache")
                     .header("x-accel-buffering", "no")
-                    .body(Body::from_stream(guarded))
+                    .body(Body::from_stream(metered))
                     .unwrap();
             }
 
-            // All channels failed — refund.
-            if cost > 0 {
-                let _ = credits::grant(
-                    &installed.pool,
-                    installed.kind,
-                    user.id,
-                    cost,
-                    &format!("refund_chat_{model}_all_failed"),
-                    &credits::LedgerMeta::refund_chat(protocol.name(), &model),
-                )
-                .await;
-            }
+            // Every channel failed. Nothing was charged, so there is nothing
+            // to refund — the user simply gets the error.
             let (status, msg) = last_err
                 .unwrap_or((StatusCode::BAD_GATEWAY, format!("模型 {model} 所有渠道均不可用")));
             (status, msg).into_response()
@@ -851,54 +827,86 @@ async fn proxy_forward(
     }
 }
 
-/// Refunds the chat cost on drop if the upstream stream never produced bytes —
-/// covers a channel that returned HTTP 200 then died before sending anything.
-struct StreamRefundGuard {
+/// Charges a finished chat response from the token usage the upstream
+/// reported. Billing happens on drop so it runs exactly once whether the
+/// stream ended normally, errored mid-way, or the client disconnected — in the
+/// last two cases the user is still charged for the tokens actually produced.
+///
+/// A response that never reported usage costs nothing: `settle_chat` treats
+/// empty usage as unbillable rather than guessing a token count.
+struct ChatMeter {
     pool: db::Pool,
     kind: db::DbKind,
     user_id: i64,
-    cost: i64,
     protocol: String,
     model: String,
-    streamed: bool,
+    accumulator: usage::UsageAccumulator,
 }
 
-impl Drop for StreamRefundGuard {
-    fn drop(&mut self) {
-        if self.streamed || self.cost <= 0 {
+impl ChatMeter {
+    /// Spawn the settlement. Called from `Drop`, which cannot await.
+    fn settle(self) {
+        let usage = self.accumulator.usage();
+        if usage.is_empty() {
             return;
         }
-        let pool = self.pool.clone();
-        let kind = self.kind;
-        let user_id = self.user_id;
-        let cost = self.cost;
-        let protocol = self.protocol.clone();
-        let model = self.model.clone();
-        let reason = format!("refund_chat_{}_stream_empty", model);
+        let reason = format!("chat_{}", self.protocol);
         tokio::spawn(async move {
-            let _ = credits::grant(
-                &pool,
-                kind,
-                user_id,
-                cost,
+            channels::settle_chat(
+                &self.pool,
+                self.kind,
+                self.user_id,
+                &self.model,
+                &self.protocol,
+                usage,
                 &reason,
-                &credits::LedgerMeta::refund_chat(&protocol, &model),
             )
             .await;
         });
     }
 }
 
-/// Byte-stream wrapper that marks its guard as soon as one non-empty chunk
-/// passes through; the guard refunds on drop if nothing ever did.
-struct GuardedStream {
+/// Byte-stream wrapper that inspects SSE frames for usage while forwarding
+/// them untouched, then settles the charge when the stream is dropped.
+struct MeteredStream {
     inner: std::pin::Pin<
         Box<dyn futures_util::stream::Stream<Item = reqwest::Result<axum::body::Bytes>> + Send>,
     >,
-    guard: StreamRefundGuard,
+    meter: Option<ChatMeter>,
+    /// Carries an incomplete trailing SSE frame between chunks — usage JSON is
+    /// frequently split across TCP reads and would otherwise be missed.
+    pending: String,
 }
 
-impl futures_util::stream::Stream for GuardedStream {
+impl MeteredStream {
+    /// Feed a chunk to the accumulator, holding back any partial trailing frame.
+    fn observe(&mut self, chunk: &[u8]) {
+        let Some(meter) = self.meter.as_mut() else {
+            return;
+        };
+        // Invalid UTF-8 can only come from a non-SSE body, which carries no
+        // usage we can parse anyway.
+        let Ok(text) = std::str::from_utf8(chunk) else {
+            self.pending.clear();
+            return;
+        };
+        self.pending.push_str(text);
+        // SSE frames end with a blank line; everything up to the last one is
+        // complete and safe to parse.
+        if let Some(cut) = self.pending.rfind("\n\n") {
+            let complete: String = self.pending.drain(..cut + 2).collect();
+            meter.accumulator.ingest_sse_chunk(&complete);
+        }
+        // Guard against a pathological upstream that never emits a frame
+        // boundary; usage frames are far smaller than this.
+        const MAX_PENDING: usize = 256 * 1024;
+        if self.pending.len() > MAX_PENDING {
+            self.pending.clear();
+        }
+    }
+}
+
+impl futures_util::stream::Stream for MeteredStream {
     type Item = reqwest::Result<axum::body::Bytes>;
     fn poll_next(
         self: std::pin::Pin<&mut Self>,
@@ -906,16 +914,39 @@ impl futures_util::stream::Stream for GuardedStream {
     ) -> std::task::Poll<Option<Self::Item>> {
         let this = self.get_mut();
         let polled = this.inner.as_mut().poll_next(cx);
-        if let std::task::Poll::Ready(Some(Ok(chunk))) = &polled {
-            if !chunk.is_empty() {
-                this.guard.streamed = true;
+        match &polled {
+            std::task::Poll::Ready(Some(Ok(chunk))) => {
+                let chunk = chunk.clone();
+                this.observe(&chunk);
             }
+            std::task::Poll::Ready(None) => {
+                // Flush any trailing frame that lacked a final blank line.
+                if let Some(meter) = this.meter.as_mut() {
+                    if !this.pending.is_empty() {
+                        let rest = std::mem::take(&mut this.pending);
+                        meter.accumulator.ingest_sse_chunk(&rest);
+                    }
+                }
+            }
+            _ => {}
         }
         polled
     }
 }
 
-/// Send one chat request (BYOK path — no fallback, no credits).
+impl Drop for MeteredStream {
+    fn drop(&mut self) {
+        if let Some(mut meter) = self.meter.take() {
+            if !self.pending.is_empty() {
+                let rest = std::mem::take(&mut self.pending);
+                meter.accumulator.ingest_sse_chunk(&rest);
+            }
+            meter.settle();
+        }
+    }
+}
+
+/// Send one chat request (BYOK path — no fallback, no quota charge).
 async fn send_chat_once(
     client: reqwest::Client,
     base_url: &str,
@@ -1188,8 +1219,8 @@ fn build_router(state: AppState) -> Router {
         .merge(settings::routes())
         .merge(profile::routes())
         .merge(admin::routes())
-        .merge(credits::user_routes())
-        .merge(credits::admin_routes())
+        .merge(quota::user_routes())
+        .merge(quota::admin_routes())
         .merge(channels::admin_routes())
         .merge(channels::user_routes())
         .merge(payments::user_routes())

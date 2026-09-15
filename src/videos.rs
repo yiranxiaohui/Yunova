@@ -25,9 +25,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     channels,
     channels::{ModelPrice, SizeRule},
-    credits,
-    credits::LedgerMeta,
     db::{self, DbKind, Pool},
+    quota,
+    quota::{LedgerMeta, QuotaRate},
     net_guard,
     storage::{MediaKind, MediaStorage},
     AppState, CurrentUser, InstalledState,
@@ -59,8 +59,9 @@ fn supports_seconds(p: &ModelPrice, seconds: i64) -> bool {
         .is_some_and(|allowed| allowed.contains(&seconds))
 }
 
-/// None when seconds/size are not in the model's effective rules.
-pub fn compute_cost(p: &ModelPrice, seconds: i64, size: &str) -> Option<i64> {
+/// Upstream price of one clip in micro-USD, or None when seconds/size are not
+/// in the model's effective rules.
+pub fn compute_price(p: &ModelPrice, seconds: i64, size: &str) -> Option<i64> {
     if !supports_seconds(p, seconds) {
         return None;
     }
@@ -70,26 +71,39 @@ pub fn compute_cost(p: &ModelPrice, seconds: i64, size: &str) -> Option<i64> {
         .iter()
         .find(|r| r.size == size)?
         .multiplier;
-    let raw = (p.base_credits + p.per_second * seconds) * mult;
+    let raw = (p.base_price + p.per_second_price * seconds) * mult;
     Some((raw + 50) / 100) // round half up on the percent multiplier
+}
+
+/// Quota charged for one clip, applying the site's USD→quota rate and markup.
+pub fn compute_cost(rate: QuotaRate, p: &ModelPrice, seconds: i64, size: &str) -> Option<i64> {
+    compute_price(p, seconds, size).map(|micro| rate.quota_for_micro_usd(micro))
 }
 
 #[cfg(test)]
 mod pricing_tests {
     use super::*;
 
+    /// $1 of upstream spend = 500_000 quota, no markup.
+    const RATE: QuotaRate = QuotaRate { quota_per_usd: 500_000, multiplier_percent: 100 };
+
+    /// A clip model priced at $0.005 base + $0.005/second, the micro-USD
+    /// equivalent of the 5 + 5 credits these tests used before the quota switch.
     fn video_price(model: &str, allowed_seconds: Vec<i64>) -> ModelPrice {
         ModelPrice {
             id: 1,
             model: model.to_string(),
             kind: "video".to_string(),
-            cost_credits: 0,
             display_name: None,
             enabled: true,
             protocol: "openai".to_string(),
             context_limit: None,
-            base_credits: 5,
-            per_second: 5,
+            input_price: 0,
+            output_price: 0,
+            cached_input_price: None,
+            per_call_price: 0,
+            base_price: 5_000,
+            per_second_price: 5_000,
             allowed_seconds: Some(allowed_seconds),
             size_rules: Some(vec![SizeRule {
                 size: "1280x720".to_string(),
@@ -98,26 +112,58 @@ mod pricing_tests {
         }
     }
 
+    /// Quota for a price expressed in the per-1000-micro-USD "credit" unit the
+    /// old fixtures used, so the expectations below stay readable.
+    fn quota_of(units: i64) -> i64 {
+        RATE.quota_for_micro_usd(units * 1_000)
+    }
+
     #[test]
     fn grok_accepts_every_whole_second_from_one_through_fifteen() {
         let price = video_price("grok-imagine-video", vec![4, 8, 12]);
 
         for seconds in 1..=15 {
             assert_eq!(
-                compute_cost(&price, seconds, "1280x720"),
-                Some(5 + 5 * seconds)
+                compute_cost(RATE, &price, seconds, "1280x720"),
+                Some(quota_of(5 + 5 * seconds))
             );
         }
-        assert_eq!(compute_cost(&price, 0, "1280x720"), None);
-        assert_eq!(compute_cost(&price, 16, "1280x720"), None);
+        assert_eq!(compute_cost(RATE, &price, 0, "1280x720"), None);
+        assert_eq!(compute_cost(RATE, &price, 16, "1280x720"), None);
     }
 
     #[test]
     fn other_models_keep_their_configured_discrete_durations() {
         let price = video_price("veo3.1-fast", vec![4, 8]);
 
-        assert_eq!(compute_cost(&price, 4, "1280x720"), Some(25));
-        assert_eq!(compute_cost(&price, 6, "1280x720"), None);
+        assert_eq!(compute_cost(RATE, &price, 4, "1280x720"), Some(quota_of(25)));
+        assert_eq!(compute_cost(RATE, &price, 6, "1280x720"), None);
+    }
+
+    #[test]
+    fn the_size_multiplier_scales_the_upstream_price() {
+        let mut price = video_price("veo3.1-fast", vec![4]);
+        price.size_rules = Some(vec![
+            SizeRule { size: "1280x720".into(), multiplier: 100 },
+            SizeRule { size: "1920x1080".into(), multiplier: 250 },
+        ]);
+
+        assert_eq!(compute_price(&price, 4, "1280x720"), Some(25_000));
+        assert_eq!(compute_price(&price, 4, "1920x1080"), Some(62_500));
+        // An unlisted resolution is rejected rather than billed at 1x.
+        assert_eq!(compute_price(&price, 4, "4096x2160"), None);
+    }
+
+    #[test]
+    fn the_global_markup_raises_the_quota_charged_for_a_clip() {
+        let price = video_price("veo3.1-fast", vec![4]);
+        let marked_up = QuotaRate { quota_per_usd: 500_000, multiplier_percent: 150 };
+
+        let base = compute_cost(RATE, &price, 4, "1280x720").unwrap();
+        assert_eq!(
+            compute_cost(marked_up, &price, 4, "1280x720"),
+            Some(base * 3 / 2)
+        );
     }
 }
 
@@ -188,8 +234,8 @@ fn parse_custom_models(body: &serde_json::Value) -> Vec<String> {
 struct UserVideoModel {
     model: String,
     display_name: Option<String>,
-    base_credits: i64,
-    per_second: i64,
+    base_quota: i64,
+    per_second_quota: i64,
     allowed_seconds: Vec<i64>,
     size_rules: Vec<SizeRule>,
 }
@@ -207,6 +253,7 @@ async fn user_list_models(Extension(s): Extension<InstalledState>) -> Response {
         Ok(None) => return Json(Vec::<UserVideoModel>::new()).into_response(),
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
+    let rate = QuotaRate::load(&s.pool, s.kind).await;
     let out: Vec<UserVideoModel> = pricing
         .into_iter()
         .filter(|p| p.enabled && p.kind == "video")
@@ -215,8 +262,8 @@ async fn user_list_models(Extension(s): Extension<InstalledState>) -> Response {
             UserVideoModel {
                 model: p.model,
                 display_name: p.display_name,
-                base_credits: p.base_credits,
-                per_second: p.per_second,
+                base_quota: rate.quota_for_micro_usd(p.base_price),
+                per_second_quota: rate.quota_for_micro_usd(p.per_second_price),
                 allowed_seconds,
                 size_rules: p.size_rules.unwrap_or_default(),
             }
@@ -375,7 +422,7 @@ pub(crate) async fn workflow_video_state(
     })
 }
 
-/// Refund a job's cost_credits exactly once. The UPDATE-guard makes retries
+/// Refund a job's cost_quota exactly once. The UPDATE-guard makes retries
 /// (sweeper + poll racing) safe: only the caller that flips refunded gets to
 /// grant.
 pub(crate) async fn refund_job(
@@ -405,7 +452,7 @@ pub(crate) async fn refund_job(
         return; // already refunded (or DB error — err on not double-granting)
     }
     let reason = format!("refund_video_{model}_{suffix}");
-    let _ = credits::grant(
+    let _ = quota::grant(
         pool,
         kind,
         user_id,
@@ -436,7 +483,7 @@ async fn insert_job(
         kind,
         &format!(
             "INSERT INTO video_jobs \
-             (token, user_id, model, prompt, seconds, size, input_image_path, channel_id, cost_credits, status) \
+             (token, user_id, model, prompt, seconds, size, input_image_path, channel_id, cost_quota, status) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'){returning}"
         ),
     );
@@ -505,7 +552,7 @@ async fn create_job(
         return err(StatusCode::BAD_REQUEST, "prompt 不能为空");
     }
 
-    // Load the optional reference image before validation/credits so malformed
+    // Load the optional reference image before validation/billing so malformed
     // image paths never consume a platform balance.
     let mut image_bytes: Option<Vec<u8>> = None;
     let mut image_name: String = String::new();
@@ -556,13 +603,14 @@ async fn create_job(
             Ok(_) => return err(StatusCode::BAD_REQUEST, "模型不存在或未启用"),
             Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };
-        cost = match compute_cost(&pricing, req.seconds, &req.size) {
+        let rate = QuotaRate::load(pool, kind).await;
+        cost = match compute_cost(rate, &pricing, req.seconds, &req.size) {
             Some(c) => c,
             None => return err(StatusCode::BAD_REQUEST, "该模型不支持所选时长或分辨率"),
         };
 
         // Deduct first, then attempt upstream — refunds happen on any failure past this point.
-        match credits::try_deduct(
+        match quota::try_deduct(
             pool,
             kind,
             user.id,
@@ -576,7 +624,7 @@ async fn create_job(
             Err(balance) => {
                 return err(
                     StatusCode::PAYMENT_REQUIRED,
-                    format!("积分不足：需要 {cost}，当前余额 {balance}"),
+                    format!("额度不足：需要 {cost}，当前剩余 {balance}"),
                 );
             }
         }
@@ -585,7 +633,7 @@ async fn create_job(
             match channels::select_one_by_advertised_model(&state.http, pool, kind, &model).await {
                 Ok(Some(c)) => Some(c),
                 Ok(None) => {
-                    let _ = credits::grant(
+                    let _ = quota::grant(
                         pool,
                         kind,
                         user.id,
@@ -600,7 +648,7 @@ async fn create_job(
                     );
                 }
                 Err(e) => {
-                    let _ = credits::grant(
+                    let _ = quota::grant(
                         pool,
                         kind,
                         user.id,
@@ -657,7 +705,7 @@ async fn create_job(
     {
         Ok(id) => id,
         Err(e) => {
-            let _ = credits::grant(
+            let _ = quota::grant(
                 pool,
                 kind,
                 user.id,
@@ -762,11 +810,11 @@ async fn create_job(
     if updated == 0 {
         // Row was already reaped (and refunded) by the sweeper as an orphan
         // while our upstream POST was still in flight. The video may still
-        // get created upstream, but we must not double-grant credits here —
+        // get created upstream, but we must not double-grant quota here —
         // just report the failure to the caller.
         return err(
             StatusCode::BAD_GATEWAY,
-            "任务已超时被回收，积分已退还，请重试".to_string(),
+            "任务已超时被回收，额度已退还，请重试".to_string(),
         );
     }
 
@@ -828,7 +876,7 @@ struct JobRowRaw {
     input_image_path: Option<String>,
     upstream_video_id: Option<String>,
     channel_id: Option<i64>,
-    cost_credits: i64,
+    cost_quota: i64,
     status: String,
     progress: i64,
     video_path: Option<String>,
@@ -854,7 +902,7 @@ struct JobRow {
     input_image_path: Option<String>,
     upstream_video_id: Option<String>,
     channel_id: Option<i64>,
-    cost_credits: i64,
+    cost_quota: i64,
     status: String,
     progress: i64,
     video_path: Option<String>,
@@ -882,7 +930,7 @@ impl From<JobRowRaw> for JobRow {
             input_image_path: r.input_image_path,
             upstream_video_id: r.upstream_video_id,
             channel_id: r.channel_id,
-            cost_credits: r.cost_credits,
+            cost_quota: r.cost_quota,
             status: r.status,
             progress: r.progress,
             video_path: r.video_path,
@@ -898,7 +946,7 @@ impl From<JobRowRaw> for JobRow {
 }
 
 const JOB_COLS: &str = "id, user_id, token, model, prompt, seconds, size, input_image_path, \
-     upstream_video_id, channel_id, cost_credits, status, progress, video_path, error, \
+     upstream_video_id, channel_id, cost_quota, status, progress, video_path, error, \
      __REFUNDED__, download_retries, __POLLING__, last_polled_at, created_at, finished_at";
 
 fn job_cols(kind: DbKind) -> String {
@@ -919,7 +967,7 @@ struct JobView {
     progress: i64,
     video_path: Option<String>,
     error: Option<String>,
-    cost_credits: i64,
+    cost_quota: i64,
     refunded: bool,
     created_at: String,
     finished_at: Option<String>,
@@ -938,7 +986,7 @@ impl From<&JobRow> for JobView {
             progress: r.progress,
             video_path: r.video_path.clone(),
             error: r.error.clone(),
-            cost_credits: r.cost_credits,
+            cost_quota: r.cost_quota,
             refunded: r.refunded,
             created_at: r.created_at.clone(),
             finished_at: r.finished_at.clone(),
@@ -1052,7 +1100,7 @@ pub async fn sweep(http: &reqwest::Client, pool: &Pool, kind: DbKind, storage: &
         let sql = db::q(
             kind,
             &format!(
-                "SELECT id, user_id, model, cost_credits FROM video_jobs \
+                "SELECT id, user_id, model, cost_quota FROM video_jobs \
                  WHERE status IN ('pending','running') AND created_at < {}",
                 minutes_ago_expr(kind, 120)
             ),
@@ -1129,7 +1177,7 @@ async fn poll_upstream_once(
             job.id,
             job.user_id,
             &job.model,
-            job.cost_credits,
+            job.cost_quota,
             "create_error",
         )
         .await;
@@ -1148,7 +1196,7 @@ async fn poll_upstream_once(
                         job.id,
                         job.user_id,
                         &job.model,
-                        job.cost_credits,
+                        job.cost_quota,
                         "upstream_failed",
                     )
                     .await;
@@ -1239,7 +1287,7 @@ async fn poll_upstream_once(
                 job.id,
                 job.user_id,
                 &job.model,
-                job.cost_credits,
+                job.cost_quota,
                 "upstream_failed",
             )
             .await;
@@ -1374,7 +1422,7 @@ async fn handle_download_failure(pool: &Pool, kind: DbKind, job: &JobRow, msg: &
             job.id,
             job.user_id,
             &job.model,
-            job.cost_credits,
+            job.cost_quota,
             "download_failed",
         )
         .await;
@@ -1676,7 +1724,7 @@ mod tests {
             input_image_path: Some("/api/images/reference.png".to_string()),
             upstream_video_id: None,
             channel_id: Some(3),
-            cost_credits: 25,
+            cost_quota: 25,
             status: "failed".to_string(),
             progress: 0,
             video_path: None,

@@ -13,7 +13,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AppState, CurrentUser, channels, credits, db,
+    AppState, CurrentUser, channels, db, quota,
     net_guard,
     storage::{MediaKind, MediaStorage},
 };
@@ -122,14 +122,14 @@ fn override_json_model(body: &[u8], new_model: &str) -> Vec<u8> {
     serde_json::to_vec(&v).unwrap_or_else(|_| body.to_vec())
 }
 
-async fn deduct_image_credits(
+async fn deduct_image_quota(
     state: &AppState,
     user_id: i64,
     protocol: &str,
     model: &str,
 ) -> Result<(), Response> {
     let installed = state.require_installed().await.map_err(|r| r)?;
-    match channels::try_deduct_for_model(
+    match channels::try_deduct_per_call(
         &installed.pool,
         installed.kind,
         user_id,
@@ -149,18 +149,18 @@ async fn deduct_image_credits(
         Err(channels::DeductError::Insufficient { balance, cost }) => Err((
             StatusCode::PAYMENT_REQUIRED,
             format!(
-                "积分不足：当前 {balance}，每次生图需要 {cost}；请在设置里填入自己的 API Key，或联系管理员充值"
+                "额度不足：当前剩余 {balance}，本次生图需要 {cost}；请在设置里填入自己的 API Key，或联系管理员充值"
             ),
         )
             .into_response()),
     }
 }
 
-async fn refund_image_credits(state: &AppState, user_id: i64, model: &str, reason: &str) {
+async fn refund_image_quota(state: &AppState, user_id: i64, model: &str, reason: &str) {
     let Ok(installed) = state.require_installed().await else {
         return;
     };
-    let cost = channels::cost_for_model(&installed.pool, installed.kind, model, "image")
+    let cost = channels::per_call_quota(&installed.pool, installed.kind, model, "image")
         .await
         .unwrap_or(0);
     if cost > 0 {
@@ -169,13 +169,13 @@ async fn refund_image_credits(state: &AppState, user_id: i64, model: &str, reaso
         // (e.g. refund_upstream_error); strip that prefix to avoid double "refund_".
         let suffix = reason.strip_prefix("refund_").unwrap_or(reason);
         let formatted = format!("refund_image_{model}_{suffix}");
-        let _ = credits::grant(
+        let _ = quota::grant(
             &installed.pool,
             installed.kind,
             user_id,
             cost,
             &formatted,
-            &credits::LedgerMeta::refund_image(model),
+            &quota::LedgerMeta::refund_image(model),
         )
         .await;
     }
@@ -493,7 +493,7 @@ async fn proxy_openai_images(
         _ => body.to_vec(),
     };
     if used_shared {
-        if let Err(r) = deduct_image_credits(&state, user.id, "openai", &_client_model).await {
+        if let Err(r) = deduct_image_quota(&state, user.id, "openai", &_client_model).await {
             return r;
         }
     }
@@ -501,7 +501,7 @@ async fn proxy_openai_images(
         Ok(r) => Json(r).into_response(),
         Err(e) => {
             if used_shared {
-                refund_image_credits(&state, user.id, &_client_model, "refund_upstream_error").await;
+                refund_image_quota(&state, user.id, &_client_model, "refund_upstream_error").await;
             }
             err(StatusCode::BAD_GATEWAY, e.0)
         }
@@ -527,7 +527,7 @@ async fn proxy_openai_images_edits(
         _ => return err(StatusCode::BAD_REQUEST, "expected multipart/form-data body"),
     };
     if used_shared {
-        if let Err(r) = deduct_image_credits(&state, user.id, "openai", &_client_model).await {
+        if let Err(r) = deduct_image_quota(&state, user.id, "openai", &_client_model).await {
             return r;
         }
     }
@@ -546,7 +546,7 @@ async fn proxy_openai_images_edits(
         Ok(r) => Json(r).into_response(),
         Err(e) => {
             if used_shared {
-                refund_image_credits(&state, user.id, &_client_model, "refund_upstream_error").await;
+                refund_image_quota(&state, user.id, &_client_model, "refund_upstream_error").await;
             }
             err(StatusCode::BAD_GATEWAY, e.0)
         }
@@ -571,7 +571,7 @@ async fn proxy_gemini_images(
             Err(r) => return r,
         };
     if used_shared {
-        if let Err(r) = deduct_image_credits(&state, user.id, "gemini", &_client_model).await {
+        if let Err(r) = deduct_image_quota(&state, user.id, "gemini", &_client_model).await {
             return r;
         }
     }
@@ -579,7 +579,7 @@ async fn proxy_gemini_images(
         Ok(r) => Json(r).into_response(),
         Err(e) => {
             if used_shared {
-                refund_image_credits(&state, user.id, &_client_model, "refund_upstream_error").await;
+                refund_image_quota(&state, user.id, &_client_model, "refund_upstream_error").await;
             }
             err(StatusCode::BAD_GATEWAY, e.0)
         }
@@ -707,7 +707,7 @@ async fn start_openai_generate_job(
         _ => body.to_vec(),
     };
     if used_shared {
-        if let Err(r) = deduct_image_credits(&state, user.id, "openai", &_client_model).await {
+        if let Err(r) = deduct_image_quota(&state, user.id, "openai", &_client_model).await {
             return r;
         }
     }
@@ -715,7 +715,7 @@ async fn start_openai_generate_job(
         Ok(t) => t,
         Err(r) => {
             if used_shared {
-                refund_image_credits(&state, user.id, &_client_model, "refund_job_create_error").await;
+                refund_image_quota(&state, user.id, &_client_model, "refund_job_create_error").await;
             }
             return r;
         }
@@ -734,7 +734,7 @@ async fn start_openai_generate_job(
             Ok(r) => mark_done(&state_c, &token_c, &r).await,
             Err(e) => {
                 if used_shared {
-                    refund_image_credits(&state_c, user.id, &_client_model, "refund_upstream_error").await;
+                    refund_image_quota(&state_c, user.id, &_client_model, "refund_upstream_error").await;
                 }
                 mark_failed(&state_c, &token_c, &e.0).await;
             }
@@ -763,7 +763,7 @@ async fn start_openai_edit_job(
         _ => return err(StatusCode::BAD_REQUEST, "expected multipart/form-data body"),
     };
     if used_shared {
-        if let Err(r) = deduct_image_credits(&state, user.id, "openai", &_client_model).await {
+        if let Err(r) = deduct_image_quota(&state, user.id, "openai", &_client_model).await {
             return r;
         }
     }
@@ -771,7 +771,7 @@ async fn start_openai_edit_job(
         Ok(t) => t,
         Err(r) => {
             if used_shared {
-                refund_image_credits(&state, user.id, &_client_model, "refund_job_create_error").await;
+                refund_image_quota(&state, user.id, &_client_model, "refund_job_create_error").await;
             }
             return r;
         }
@@ -797,7 +797,7 @@ async fn start_openai_edit_job(
             Ok(r) => mark_done(&state_c, &token_c, &r).await,
             Err(e) => {
                 if used_shared {
-                    refund_image_credits(&state_c, user.id, &_client_model, "refund_upstream_error").await;
+                    refund_image_quota(&state_c, user.id, &_client_model, "refund_upstream_error").await;
                 }
                 mark_failed(&state_c, &token_c, &e.0).await;
             }
@@ -825,7 +825,7 @@ async fn start_gemini_job(
             Err(r) => return r,
         };
     if used_shared {
-        if let Err(r) = deduct_image_credits(&state, user.id, "gemini", &_client_model).await {
+        if let Err(r) = deduct_image_quota(&state, user.id, "gemini", &_client_model).await {
             return r;
         }
     }
@@ -833,7 +833,7 @@ async fn start_gemini_job(
         Ok(t) => t,
         Err(r) => {
             if used_shared {
-                refund_image_credits(&state, user.id, &_client_model, "refund_job_create_error").await;
+                refund_image_quota(&state, user.id, &_client_model, "refund_job_create_error").await;
             }
             return r;
         }
@@ -853,7 +853,7 @@ async fn start_gemini_job(
             Ok(r) => mark_done(&state_c, &token_c, &r).await,
             Err(e) => {
                 if used_shared {
-                    refund_image_credits(&state_c, user.id, &_client_model, "refund_upstream_error").await;
+                    refund_image_quota(&state_c, user.id, &_client_model, "refund_upstream_error").await;
                 }
                 mark_failed(&state_c, &token_c, &e.0).await;
             }
@@ -1056,7 +1056,7 @@ async fn start_openai_responses_job(
         .unwrap_or_else(|| "gpt-image-1".into());
 
     if used_shared {
-        if let Err(r) = deduct_image_credits(&state, user.id, "openai", &_client_model).await {
+        if let Err(r) = deduct_image_quota(&state, user.id, "openai", &_client_model).await {
             return r;
         }
     }
@@ -1065,7 +1065,7 @@ async fn start_openai_responses_job(
         Ok(t) => t,
         Err(r) => {
             if used_shared {
-                refund_image_credits(&state, user.id, &_client_model, "refund_job_create_error").await;
+                refund_image_quota(&state, user.id, &_client_model, "refund_job_create_error").await;
             }
             return r;
         }
@@ -1083,7 +1083,7 @@ async fn start_openai_responses_job(
         let input = build_responses_input(&state_c.storage, &history).await;
         if input.is_empty() {
             if used_shared {
-                refund_image_credits(&state_c, user.id, &_client_model, "refund_upstream_error").await;
+                refund_image_quota(&state_c, user.id, &_client_model, "refund_upstream_error").await;
             }
             mark_failed(&state_c, &token_c, "history 展开后为空").await;
             return;
@@ -1121,7 +1121,7 @@ async fn start_openai_responses_job(
             Ok(c) => c,
             Err(_) => {
                 if used_shared {
-                    refund_image_credits(&state_c, user.id, &_client_model, "refund_upstream_error").await;
+                    refund_image_quota(&state_c, user.id, &_client_model, "refund_upstream_error").await;
                 }
                 mark_failed(&state_c, &token_c, "HTTP client 构建失败").await;
                 return;
@@ -1139,7 +1139,7 @@ async fn start_openai_responses_job(
             Ok(r) => r,
             Err(e) => {
                 if used_shared {
-                    refund_image_credits(&state_c, user.id, &_client_model, "refund_upstream_error").await;
+                    refund_image_quota(&state_c, user.id, &_client_model, "refund_upstream_error").await;
                 }
                 mark_failed(&state_c, &token_c, &format!("upstream: {e}")).await;
                 return;
@@ -1150,7 +1150,7 @@ async fn start_openai_responses_job(
         let raw = resp.bytes().await.unwrap_or_default();
         if !status.is_success() {
             if used_shared {
-                refund_image_credits(&state_c, user.id, &_client_model, "refund_upstream_error").await;
+                refund_image_quota(&state_c, user.id, &_client_model, "refund_upstream_error").await;
             }
             mark_failed(
                 &state_c,
@@ -1165,7 +1165,7 @@ async fn start_openai_responses_job(
             Ok(v) => v,
             Err(e) => {
                 if used_shared {
-                    refund_image_credits(&state_c, user.id, &_client_model, "refund_upstream_error").await;
+                    refund_image_quota(&state_c, user.id, &_client_model, "refund_upstream_error").await;
                 }
                 mark_failed(&state_c, &token_c, &format!("parse: {e}")).await;
                 return;
@@ -1221,7 +1221,7 @@ async fn start_openai_responses_job(
 
         if out_images.is_empty() && text_out.is_empty() {
             if used_shared {
-                refund_image_credits(&state_c, user.id, &_client_model, "refund_upstream_error").await;
+                refund_image_quota(&state_c, user.id, &_client_model, "refund_upstream_error").await;
             }
             mark_failed(&state_c, &token_c, "上游未返回图片或文本").await;
             return;

@@ -333,14 +333,14 @@ export function ProfileDialog({ open, onClose }: Props) {
               <span className="ml-auto text-xs text-muted-foreground">
                 已邀请 <b className="text-foreground">{invite.invited_count}</b>{" "}
                 · 获得 <b className="text-foreground">{invite.total_earned}</b>{" "}
-                积分
+                额度
               </span>
             </div>
             <p className="text-xs text-muted-foreground">
               好友用你的邀请码注册后，你获得{" "}
-              <b className="text-foreground">{invite.grant_inviter}</b> 积分，
+              <b className="text-foreground">{invite.grant_inviter}</b> 额度，
               对方额外获得{" "}
-              <b className="text-foreground">{invite.grant_invitee}</b> 积分。
+              <b className="text-foreground">{invite.grant_invitee}</b> 额度。
             </p>
             <div className="flex items-center gap-2">
               <Input

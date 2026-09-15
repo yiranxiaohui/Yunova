@@ -2,8 +2,11 @@
 //!
 //! Tables (see migrations/{sqlite,postgres,mysql}/0019_channels_pricing.sql):
 //!   * `upstream_channels`  — admin-managed providers (protocol/base_url/api_key/enabled/priority)
-//!   * `model_pricing`      — whitelist of callable models + credit cost per call
+//!   * `model_pricing`      — whitelist of callable models + their official-rate prices
 //!   * `channel_models`     — which channels serve which model (optional upstream id alias)
+//!
+//! Prices are micro-USD (see [`crate::quota`]): chat models bill per token,
+//! image models per call, and video models per second.
 //!
 //! See: docs/plans/2026-05-18-multi-channel-pricing.md
 
@@ -49,14 +52,20 @@ pub struct ModelPrice {
     pub id: i64,
     pub model: String,
     pub kind: String,
-    pub cost_credits: i64,
     pub display_name: Option<String>,
     pub enabled: bool,
     pub protocol: String,
     pub context_limit: Option<i64>,
-    // video-kind billing: cost = (base_credits + per_second * seconds) * size multiplier
-    pub base_credits: i64,
-    pub per_second: i64,
+    // chat billing: micro-USD per 1M tokens, mirroring published provider rates.
+    // `cached_input_price` is None when the provider has no prompt-cache discount.
+    pub input_price: i64,
+    pub output_price: i64,
+    pub cached_input_price: Option<i64>,
+    /// image billing: micro-USD per generation call.
+    pub per_call_price: i64,
+    // video billing: cost = (base_price + per_second_price * seconds) * size multiplier
+    pub base_price: i64,
+    pub per_second_price: i64,
     pub allowed_seconds: Option<Vec<i64>>,
     pub size_rules: Option<Vec<SizeRule>>,
 }
@@ -479,33 +488,43 @@ pub async fn set_channel_models(
 // model_pricing
 // ---------------------------------------------------------------------------
 
+/// One `model_pricing` row. sqlx decodes tuples up to 16 elements, which the
+/// 15 selected columns fit exactly.
 type PriceRow = (
-    i64, String, String, i64, Option<String>, i64, String, Option<i64>,
-    i64, i64, Option<String>, Option<String>,
+    i64, String, String, Option<String>, i64, String, Option<i64>,
+    i64, i64, Option<i64>, i64, i64, i64, Option<String>, Option<String>,
 );
 
 fn parse_price_row(
-    (id, model, kind_, cost_credits, display_name, enabled, protocol, context_limit,
-     base_credits, per_second, allowed_seconds, size_rules): PriceRow,
+    (id, model, kind_, display_name, enabled, protocol, context_limit,
+     input_price, output_price, cached_input_price, per_call_price,
+     base_price, per_second_price, allowed_seconds, size_rules): PriceRow,
 ) -> ModelPrice {
     ModelPrice {
         id,
         model,
         kind: kind_,
-        cost_credits,
         display_name,
         enabled: enabled != 0,
         protocol,
         context_limit,
-        base_credits,
-        per_second,
+        input_price,
+        output_price,
+        // 0 means the admin left the field blank; treat it as "no cache
+        // discount" so cached tokens fall back to the input rate instead of
+        // becoming free.
+        cached_input_price: cached_input_price.filter(|v| *v > 0),
+        per_call_price,
+        base_price,
+        per_second_price,
         allowed_seconds: allowed_seconds.map(|s| serde_json::from_str(&s).unwrap_or_default()),
         size_rules: size_rules.map(|s| serde_json::from_str(&s).unwrap_or_default()),
     }
 }
 
-const PRICE_COLS: &str = "id, model, kind, cost_credits, display_name, {enabled_col}, protocol, \
-     context_limit, base_credits, per_second, allowed_seconds, size_rules";
+const PRICE_COLS: &str = "id, model, kind, display_name, {enabled_col}, protocol, context_limit, \
+     input_price, output_price, cached_input_price, per_call_price, \
+     base_price, per_second_price, allowed_seconds, size_rules";
 
 fn price_select(kind: DbKind, tail: &str) -> String {
     let enabled_col = db::bool_as_int(kind, "enabled");
@@ -538,8 +557,6 @@ pub struct PricingInput {
     #[serde(default)]
     pub channel_ids: Option<Vec<i64>>,
     #[serde(default)]
-    pub cost_credits: i64,
-    #[serde(default)]
     pub display_name: Option<String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -547,11 +564,21 @@ pub struct PricingInput {
     pub protocol: String,
     #[serde(default)]
     pub context_limit: Option<i64>,
-    // video-kind billing fields; ignored for chat/image
+    // chat billing: micro-USD per 1M tokens (the provider's published rate).
     #[serde(default)]
-    pub base_credits: i64,
+    pub input_price: i64,
     #[serde(default)]
-    pub per_second: i64,
+    pub output_price: i64,
+    #[serde(default)]
+    pub cached_input_price: Option<i64>,
+    /// image billing: micro-USD per call.
+    #[serde(default)]
+    pub per_call_price: i64,
+    // video billing fields; ignored for chat/image
+    #[serde(default)]
+    pub base_price: i64,
+    #[serde(default)]
+    pub per_second_price: i64,
     #[serde(default)]
     pub allowed_seconds: Option<Vec<i64>>,
     #[serde(default)]
@@ -565,17 +592,26 @@ pub fn validate_pricing_input(input: &PricingInput) -> Result<(), String> {
     if input.model.trim().is_empty() {
         return Err("model 不能为空".into());
     }
-    if input.cost_credits < 0 {
-        return Err("cost_credits must be >= 0".into());
+    for (label, value) in [
+        ("输入价格", input.input_price),
+        ("输出价格", input.output_price),
+        ("每次调用价格", input.per_call_price),
+    ] {
+        if value < 0 {
+            return Err(format!("{label}必须 >= 0"));
+        }
+    }
+    if input.cached_input_price.is_some_and(|v| v < 0) {
+        return Err("缓存输入价格必须 >= 0".into());
     }
     if input.kind != "video" {
         return Ok(());
     }
-    if input.base_credits < 0 {
-        return Err("base_credits 必须 >= 0".into());
+    if input.base_price < 0 {
+        return Err("基础价格必须 >= 0".into());
     }
-    if input.per_second < 0 {
-        return Err("per_second 必须 >= 0".into());
+    if input.per_second_price < 0 {
+        return Err("每秒价格必须 >= 0".into());
     }
     let seconds = input.allowed_seconds.as_deref().unwrap_or(&[]);
     if seconds.is_empty() {
@@ -608,64 +644,85 @@ pub async fn upsert_price(
     kind: DbKind,
     input: &PricingInput,
 ) -> Result<(), sqlx::Error> {
+    const COLS: &str = "model, kind, display_name, enabled, protocol, context_limit, \
+         input_price, output_price, cached_input_price, per_call_price, \
+         base_price, per_second_price, allowed_seconds, size_rules";
+    const PLACEHOLDERS: &str = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+    /// Every column except the natural key `model`, which identifies the row.
+    const UPDATED: &[&str] = &[
+        "kind", "display_name", "enabled", "protocol", "context_limit",
+        "input_price", "output_price", "cached_input_price", "per_call_price",
+        "base_price", "per_second_price", "allowed_seconds", "size_rules",
+    ];
+
     let now = db::now_expr(kind);
+    let assignments = |src: &str| {
+        UPDATED
+            .iter()
+            .map(|c| format!("{c} = {src}.{c}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let sql = match kind {
         DbKind::Sqlite => format!(
-            "INSERT INTO model_pricing (model, kind, cost_credits, display_name, enabled, protocol, context_limit, \
-             base_credits, per_second, allowed_seconds, size_rules, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}) \
-             ON CONFLICT(model) DO UPDATE SET kind = excluded.kind, cost_credits = excluded.cost_credits, \
-             display_name = excluded.display_name, enabled = excluded.enabled, protocol = excluded.protocol, \
-             context_limit = excluded.context_limit, base_credits = excluded.base_credits, \
-             per_second = excluded.per_second, allowed_seconds = excluded.allowed_seconds, \
-             size_rules = excluded.size_rules, updated_at = {now}"
+            "INSERT INTO model_pricing ({COLS}, updated_at) VALUES ({PLACEHOLDERS}, {now}) \
+             ON CONFLICT(model) DO UPDATE SET {}, updated_at = {now}",
+            assignments("excluded")
         ),
         DbKind::Postgres => format!(
-            "INSERT INTO model_pricing (model, kind, cost_credits, display_name, enabled, protocol, context_limit, \
-             base_credits, per_second, allowed_seconds, size_rules, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}) \
-             ON CONFLICT (model) DO UPDATE SET kind = EXCLUDED.kind, cost_credits = EXCLUDED.cost_credits, \
-             display_name = EXCLUDED.display_name, enabled = EXCLUDED.enabled, protocol = EXCLUDED.protocol, \
-             context_limit = EXCLUDED.context_limit, base_credits = EXCLUDED.base_credits, \
-             per_second = EXCLUDED.per_second, allowed_seconds = EXCLUDED.allowed_seconds, \
-             size_rules = EXCLUDED.size_rules, updated_at = {now}"
+            "INSERT INTO model_pricing ({COLS}, updated_at) VALUES ({PLACEHOLDERS}, {now}) \
+             ON CONFLICT (model) DO UPDATE SET {}, updated_at = {now}",
+            assignments("EXCLUDED")
         ),
         DbKind::Mysql => format!(
-            "INSERT INTO model_pricing (model, kind, cost_credits, display_name, enabled, protocol, context_limit, \
-             base_credits, per_second, allowed_seconds, size_rules, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now}) \
-             ON DUPLICATE KEY UPDATE kind = VALUES(kind), cost_credits = VALUES(cost_credits), \
-             display_name = VALUES(display_name), enabled = VALUES(enabled), protocol = VALUES(protocol), \
-             context_limit = VALUES(context_limit), base_credits = VALUES(base_credits), \
-             per_second = VALUES(per_second), allowed_seconds = VALUES(allowed_seconds), \
-             size_rules = VALUES(size_rules), updated_at = {now}"
+            "INSERT INTO model_pricing ({COLS}, updated_at) VALUES ({PLACEHOLDERS}, {now}) \
+             ON DUPLICATE KEY UPDATE {}, updated_at = {now}",
+            UPDATED
+                .iter()
+                .map(|c| format!("{c} = VALUES({c})"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     };
     let sql = db::q(kind, &sql);
     let enabled_v: i64 = if input.enabled { 1 } else { 0 };
     let ctx: Option<i64> = input.context_limit.filter(|n| *n > 0);
     let is_video = input.kind == "video";
+    let is_chat = input.kind == "chat";
+    let is_image = input.kind == "image";
+    let json_or_none = |v: Option<&Vec<SizeRule>>| -> Option<String> {
+        v.map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
+    };
     let allowed_seconds: Option<String> = if is_video {
-        input.allowed_seconds.as_ref().map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
+        input
+            .allowed_seconds
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
     } else {
         None
     };
     let size_rules: Option<String> = if is_video {
-        input.size_rules.as_ref().map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()))
+        json_or_none(input.size_rules.as_ref())
     } else {
         None
     };
+
     let q = sqlx::query(&sql)
         .bind(&input.model)
         .bind(&input.kind)
-        .bind(input.cost_credits)
         .bind(input.display_name.as_deref());
     let q = if matches!(kind, DbKind::Postgres) { q.bind(input.enabled) } else { q.bind(enabled_v) };
+    // Zero out the columns that do not apply to this kind so a model converted
+    // from, say, video to chat cannot keep charging its old per-second rate.
     let q = q
         .bind(&input.protocol)
         .bind(ctx)
-        .bind(if is_video { input.base_credits } else { 0 })
-        .bind(if is_video { input.per_second } else { 0 })
+        .bind(if is_chat { input.input_price } else { 0 })
+        .bind(if is_chat { input.output_price } else { 0 })
+        .bind(if is_chat { input.cached_input_price.filter(|v| *v > 0) } else { None })
+        .bind(if is_image { input.per_call_price } else { 0 })
+        .bind(if is_video { input.base_price } else { 0 })
+        .bind(if is_video { input.per_second_price } else { 0 })
         .bind(allowed_seconds)
         .bind(size_rules);
 
@@ -1095,10 +1152,15 @@ pub fn admin_routes() -> Router<AppState> {
 struct PlatformModel {
     model: String,
     display_name: Option<String>,
-    kind: String, // "chat" | "image"
-    cost_credits: i64,
+    kind: String, // "chat" | "image" | "video"
     protocol: String, // top-priority channel's protocol
     context_limit: Option<i64>,
+    /// Rates already converted to site quota so the picker can show what a
+    /// model costs without knowing about USD or the markup.
+    input_quota_per_1m: i64,
+    output_quota_per_1m: i64,
+    cached_input_quota_per_1m: Option<i64>,
+    per_call_quota: i64,
 }
 
 async fn user_list_platform_models(
@@ -1110,6 +1172,7 @@ async fn user_list_platform_models(
         Ok(v) => v,
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
+    let rate = crate::quota::QuotaRate::load(&s.pool, s.kind).await;
     let mut out: Vec<PlatformModel> = Vec::new();
     for p in pricing {
         if !p.enabled { continue; }
@@ -1130,9 +1193,14 @@ async fn user_list_platform_models(
             model: p.model.clone(),
             display_name: p.display_name.clone(),
             kind: p.kind.clone(),
-            cost_credits: p.cost_credits,
             protocol: p.protocol.clone(),
             context_limit: p.context_limit,
+            input_quota_per_1m: rate.quota_for_micro_usd(p.input_price),
+            output_quota_per_1m: rate.quota_for_micro_usd(p.output_price),
+            cached_input_quota_per_1m: p
+                .cached_input_price
+                .map(|v| rate.quota_for_micro_usd(v)),
+            per_call_quota: rate.quota_for_micro_usd(p.per_call_price),
         });
     }
     Json(out).into_response()
@@ -1296,27 +1364,95 @@ pub async fn resolve_route(
 }
 
 // ---------------------------------------------------------------------------
-// pricing-aware deduct (Task 2.3)
+// pricing-aware quota operations
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
 pub enum DeductError {
-    /// model is not registered in `model_pricing`, or its row is disabled.
+    /// Model missing from `model_pricing` or disabled there.
     NotWhitelisted,
-    /// user's balance is below the model's cost. Carries (current_balance, cost).
+    /// Priced fine, but the account cannot cover it.
     Insufficient { balance: i64, cost: i64 },
 }
 
-/// Look up `model` in `model_pricing` (must match `flavor` and be enabled),
-/// then atomically deduct that many credits from `user_id`.
+/// Resolve `model` in `model_pricing`, requiring it to be enabled and to match
+/// `flavor` ("chat" / "image" / "video"). This is the whitelist gate every
+/// platform-billed request passes through.
+pub async fn enabled_price(
+    pool: &Pool,
+    kind: DbKind,
+    model: &str,
+    flavor: &str,
+) -> Option<ModelPrice> {
+    let price = get_price(pool, kind, model).await.ok().flatten()?;
+    if !price.enabled || price.kind != flavor {
+        return None;
+    }
+    Some(price)
+}
+
+/// Admission check for token-metered chat: confirm the model is open to
+/// platform billing, then confirm the account is not already overdrawn. The
+/// actual charge lands in [`settle_chat`] once the upstream reports usage.
+pub async fn authorize_chat(
+    pool: &Pool,
+    kind: DbKind,
+    user_id: i64,
+    model: &str,
+) -> Result<ModelPrice, DeductError> {
+    let price = enabled_price(pool, kind, model, "chat")
+        .await
+        .ok_or(DeductError::NotWhitelisted)?;
+    // A free model stays usable even at a zero balance.
+    if price.input_price <= 0 && price.output_price <= 0 {
+        return Ok(price);
+    }
+    match crate::quota::has_spendable_balance(pool, kind, user_id).await {
+        Ok(_) => Ok(price),
+        Err(balance) => Err(DeductError::Insufficient { balance, cost: 0 }),
+    }
+}
+
+/// Charge a completed chat call from the token counts the upstream reported.
+///
+/// Prices are re-read here rather than captured at admission time so that the
+/// charge reflects the configuration in force when the call finished. Returns
+/// the quota charged (0 when the upstream reported no usage, which means the
+/// call produced nothing billable).
+pub async fn settle_chat(
+    pool: &Pool,
+    kind: DbKind,
+    user_id: i64,
+    model: &str,
+    protocol: &str,
+    usage: crate::quota::TokenUsage,
+    reason: &str,
+) -> i64 {
+    if usage.is_empty() {
+        return 0;
+    }
+    let Some(price) = enabled_price(pool, kind, model, "chat").await else {
+        return 0;
+    };
+    let rate = crate::quota::QuotaRate::load(pool, kind).await;
+    let cost = crate::quota::chat_quota_cost(
+        rate,
+        price.input_price,
+        price.output_price,
+        price.cached_input_price,
+        usage,
+    );
+    let meta = crate::quota::LedgerMeta::chat_usage(protocol, model, usage);
+    crate::quota::settle(pool, kind, user_id, cost, reason, &meta).await;
+    cost
+}
+
+/// Per-call deduction for image generation, which reports no tokens.
 ///
 /// Returns `(new_balance, cost_deducted)` on success — callers MUST use the
 /// returned `cost` for any refund rather than re-reading the price, which could
-/// change between deduction and refund. Errors:
-///   * `NotWhitelisted` — model is missing or disabled in `model_pricing`.
-///     Caller should respond 403 "model not enabled".
-///   * `Insufficient` — pricing OK but balance too low. Caller responds 402.
-pub async fn try_deduct_for_model(
+/// change between deduction and refund.
+pub async fn try_deduct_per_call(
     pool: &Pool,
     kind: DbKind,
     user_id: i64,
@@ -1325,37 +1461,27 @@ pub async fn try_deduct_for_model(
     protocol: &str,
     reason: &str,
 ) -> Result<(i64, i64), DeductError> {
-    let price = match get_price(pool, kind, model).await {
-        Ok(Some(p)) => p,
-        Ok(None) | Err(_) => return Err(DeductError::NotWhitelisted),
-    };
-    if !price.enabled || price.kind != flavor {
-        return Err(DeductError::NotWhitelisted);
-    }
-    let cost = price.cost_credits.max(0);
-    let meta = if flavor == "image" {
-        crate::credits::LedgerMeta::image(protocol, model)
-    } else {
-        crate::credits::LedgerMeta::chat(protocol, model)
-    };
-    match crate::credits::try_deduct(pool, kind, user_id, cost, reason, &meta).await {
+    let price = enabled_price(pool, kind, model, flavor)
+        .await
+        .ok_or(DeductError::NotWhitelisted)?;
+    let rate = crate::quota::QuotaRate::load(pool, kind).await;
+    let cost = rate.quota_for_micro_usd(price.per_call_price.max(0));
+    let meta = crate::quota::LedgerMeta::image(protocol, model);
+    match crate::quota::try_deduct(pool, kind, user_id, cost, reason, &meta).await {
         Ok(bal) => Ok((bal, cost)),
         Err(bal) => Err(DeductError::Insufficient { balance: bal, cost }),
     }
 }
 
-/// Look up the cost of `model` (whitelist gate) without deducting — used by
-/// refund paths that already deducted via `try_deduct_for_model` and need to
-/// compute the credit amount to grant back on upstream failure.
-pub async fn cost_for_model(
+/// Quota cost of one per-call generation without deducting — used by refund
+/// paths that already deducted via [`try_deduct_per_call`].
+pub async fn per_call_quota(
     pool: &Pool,
     kind: DbKind,
     model: &str,
     flavor: &str,
 ) -> Option<i64> {
-    let p = get_price(pool, kind, model).await.ok().flatten()?;
-    if !p.enabled || p.kind != flavor {
-        return None;
-    }
-    Some(p.cost_credits.max(0))
+    let price = enabled_price(pool, kind, model, flavor).await?;
+    let rate = crate::quota::QuotaRate::load(pool, kind).await;
+    Some(rate.quota_for_micro_usd(price.per_call_price.max(0)))
 }

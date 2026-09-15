@@ -133,7 +133,7 @@ export type ChatStreamOptions = {
   /**
    * When true, route through `/api/proxy/*` WITHOUT sending
    * `X-Upstream-Url/Key` headers — the server resolves an admin-configured
-   * channel chain for the model and deducts credits. When false (default),
+   * channel chain for the model and charges site quota. When false (default),
    * BYOK: the client supplies its own upstream creds via headers.
    */
   usePlatform?: boolean
@@ -474,7 +474,7 @@ async function sendRequest(
   const payload = JSON.stringify(prepared.body)
 
   // Platform mode MUST go through the backend proxy: the server resolves the
-  // admin-configured shared channel and deducts credits, and the browser can
+  // admin-configured shared channel and charges site quota, and the browser can
   // never reach that upstream directly. Force proxy whenever usePlatform is set
   // so a stale `useProxy=false` BYOK setting can't leak us onto a direct fetch.
   if (o.useProxy || o.usePlatform) {
@@ -482,7 +482,7 @@ async function sendRequest(
       "Content-Type": "application/json",
     }
     // BYOK: forward upstream creds via headers. Platform mode: omit creds —
-    // the server resolves an admin channel and deducts credits — but always
+    // the server resolves an admin channel and charges site quota — but always
     // declare the model. Gemini bodies have no `model` field (it lives in the
     // URL, which platform mode doesn't send), so the header is the only way
     // the server can route the request.
@@ -527,7 +527,7 @@ export async function streamChat(o: ChatStreamOptions): Promise<void> {
   if (!res.ok) {
     const text = await res.text().catch(() => "")
     if (isThinkingRejected(res.status, text)) {
-      // 后端对非 2xx 会退还积分，这次重试不会重复扣费。
+      // 对话按实际 token 用量事后计费，非 2xx 不产生扣费，重试不会重复计费。
       res = await sendRequest(o, await prepare(o, false))
       if (!res.ok) {
         const retryText = await res.text().catch(() => "")

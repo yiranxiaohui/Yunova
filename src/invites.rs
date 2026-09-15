@@ -171,14 +171,14 @@ async fn get_my_invite(
         .await
         .unwrap_or((0,));
 
-    let grant_inviter = crate::credits::get_setting_i64(
+    let grant_inviter = crate::quota::get_setting_i64(
         &installed.pool,
         installed.kind,
         "invite_grant_inviter",
         100,
     )
     .await;
-    let grant_invitee = crate::credits::get_setting_i64(
+    let grant_invitee = crate::quota::get_setting_i64(
         &installed.pool,
         installed.kind,
         "invite_grant_invitee",

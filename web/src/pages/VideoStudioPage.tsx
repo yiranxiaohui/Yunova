@@ -110,8 +110,8 @@ function customModel(model: string): VideoModel {
   return {
     model,
     display_name: null,
-    base_credits: 0,
-    per_second: 0,
+    base_quota: 0,
+    per_second_quota: 0,
     allowed_seconds: Array.from({ length: 15 }, (_, index) => index + 1),
     size_rules: [
       { size: "1280x720", multiplier: 100 },
@@ -586,7 +586,7 @@ export default function VideoStudioPage() {
                   onClick={() => {
                     if (next === videoMode) return
                     if (next === "platform" && !user) {
-                      setError("登录后才能使用云端积分模式")
+                      setError("登录后才能使用云端额度模式")
                       return
                     }
                     clearReferenceImage()
@@ -601,13 +601,13 @@ export default function VideoStudioPage() {
                       : "border-border bg-background hover:bg-accent"
                   )}
                 >
-                  {next === "platform" ? "云端积分" : "本地 API"}
+                  {next === "platform" ? "云端额度" : "本地 API"}
                 </button>
               ))}
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
               {videoMode === "platform"
-                ? "使用管理员配置的 OpenAI 兼容视频渠道，按定价规则扣积分。"
+                ? "使用管理员配置的 OpenAI 兼容视频渠道，按定价规则扣额度。"
                 : "当前浏览器直接请求本地视频服务，不经过 Yunova 服务器。"}
             </p>
             {videoMode === "byok" && (
@@ -869,7 +869,7 @@ export default function VideoStudioPage() {
             {videoMode === "byok"
               ? "生成视频（本地 API）"
               : cost != null
-                ? `生成视频（消耗 ${cost} 积分）`
+                ? `生成视频（消耗 ${cost} 额度）`
                 : "生成视频"}
               </>
             )}
@@ -1007,7 +1007,7 @@ function VideoJobCard({
         </p>
         {job.refunded && (
           <p className="text-[11px] text-muted-foreground">
-            已退还 {job.cost_credits} 积分
+            已退还 {job.cost_quota} 额度
           </p>
         )}
         <div className="mt-1 flex flex-wrap gap-2">
@@ -1066,8 +1066,8 @@ function VideoJobCard({
         <span className="rounded bg-muted px-1.5 py-0.5">
           {isLocalVideoJob(job)
             ? "本地 API"
-            : job.cost_credits > 0
-              ? `消耗 ${job.cost_credits} 积分`
+            : job.cost_quota > 0
+              ? `消耗 ${job.cost_quota} 额度`
               : "云端任务"}
         </span>
       </div>

@@ -47,6 +47,14 @@ import {
   type VideoSizeRule,
 } from "@/lib/channels"
 import {
+  adminQuotaApi,
+  formatQuota,
+  microUsdToUsd,
+  quotaForMicroUsd,
+  usdToMicroUsd,
+  type AdminSettings,
+} from "@/lib/quota"
+import {
   defaultVideoSize,
   displayVideoSize,
   effectiveAllowedSeconds,
@@ -66,6 +74,74 @@ const PROTOCOL_LABELS: Record<ChannelProtocol, string> = {
   openai: "OpenAI",
   claude: "Claude",
   gemini: "Gemini",
+}
+
+/**
+ * 美元单价输入框。内部以微美元存储，避免 0.15 这类小数在多次编辑后累积浮点误差；
+ * 输入框保留用户原始文本，这样输到一半的 "0." 不会被规整掉。
+ */
+function UsdPriceField({
+  label,
+  value,
+  onChange,
+  quotaPerUsd,
+  multiplierPercent,
+  placeholder,
+}: {
+  label: string
+  value: number | null
+  onChange: (microUsd: number) => void
+  quotaPerUsd: number
+  multiplierPercent: number
+  placeholder?: string
+}) {
+  const [text, setText] = useState(() => microUsdToUsd(value ?? 0))
+  // 外部重置（例如切换编辑对象）时同步回显，用户正在输入时不打断。
+  const [lastValue, setLastValue] = useState(value)
+  if (value !== lastValue) {
+    setLastValue(value)
+    setText(microUsdToUsd(value ?? 0))
+  }
+  const micro = value ?? 0
+  const quota = quotaForMicroUsd(micro, quotaPerUsd, multiplierPercent)
+  return (
+    <div>
+      <Label>{label}</Label>
+      <div className="relative">
+        <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">
+          $
+        </span>
+        <Input
+          type="number"
+          min={0}
+          step="any"
+          className="pl-5"
+          value={text}
+          placeholder={placeholder ?? "0"}
+          onChange={(e) => {
+            setText(e.target.value)
+            onChange(usdToMicroUsd(e.target.value))
+          }}
+        />
+      </div>
+      <p className="mt-1 text-[11px] text-muted-foreground tabular-nums">
+        {micro > 0 ? `≈ ${formatQuota(quota)} 额度` : "免费"}
+      </p>
+    </div>
+  )
+}
+
+/** 列表里的价格摘要：对话显示输入/输出价，图像按次，视频按基础价+每秒。 */
+function describePrice(r: ModelPrice): string {
+  const usd = (micro: number) => `$${micro / 1_000_000}`
+  if (r.kind === "video") {
+    return `${usd(r.base_price)}+${usd(r.per_second_price)}/秒`
+  }
+  if (r.kind === "image") {
+    return r.per_call_price > 0 ? `${usd(r.per_call_price)}/次` : "免费"
+  }
+  if (r.input_price === 0 && r.output_price === 0) return "免费"
+  return `${usd(r.input_price)} / ${usd(r.output_price)} 每1M`
 }
 
 type DialogMode =
@@ -134,13 +210,16 @@ export function PricingPanel() {
       await channelsAdminApi.upsertPricing({
         model: r.model,
         kind: r.kind,
-        cost_credits: r.cost_credits,
         display_name: r.display_name,
         enabled: !r.enabled,
         protocol: r.protocol,
         context_limit: r.context_limit,
-        base_credits: r.base_credits,
-        per_second: r.per_second,
+        input_price: r.input_price,
+        output_price: r.output_price,
+        cached_input_price: r.cached_input_price,
+        per_call_price: r.per_call_price,
+        base_price: r.base_price,
+        per_second_price: r.per_second_price,
         allowed_seconds: r.allowed_seconds,
         size_rules: r.size_rules,
       })
@@ -153,7 +232,9 @@ export function PricingPanel() {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-muted-foreground">
-        按模型独立的积分白名单：未列出的模型会被拒绝（403）。<code>cost_credits=0</code> 即免费白名单。修改 <code>model</code> 字段请先删除再新建。
+        按模型独立的计费白名单：未列出的模型会被拒绝（403）。价格按各家<b>官方美元价目表</b>填写，
+        站点按「额度换算」中的汇率与倍率折算成额度。价格填 0 即免费白名单。
+        修改 <code>model</code> 字段请先删除再新建。
       </p>
 
       <div className="flex items-center gap-2">
@@ -189,7 +270,7 @@ export function PricingPanel() {
               <TableHead>显示名</TableHead>
               <TableHead>功能</TableHead>
               <TableHead>协议</TableHead>
-              <TableHead className="text-right">积分/次</TableHead>
+              <TableHead className="text-right">价格（美元）</TableHead>
               <TableHead className="text-right">上下文</TableHead>
               <TableHead>启用</TableHead>
               <TableHead className="text-right">操作</TableHead>
@@ -227,9 +308,7 @@ export function PricingPanel() {
                   </span>
                 </TableCell>
                 <TableCell className="text-right tabular-nums">
-                  {r.kind === "video"
-                    ? `${r.base_credits}+${r.per_second}/秒`
-                    : r.cost_credits}
+                  {describePrice(r)}
                 </TableCell>
                 <TableCell className="text-right tabular-nums text-muted-foreground">
                   {r.context_limit != null
@@ -307,32 +386,57 @@ function PricingDialog({
       ? {
           model: mode.row.model,
           kind: mode.row.kind,
-          cost_credits: mode.row.cost_credits,
           display_name: mode.row.display_name,
           enabled: mode.row.enabled,
           protocol: mode.row.protocol,
           context_limit: mode.row.context_limit,
-          base_credits: mode.row.base_credits,
-          per_second: mode.row.per_second,
+          input_price: mode.row.input_price,
+          output_price: mode.row.output_price,
+          cached_input_price: mode.row.cached_input_price,
+          per_call_price: mode.row.per_call_price,
+          base_price: mode.row.base_price,
+          per_second_price: mode.row.per_second_price,
           allowed_seconds: mode.row.allowed_seconds ?? [],
           size_rules: mode.row.size_rules ?? [],
         }
       : {
           model: "",
           kind: "chat",
-          cost_credits: 1,
           display_name: null,
           enabled: true,
           protocol: "openai",
           context_limit: null,
-          base_credits: 0,
-          per_second: 0,
+          input_price: 0,
+          output_price: 0,
+          cached_input_price: null,
+          per_call_price: 0,
+          base_price: 0,
+          per_second_price: 0,
           allowed_seconds: [],
           size_rules: [],
         }
   const [form, setForm] = useState<FormState>(initial)
   const [saving, setSaving] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  // 汇率与倍率只用于把美元价预览成额度；取不到时退回默认值，不阻塞保存。
+  const [rate, setRate] = useState<Pick<
+    AdminSettings,
+    "quota_per_usd" | "price_multiplier_percent"
+  > | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    adminQuotaApi
+      .getSettings()
+      .then((s) => {
+        if (!cancelled) setRate(s)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  const quotaPerUsd = rate?.quota_per_usd ?? 500_000
+  const multiplierPercent = rate?.price_multiplier_percent ?? 100
   const [allModels, setAllModels] = useState<AllChannelModel[]>([])
   const [probeErrors, setProbeErrors] = useState<
     { channel: string; error: string }[]
@@ -372,6 +476,8 @@ function PricingDialog({
     currentMatch?.channels.filter((c) => c.protocol === form.protocol) ?? []
 
   const isVideo = form.kind === "video"
+  const isChat = form.kind === "chat"
+  const isImage = form.kind === "image"
   const sizeRules = form.size_rules ?? []
   const isGrokVideo = isGrokVideoModel(form.model)
   const allowedSeconds = effectiveAllowedSeconds(
@@ -430,11 +536,12 @@ function PricingDialog({
   const previewRule = sizeRules.find(
     (rule) => SIZE_RE.test(rule.size.trim()) && rule.multiplier > 0
   )
-  const previewCost =
+  // 与后端 videos::compute_price 相同的取整规则，保证后台预览与实际扣费一致。
+  const previewMicroUsd =
     previewSeconds && previewRule
       ? Math.round(
-          (((form.base_credits ?? 0) +
-            (form.per_second ?? 0) * previewSeconds) *
+          (((form.base_price ?? 0) +
+            (form.per_second_price ?? 0) * previewSeconds) *
             previewRule.multiplier) /
             100
         )
@@ -522,7 +629,7 @@ function PricingDialog({
           </DialogTitle>
           <DialogDescription className="text-xs leading-5">
             {mode.kind === "create"
-              ? "选择上游模型，并设置它的功能、协议与积分规则。"
+              ? "选择上游模型，并设置它的功能、协议与计费价格。"
               : "调整展示信息与计费方式，模型 ID 保持不变。"}
           </DialogDescription>
           {mode.kind === "edit" && (
@@ -827,29 +934,39 @@ function PricingDialog({
               />
             </section>
 
-            {!isVideo && (
+            {isChat && (
               <section className="rounded-xl border border-border/80 bg-muted/20 p-3.5">
                 <div className="mb-3">
                   <h3 className="text-sm font-medium">计费设置</h3>
                   <p className="mt-0.5 text-xs text-muted-foreground">
-                    设置每次调用的积分，以及可选的上下文长度。
+                    按官方价目表填写<b>每 100 万 token 的美元单价</b>，对话结束后按实际用量结算。
                   </p>
                 </div>
                 <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <Label>积分/次</Label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={form.cost_credits}
-                      onChange={(e) =>
-                        setForm({
-                          ...form,
-                          cost_credits: Number(e.target.value) || 0,
-                        })
-                      }
-                    />
-                  </div>
+                  <UsdPriceField
+                    label="输入 / 1M tokens"
+                    value={form.input_price ?? 0}
+                    onChange={(micro) => setForm({ ...form, input_price: micro })}
+                    quotaPerUsd={quotaPerUsd}
+                    multiplierPercent={multiplierPercent}
+                  />
+                  <UsdPriceField
+                    label="输出 / 1M tokens"
+                    value={form.output_price ?? 0}
+                    onChange={(micro) => setForm({ ...form, output_price: micro })}
+                    quotaPerUsd={quotaPerUsd}
+                    multiplierPercent={multiplierPercent}
+                  />
+                  <UsdPriceField
+                    label="缓存输入 / 1M tokens"
+                    value={form.cached_input_price ?? null}
+                    onChange={(micro) =>
+                      setForm({ ...form, cached_input_price: micro > 0 ? micro : null })
+                    }
+                    quotaPerUsd={quotaPerUsd}
+                    multiplierPercent={multiplierPercent}
+                    placeholder="留空＝按输入价"
+                  />
                   <div>
                     <Label>上下文</Label>
                     <Input
@@ -870,53 +987,63 @@ function PricingDialog({
               </section>
             )}
 
+            {isImage && (
+              <section className="rounded-xl border border-border/80 bg-muted/20 p-3.5">
+                <div className="mb-3">
+                  <h3 className="text-sm font-medium">计费设置</h3>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    图像接口不返回 token 用量，按<b>每次调用的美元单价</b>计费。
+                  </p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <UsdPriceField
+                    label="每次调用"
+                    value={form.per_call_price ?? 0}
+                    onChange={(micro) => setForm({ ...form, per_call_price: micro })}
+                    quotaPerUsd={quotaPerUsd}
+                    multiplierPercent={multiplierPercent}
+                  />
+                </div>
+              </section>
+            )}
+
             {isVideo && (
               <>
                 <section className="rounded-xl border border-border/80 bg-muted/20 p-3.5">
                   <div className="mb-3">
                     <h3 className="text-sm font-medium">计费设置</h3>
                     <p className="mt-0.5 text-xs text-muted-foreground">
-                      总价由基础积分、生成时长和分辨率共同决定。
+                      总价由基础价、生成时长和分辨率倍率共同决定，按美元填写。
                     </p>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <Label>基础积分</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        value={form.base_credits}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            base_credits: Number(e.target.value) || 0,
-                          })
-                        }
-                      />
-                    </div>
-                    <div>
-                      <Label>每秒积分</Label>
-                      <Input
-                        type="number"
-                        min={0}
-                        value={form.per_second}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            per_second: Number(e.target.value) || 0,
-                          })
-                        }
-                      />
-                    </div>
+                    <UsdPriceField
+                      label="基础价"
+                      value={form.base_price ?? 0}
+                      onChange={(micro) => setForm({ ...form, base_price: micro })}
+                      quotaPerUsd={quotaPerUsd}
+                      multiplierPercent={multiplierPercent}
+                    />
+                    <UsdPriceField
+                      label="每秒价格"
+                      value={form.per_second_price ?? 0}
+                      onChange={(micro) => setForm({ ...form, per_second_price: micro })}
+                      quotaPerUsd={quotaPerUsd}
+                      multiplierPercent={multiplierPercent}
+                    />
                   </div>
                   <div
                     aria-live="polite"
                     className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-primary/10 bg-primary/5 px-3 py-2"
                   >
                     <span className="text-xs text-muted-foreground">价格示例</span>
-                    {previewCost !== null && previewSeconds && previewRule ? (
+                    {previewMicroUsd !== null && previewSeconds && previewRule ? (
                       <span className="text-sm font-semibold tabular-nums text-foreground">
-                        {previewSeconds} 秒 · {displayVideoSize(previewRule.size)} = {previewCost} 积分
+                        {previewSeconds} 秒 · {displayVideoSize(previewRule.size)} ={" "}
+                        {formatQuota(
+                          quotaForMicroUsd(previewMicroUsd, quotaPerUsd, multiplierPercent)
+                        )}{" "}
+                        额度
                       </span>
                     ) : (
                       <span className="text-xs text-muted-foreground">

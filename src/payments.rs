@@ -12,7 +12,7 @@ use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AppState, CurrentUser, InstalledState, admin, credits,
+    AppState, CurrentUser, InstalledState, admin, quota,
     db::{self, DbKind, Pool},
 };
 
@@ -59,7 +59,7 @@ fn random_out_trade_no(user_id: i64) -> String {
 }
 
 async fn s(pool: &Pool, kind: DbKind, key: &str) -> String {
-    credits::get_setting(pool, kind, key).await.unwrap_or_default()
+    quota::get_setting(pool, kind, key).await.unwrap_or_default()
 }
 
 /// Accept either the full epay endpoint or its host-level base URL.
@@ -131,7 +131,7 @@ struct CreateOrderResp {
     out_trade_no: String,
     pay_url: String,
     amount_cents: i64,
-    credits: i64,
+    quota: i64,
     payway: String,
 }
 
@@ -143,7 +143,7 @@ async fn create_order(
     let pool = &installed.pool;
     let kind = installed.kind;
 
-    if !credits::get_setting_bool(pool, kind, "epay_enabled", false).await {
+    if !quota::get_setting_bool(pool, kind, "epay_enabled", false).await {
         return (StatusCode::SERVICE_UNAVAILABLE, "充值通道尚未开启").into_response();
     }
 
@@ -152,8 +152,8 @@ async fn create_order(
         None => return (StatusCode::BAD_REQUEST, "不支持的支付方式").into_response(),
     };
 
-    let min_yuan = credits::get_setting_i64(pool, kind, "epay_min_yuan", 1).await.max(1);
-    let max_yuan = credits::get_setting_i64(pool, kind, "epay_max_yuan", 5000)
+    let min_yuan = quota::get_setting_i64(pool, kind, "epay_min_yuan", 1).await.max(1);
+    let max_yuan = quota::get_setting_i64(pool, kind, "epay_max_yuan", 5000)
         .await
         .max(min_yuan);
     if body.yuan < min_yuan || body.yuan > max_yuan {
@@ -164,7 +164,7 @@ async fn create_order(
             .into_response();
     }
 
-    let per_yuan = credits::get_setting_i64(pool, kind, "epay_credits_per_yuan", 100)
+    let per_yuan = quota::get_setting_i64(pool, kind, "epay_quota_per_yuan", 100)
         .await
         .max(1);
 
@@ -181,7 +181,7 @@ async fn create_order(
     );
     let product_name = {
         let n = s(pool, kind, "epay_product_name").await;
-        if n.is_empty() { "Yunova 积分充值".to_string() } else { n }
+        if n.is_empty() { "Yunova 额度充值".to_string() } else { n }
     };
 
     if api_url.is_empty() || pid.is_empty() || key.is_empty() || notify_url.is_empty() {
@@ -193,13 +193,13 @@ async fn create_order(
     }
 
     let amount_cents = body.yuan * 100;
-    let credits_to_grant = body.yuan * per_yuan;
+    let quota_to_grant = body.yuan * per_yuan;
     let out_trade_no = random_out_trade_no(user.id);
 
     // persist the order as pending
     let ins = db::q(
         kind,
-        "INSERT INTO payment_orders (user_id, out_trade_no, provider, payway, amount_cents, credits, status)
+        "INSERT INTO payment_orders (user_id, out_trade_no, provider, payway, amount_cents, quota, status)
          VALUES (?, ?, 'epay', ?, ?, ?, 'pending')",
     );
     if let Err(e) = sqlx::query(&ins)
@@ -207,7 +207,7 @@ async fn create_order(
         .bind(&out_trade_no)
         .bind(payway)
         .bind(amount_cents)
-        .bind(credits_to_grant)
+        .bind(quota_to_grant)
         .execute(pool)
         .await
     {
@@ -248,7 +248,7 @@ async fn create_order(
         out_trade_no,
         pay_url: url,
         amount_cents,
-        credits: credits_to_grant,
+        quota: quota_to_grant,
         payway: payway.to_string(),
     })
     .into_response()
@@ -264,7 +264,7 @@ struct OrderView {
     out_trade_no: String,
     payway: String,
     amount_cents: i64,
-    credits: i64,
+    quota: i64,
     status: String,
     trade_no: Option<String>,
     created_at: String,
@@ -278,7 +278,7 @@ async fn get_my_order(
 ) -> Response {
     let sql = db::q(
         installed.kind,
-        "SELECT id, out_trade_no, payway, amount_cents, credits, status, trade_no, created_at, paid_at
+        "SELECT id, out_trade_no, payway, amount_cents, quota, status, trade_no, created_at, paid_at
          FROM payment_orders WHERE out_trade_no = ? AND user_id = ?",
     );
     let row: Option<(i64, String, String, i64, i64, String, Option<String>, String, Option<String>)> =
@@ -290,13 +290,13 @@ async fn get_my_order(
             .ok()
             .flatten();
     match row {
-        Some((id, out_trade_no, payway, amount_cents, credits, status, trade_no, created_at, paid_at)) => {
+        Some((id, out_trade_no, payway, amount_cents, quota, status, trade_no, created_at, paid_at)) => {
             Json(OrderView {
                 id,
                 out_trade_no,
                 payway,
                 amount_cents,
-                credits,
+                quota,
                 status,
                 trade_no,
                 created_at,
@@ -314,7 +314,7 @@ async fn list_my_orders(
 ) -> Response {
     let sql = db::q(
         installed.kind,
-        "SELECT id, out_trade_no, payway, amount_cents, credits, status, trade_no, created_at, paid_at
+        "SELECT id, out_trade_no, payway, amount_cents, quota, status, trade_no, created_at, paid_at
          FROM payment_orders WHERE user_id = ?
          ORDER BY created_at DESC, id DESC
          LIMIT 100",
@@ -325,13 +325,13 @@ async fn list_my_orders(
         Ok(rs) => {
             let out: Vec<OrderView> = rs
                 .into_iter()
-                .map(|(id, out_trade_no, payway, amount_cents, credits, status, trade_no, created_at, paid_at)| {
+                .map(|(id, out_trade_no, payway, amount_cents, quota, status, trade_no, created_at, paid_at)| {
                     OrderView {
                         id,
                         out_trade_no,
                         payway,
                         amount_cents,
-                        credits,
+                        quota,
                         status,
                         trade_no,
                         created_at,
@@ -358,7 +358,7 @@ async fn process_notify(state: &AppState, params: BTreeMap<String, String>) -> S
     let pool = &installed.pool;
     let kind = installed.kind;
 
-    if !credits::get_setting_bool(pool, kind, "epay_enabled", false).await {
+    if !quota::get_setting_bool(pool, kind, "epay_enabled", false).await {
         return "fail".into();
     }
 
@@ -390,7 +390,7 @@ async fn process_notify(state: &AppState, params: BTreeMap<String, String>) -> S
     // load order
     let sel = db::q(
         kind,
-        "SELECT user_id, amount_cents, credits, status FROM payment_orders WHERE out_trade_no = ?",
+        "SELECT user_id, amount_cents, quota, status FROM payment_orders WHERE out_trade_no = ?",
     );
     let row: Option<(i64, i64, i64, String)> = sqlx::query_as(&sel)
         .bind(&out_trade_no)
@@ -398,7 +398,7 @@ async fn process_notify(state: &AppState, params: BTreeMap<String, String>) -> S
         .await
         .ok()
         .flatten();
-    let Some((user_id, amount_cents, credits_to_grant, status)) = row else {
+    let Some((user_id, amount_cents, quota_to_grant, status)) = row else {
         return "fail".into();
     };
 
@@ -472,13 +472,13 @@ async fn process_notify(state: &AppState, params: BTreeMap<String, String>) -> S
     } else {
         reason
     };
-    if let Err(_) = credits::grant(
+    if let Err(_) = quota::grant(
         pool,
         kind,
         user_id,
-        credits_to_grant,
+        quota_to_grant,
         &reason,
-        &credits::LedgerMeta::recharge(),
+        &quota::LedgerMeta::recharge(),
     )
     .await
     {
@@ -535,7 +535,7 @@ struct AdminPaymentConfig {
     pid: String,
     key_set: bool,
     sign_type: String,
-    credits_per_yuan: i64,
+    quota_per_yuan: i64,
     product_name: String,
     min_yuan: i64,
     max_yuan: i64,
@@ -552,7 +552,7 @@ async fn admin_get_config(Extension(installed): Extension<InstalledState>) -> Re
     let notify_url = s(pool, kind, "epay_notify_url").await;
     let return_url = s(pool, kind, "epay_return_url").await;
     let view = AdminPaymentConfig {
-        enabled: credits::get_setting_bool(pool, kind, "epay_enabled", false).await,
+        enabled: quota::get_setting_bool(pool, kind, "epay_enabled", false).await,
         api_url: epay_api_base(&s(pool, kind, "epay_api_url").await),
         pid: s(pool, kind, "epay_pid").await,
         key_set: !key.is_empty(),
@@ -560,10 +560,10 @@ async fn admin_get_config(Extension(installed): Extension<InstalledState>) -> Re
             let v = s(pool, kind, "epay_sign_type").await;
             if v.is_empty() { "MD5".into() } else { v }
         },
-        credits_per_yuan: credits::get_setting_i64(pool, kind, "epay_credits_per_yuan", 100).await,
+        quota_per_yuan: quota::get_setting_i64(pool, kind, "epay_quota_per_yuan", 100).await,
         product_name: s(pool, kind, "epay_product_name").await,
-        min_yuan: credits::get_setting_i64(pool, kind, "epay_min_yuan", 1).await,
-        max_yuan: credits::get_setting_i64(pool, kind, "epay_max_yuan", 5000).await,
+        min_yuan: quota::get_setting_i64(pool, kind, "epay_min_yuan", 1).await,
+        max_yuan: quota::get_setting_i64(pool, kind, "epay_max_yuan", 5000).await,
         callback_url: epay_callback_base(&notify_url, &return_url),
         return_url: epay_callback_url(&return_url, EPAY_RETURN_PATH),
         notify_url: epay_callback_url(&notify_url, EPAY_NOTIFY_PATH),
@@ -579,7 +579,7 @@ struct AdminPaymentConfigUpdate {
     /// absent = unchanged, "" = clear, non-empty = set
     key: Option<String>,
     sign_type: Option<String>,
-    credits_per_yuan: Option<i64>,
+    quota_per_yuan: Option<i64>,
     product_name: Option<String>,
     min_yuan: Option<i64>,
     max_yuan: Option<i64>,
@@ -613,8 +613,8 @@ async fn admin_patch_config(
     if let Some(v) = body.sign_type {
         ops.push(("epay_sign_type", v.trim().to_uppercase()));
     }
-    if let Some(v) = body.credits_per_yuan {
-        ops.push(("epay_credits_per_yuan", v.max(1).to_string()));
+    if let Some(v) = body.quota_per_yuan {
+        ops.push(("epay_quota_per_yuan", v.max(1).to_string()));
     }
     if let Some(v) = body.product_name {
         ops.push(("epay_product_name", v.trim().to_string()));
@@ -651,7 +651,7 @@ async fn admin_patch_config(
         }
     }
     for (k, v) in ops {
-        if let Err(e) = credits::set_setting(pool, kind, k, &v).await {
+        if let Err(e) = quota::set_setting(pool, kind, k, &v).await {
             return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
         }
     }
@@ -666,7 +666,7 @@ struct AdminOrderView {
     out_trade_no: String,
     payway: String,
     amount_cents: i64,
-    credits: i64,
+    quota: i64,
     status: String,
     trade_no: Option<String>,
     created_at: String,
@@ -689,7 +689,7 @@ async fn admin_list_orders(
     let status_filter = q.status.as_deref().unwrap_or("");
 
     let base = "SELECT p.id, p.user_id, u.username, p.out_trade_no, p.payway, p.amount_cents,
-                       p.credits, p.status, p.trade_no, p.created_at, p.paid_at
+                       p.quota, p.status, p.trade_no, p.created_at, p.paid_at
                 FROM payment_orders p
                 JOIN users u ON u.id = p.user_id";
     let (sql, has_status) = if matches!(status_filter, "pending" | "paid" | "failed") {
@@ -717,7 +717,7 @@ async fn admin_list_orders(
         Ok(rs) => {
             let out: Vec<AdminOrderView> = rs
                 .into_iter()
-                .map(|(id, user_id, username, out_trade_no, payway, amount_cents, credits, status, trade_no, created_at, paid_at)| {
+                .map(|(id, user_id, username, out_trade_no, payway, amount_cents, quota, status, trade_no, created_at, paid_at)| {
                     AdminOrderView {
                         id,
                         user_id,
@@ -725,7 +725,7 @@ async fn admin_list_orders(
                         out_trade_no,
                         payway,
                         amount_cents,
-                        credits,
+                        quota,
                         status,
                         trade_no,
                         created_at,

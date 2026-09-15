@@ -5,7 +5,7 @@ export type UpstreamMode = "platform" | "byok"
 export const GUEST_SETTINGS_ID = "guest"
 
 export type UpstreamSettings = {
-  // mode: use admin-configured platform channels (deduct credits), or BYOK
+  // mode: use admin-configured platform channels (charge site quota), or BYOK
   chatMode: UpstreamMode
   imageMode: UpstreamMode
 

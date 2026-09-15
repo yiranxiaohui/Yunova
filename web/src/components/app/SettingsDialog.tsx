@@ -22,7 +22,11 @@ import {
   type UpstreamSettings,
 } from "@/lib/settings"
 import { listModels } from "@/lib/models"
-import { listPlatformModels, type PlatformModel } from "@/lib/platform-models"
+import {
+  describeModelQuota,
+  listPlatformModels,
+  type PlatformModel,
+} from "@/lib/platform-models"
 import { cn } from "@/lib/utils"
 import { workerApi, type Worker } from "@/lib/worker"
 
@@ -336,7 +340,7 @@ export function SettingsDialog({
                 }
                 setChatMode(next)
               }}
-              platformLabel={isAuthenticated ? "云端积分" : "云端积分（需登录）"}
+              platformLabel={isAuthenticated ? "云端额度" : "云端额度（需登录）"}
               byokLabel="自带 API Key"
             />
 
@@ -487,7 +491,7 @@ export function SettingsDialog({
                 }
                 setImageMode(next)
               }}
-              platformLabel={isAuthenticated ? "云端积分" : "云端积分（需登录）"}
+              platformLabel={isAuthenticated ? "云端额度" : "云端额度（需登录）"}
               byokLabel="自带 API Key"
             />
 
@@ -610,7 +614,7 @@ export function SettingsDialog({
                   }
                   setVideoMode(next)
                 }}
-                platformLabel={isAuthenticated ? "云端积分" : "云端积分（需登录）"}
+                platformLabel={isAuthenticated ? "云端额度" : "云端额度（需登录）"}
                 byokLabel="本地 API"
               />
 
@@ -929,8 +933,8 @@ function ModeToggle({
       </div>
       <p className="mt-1.5 text-xs text-muted-foreground">
         {mode === "platform"
-          ? "使用管理员配置的上游，按模型扣除账户积分。无需填写 Base URL / API Key。"
-          : "使用你自己的上游服务（OpenAI / Anthropic / Gemini 或自建中转），不消耗积分。"}
+          ? "使用管理员配置的上游，按模型价格与实际 token 用量扣除账户额度。无需填写 Base URL / API Key。"
+          : "使用你自己的上游服务（OpenAI / Anthropic / Gemini 或自建中转），不消耗额度。"}
       </p>
     </div>
   )
@@ -993,7 +997,7 @@ function PlatformModelPicker({
               )}
             </div>
             <span className="text-xs text-muted-foreground">
-              {m.cost_credits} 积分/次
+              {describeModelQuota(m)}
             </span>
           </button>
         ))}

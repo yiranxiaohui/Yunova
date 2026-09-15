@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AppState, InstalledState,
-    credits,
+    quota,
     db::{self, DbKind, Pool},
 };
 
@@ -107,31 +107,31 @@ impl SmtpSecurity {
 }
 
 async fn load_smtp(pool: &Pool, kind: DbKind) -> Result<SmtpConfig, String> {
-    let host = credits::get_setting(pool, kind, "smtp_host")
+    let host = quota::get_setting(pool, kind, "smtp_host")
         .await
         .unwrap_or_default();
     if host.trim().is_empty() {
         return Err("管理员尚未配置 SMTP 服务器".into());
     }
-    let port = credits::get_setting_i64(pool, kind, "smtp_port", 587)
+    let port = quota::get_setting_i64(pool, kind, "smtp_port", 587)
         .await
         .max(1) as u16;
-    let username = credits::get_setting(pool, kind, "smtp_username")
+    let username = quota::get_setting(pool, kind, "smtp_username")
         .await
         .unwrap_or_default();
-    let password = credits::get_setting(pool, kind, "smtp_password")
+    let password = quota::get_setting(pool, kind, "smtp_password")
         .await
         .unwrap_or_default();
-    let from_email = credits::get_setting(pool, kind, "smtp_from_email")
+    let from_email = quota::get_setting(pool, kind, "smtp_from_email")
         .await
         .unwrap_or_default();
     if from_email.trim().is_empty() {
         return Err("管理员尚未配置发件人邮箱".into());
     }
-    let from_name = credits::get_setting(pool, kind, "smtp_from_name")
+    let from_name = quota::get_setting(pool, kind, "smtp_from_name")
         .await
         .unwrap_or_else(|| "Yunova".into());
-    let security_raw = credits::get_setting(pool, kind, "smtp_security")
+    let security_raw = quota::get_setting(pool, kind, "smtp_security")
         .await
         .unwrap_or_else(|| "starttls".into());
     Ok(SmtpConfig {
@@ -352,7 +352,7 @@ async fn send_code(
     // Only allow sending a registration code when the feature is actually on —
     // otherwise we'd pointlessly spam. This lets the frontend gate the button
     // on /auth/config instead of silently hitting this.
-    let required = credits::get_setting_bool(
+    let required = quota::get_setting_bool(
         &installed.pool,
         installed.kind,
         "email_verification_required",

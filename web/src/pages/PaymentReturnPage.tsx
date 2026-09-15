@@ -66,7 +66,7 @@ export default function PaymentReturnPage() {
             <CheckCircle2 className="size-10 text-emerald-500" />
             <h1 className="text-lg font-semibold">支付成功</h1>
             <p className="text-sm text-muted-foreground">
-              已到账 <b>{order.credits}</b> 积分（实付 ¥
+              已到账 <b>{order.quota}</b> 额度（实付 ¥
               {(order.amount_cents / 100).toFixed(2)}）
             </p>
           </>

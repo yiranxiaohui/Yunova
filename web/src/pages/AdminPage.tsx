@@ -62,11 +62,11 @@ import {
   type AdminUser,
 } from "@/lib/admin"
 import {
-  adminCreditsApi,
+  adminQuotaApi,
   type AdminSettings,
   type AdminSettingsUpdate,
-  type AdminUserCredits,
-} from "@/lib/credits"
+  type AdminUserQuota,
+} from "@/lib/quota"
 import { ChannelsPanel } from "./admin/ChannelsPanel"
 import { PricingPanel } from "./admin/PricingPanel"
 import { StoragePanel } from "./admin/StoragePanel"
@@ -81,7 +81,7 @@ import {
 type Section =
   | "overview"
   | "users"
-  | "credits"
+  | "quota"
   | "payments"
   | "invites"
   | "channels"
@@ -94,7 +94,7 @@ type Section =
 const NAV: { key: Section; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
   { key: "overview", label: "概览", icon: BarChart3 },
   { key: "users", label: "用户管理", icon: Users },
-  { key: "credits", label: "积分", icon: Coins },
+  { key: "quota", label: "额度", icon: Coins },
   { key: "payments", label: "支付 / 充值", icon: CreditCard },
   { key: "invites", label: "邀请", icon: Ticket },
   { key: "channels", label: "上游渠道", icon: Route },
@@ -219,7 +219,7 @@ export default function AdminPage() {
         <main className="mx-auto w-full max-w-5xl px-3 py-4 md:px-6 md:py-6">
           {section === "overview" && <OverviewPanel />}
           {section === "users" && <UsersPanel currentUserId={currentUser.id} />}
-          {section === "credits" && <CreditsPanel />}
+          {section === "quota" && <QuotaPanel />}
           {section === "payments" && <PaymentsPanel />}
           {section === "invites" && <InvitesPanel />}
           {section === "channels" && <ChannelsPanel />}
@@ -890,19 +890,19 @@ function InfoRow({
   )
 }
 
-function CreditsPanel() {
+function QuotaPanel() {
   const [tab, setTab] = useState<"stats" | "users">("stats")
-  const [rows, setRows] = useState<AdminUserCredits[]>([])
+  const [rows, setRows] = useState<AdminUserQuota[]>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [query, setQuery] = useState("")
-  const [editing, setEditing] = useState<AdminUserCredits | null>(null)
+  const [editing, setEditing] = useState<AdminUserQuota | null>(null)
 
   async function load() {
     setLoading(true)
     setError(null)
     try {
-      setRows(await adminCreditsApi.listUserCredits())
+      setRows(await adminQuotaApi.listUserQuota())
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -921,7 +921,8 @@ function CreditsPanel() {
   return (
     <div className="flex flex-col gap-3">
       <p className="text-sm text-muted-foreground">
-        用户在未填自己 API Key 时会消耗站点共享额度；每次对话按「每次消耗」配置扣积分，图像按图像配置扣。上游报错会自动退款。
+        用户未填写自己的 API Key 时消耗站点额度：对话按上游返回的真实 token 用量结算，生图按次、视频按秒。
+        对话失败或上游未返回用量时不计费；生图、视频失败会自动退还。
       </p>
 
       <Tabs
@@ -935,7 +936,7 @@ function CreditsPanel() {
         </TabsList>
 
         <TabsContent value="stats">
-          <StatsView loader={adminCreditsApi.stats} showTopUsers active />
+          <StatsView loader={adminQuotaApi.stats} showTopUsers active />
         </TabsContent>
 
         <TabsContent value="users" className="flex flex-col gap-3">
@@ -1068,7 +1069,7 @@ function AdjustCreditsDialog({
   onClose,
   onSaved,
 }: {
-  row: AdminUserCredits
+  row: AdminUserQuota
   onClose: () => void
   onSaved: () => void
 }) {
@@ -1090,7 +1091,7 @@ function AdjustCreditsDialog({
           setSaving(false)
           return
         }
-        await adminCreditsApi.adjust(row.user_id, {
+        await adminQuotaApi.adjust(row.user_id, {
           delta: Math.trunc(n),
           reason: reason.trim() || undefined,
         })
@@ -1101,7 +1102,7 @@ function AdjustCreditsDialog({
           setSaving(false)
           return
         }
-        await adminCreditsApi.adjust(row.user_id, {
+        await adminQuotaApi.adjust(row.user_id, {
           balance: Math.trunc(n),
           reason: reason.trim() || undefined,
         })
@@ -1119,7 +1120,7 @@ function AdjustCreditsDialog({
     <Dialog open onOpenChange={(next) => !next && onClose()}>
       <DialogContent className="flex flex-col gap-4 sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>调整积分 · {row.username}</DialogTitle>
+          <DialogTitle>调整额度 · {row.username}</DialogTitle>
           <DialogDescription>
             当前余额 {row.balance}，累计消耗 {row.lifetime_used}。所有改动都会写入流水。
           </DialogDescription>
@@ -1378,7 +1379,7 @@ function EmailPanel() {
     setLoading(true)
     setError(null)
     try {
-      const c = await adminCreditsApi.getSettings()
+      const c = await adminQuotaApi.getSettings()
       setCfg(c)
       setPatch({})
     } catch (e) {
@@ -1403,7 +1404,7 @@ function EmailPanel() {
     setError(null)
     setSaving(true)
     try {
-      await adminCreditsApi.updateSettings(patch)
+      await adminQuotaApi.updateSettings(patch)
       setSaveMsg("已保存")
       await load()
     } catch (e) {
@@ -1422,7 +1423,7 @@ function EmailPanel() {
     }
     setTesting(true)
     try {
-      await adminCreditsApi.sendTestEmail(testEmail.trim())
+      await adminQuotaApi.sendTestEmail(testEmail.trim())
       setTestMsg("已发送，请检查收件箱（可能在垃圾邮件中）")
     } catch (e) {
       setTestErr(e instanceof Error ? e.message : String(e))
@@ -1445,7 +1446,7 @@ function EmailPanel() {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-muted-foreground">
-        配置发信 SMTP 及是否要求新用户注册时通过邮箱验证码验证。密码留空不修改；填 <b>&ldquo;&ndash;&ldquo;</b> 可清除。
+        配置注册策略、额度换算与发信 SMTP。SMTP 密码留空不修改；填 <b>&ldquo;&ndash;&ldquo;</b> 可清除。
       </p>
 
       {error && (
@@ -1488,6 +1489,75 @@ function EmailPanel() {
         <p className="mt-2 text-xs text-muted-foreground">
           开启后，注册页会要求填写邮箱并输入接收到的 6 位验证码（10 分钟有效，60 秒冷却）。
         </p>
+      </div>
+
+      <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
+        <h2 className="mb-3 text-sm font-semibold">额度换算</h2>
+        <p className="mb-3 text-xs text-muted-foreground">
+          模型价格在「模型计费」中按各家<b>官方美元价目表</b>填写，这里决定美元如何折算成站内额度。
+          对话按上游返回的真实 token 用量结算，生图按次、视频按秒。
+        </p>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-xs">1 美元 = 多少额度</Label>
+            <Input
+              type="number"
+              min={1}
+              defaultValue={cfg.quota_per_usd}
+              onChange={(e) => set("quota_per_usd", Number(e.target.value) || 1)}
+            />
+            <p className="text-[11px] text-muted-foreground">
+              上游每花费 1 美元，从用户余额扣除的额度数。数值越大，额度单位越细。
+            </p>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-xs">全局加价（%）</Label>
+            <Input
+              type="number"
+              min={0}
+              defaultValue={cfg.price_multiplier_percent}
+              onChange={(e) =>
+                set("price_multiplier_percent", Number(e.target.value) || 0)
+              }
+            />
+            <p className="text-[11px] text-muted-foreground">
+              100 为按原价，150 即在官方价基础上加价 50%，对所有模型统一生效。
+            </p>
+          </div>
+          <div className="flex flex-col gap-1.5">
+            <Label className="text-xs">注册赠送额度</Label>
+            <Input
+              type="number"
+              min={0}
+              defaultValue={cfg.signup_grant}
+              onChange={(e) => set("signup_grant", Number(e.target.value) || 0)}
+            />
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">邀请人奖励</Label>
+              <Input
+                type="number"
+                min={0}
+                defaultValue={cfg.invite_grant_inviter}
+                onChange={(e) =>
+                  set("invite_grant_inviter", Number(e.target.value) || 0)
+                }
+              />
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <Label className="text-xs">被邀请人奖励</Label>
+              <Input
+                type="number"
+                min={0}
+                defaultValue={cfg.invite_grant_invitee}
+                onChange={(e) =>
+                  set("invite_grant_invitee", Number(e.target.value) || 0)
+                }
+              />
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
@@ -1690,7 +1760,7 @@ function PaymentsPanel() {
       <p className="text-sm text-muted-foreground">
         当前对接 <b>易支付</b>（epay）通用协议。用户在充值弹窗下单后会跳转到
         易支付完成支付，支付平台会向回调地址发送异步通知；回调里的
-        <code>MD5</code> 签名用「商户密钥」校验，成功即按「1 元 = N 积分」比例入账。
+        <code>MD5</code> 签名用「商户密钥」校验，成功即按「1 元 = N 额度」比例入账。
       </p>
 
       {error && (
@@ -1765,14 +1835,14 @@ function PaymentsPanel() {
             />
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">1 元 = 多少积分</Label>
+            <Label className="text-xs">1 元 = 多少额度</Label>
             <Input
               type="number"
               min="1"
-              defaultValue={cfg.credits_per_yuan}
+              defaultValue={cfg.quota_per_yuan}
               onChange={(e) => {
                 const n = Number(e.target.value)
-                if (Number.isFinite(n) && n >= 1) set("credits_per_yuan", Math.trunc(n))
+                if (Number.isFinite(n) && n >= 1) set("quota_per_yuan", Math.trunc(n))
               }}
             />
           </div>
@@ -1781,7 +1851,7 @@ function PaymentsPanel() {
             <Input
               defaultValue={cfg.product_name}
               onChange={(e) => set("product_name", e.target.value)}
-              placeholder="Yunova 积分充值"
+              placeholder="Yunova 额度充值"
             />
           </div>
           <div className="flex flex-col gap-1.5">
@@ -1870,7 +1940,7 @@ function PaymentsPanel() {
                 <TableHead>用户</TableHead>
                 <TableHead>方式</TableHead>
                 <TableHead className="text-right">金额</TableHead>
-                <TableHead className="text-right">积分</TableHead>
+                <TableHead className="text-right">额度</TableHead>
                 <TableHead>状态</TableHead>
                 <TableHead>创建</TableHead>
                 <TableHead>支付时间</TableHead>
@@ -1895,7 +1965,7 @@ function PaymentsPanel() {
                     ¥{(o.amount_cents / 100).toFixed(2)}
                   </TableCell>
                   <TableCell className="text-right tabular-nums">
-                    +{o.credits}
+                    +{o.quota}
                   </TableCell>
                   <TableCell>
                     <OrderStatus status={o.status} />

@@ -232,7 +232,7 @@ export default function RegisterPage() {
             <Label htmlFor="invite">
               邀请码{" "}
               <span className="text-xs text-muted-foreground">
-                （可选，填写可获得额外积分）
+                （可选，填写可获得额外额度）
               </span>
             </Label>
             <Input

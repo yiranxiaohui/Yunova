@@ -3,7 +3,7 @@ export type PaymentOrder = {
   out_trade_no: string
   payway: string
   amount_cents: number
-  credits: number
+  quota: number
   status: "pending" | "paid" | "failed"
   trade_no: string | null
   created_at: string
@@ -14,7 +14,7 @@ export type CreateOrderResp = {
   out_trade_no: string
   pay_url: string
   amount_cents: number
-  credits: number
+  quota: number
   payway: string
 }
 
@@ -24,7 +24,7 @@ export type AdminPaymentConfig = {
   pid: string
   key_set: boolean
   sign_type: string
-  credits_per_yuan: number
+  quota_per_yuan: number
   product_name: string
   min_yuan: number
   max_yuan: number

@@ -366,14 +366,14 @@ export default function WorkflowStudioPage() {
   )
   const currentRunToken = currentRun?.token
   const currentRunStatus = currentRun?.status
-  const estimatedCredits = useMemo(
+  const estimatedQuota = useMemo(
     () =>
       graph.nodes.reduce((total, node) => {
         if (node.type === "image_generation") {
           return (
             total +
             (imageModels.find((model) => model.model === node.data.model)
-              ?.cost_credits ?? 0)
+              ?.per_call_quota ?? 0)
           )
         }
         if (node.type === "video_generation") {
@@ -850,7 +850,7 @@ export default function WorkflowStudioPage() {
                 {starting ? <Loader2 className="animate-spin" /> : <Play />}
                 <span className="sm:hidden">运行</span>
                 <span className="hidden sm:inline">
-                  运行流水线{estimatedCredits > 0 ? ` · 预计 ${estimatedCredits} 积分` : ""}
+                  运行流水线{estimatedQuota > 0 ? ` · 预计 ${estimatedQuota} 额度` : ""}
                 </span>
               </Button>
             )}

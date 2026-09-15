@@ -70,18 +70,28 @@ export type ChannelModelEntry = {
 
 export type VideoSizeRule = { size: string; multiplier: number }
 
+/**
+ * 价格一律以「微美元」存储（1 美元 = 1_000_000），对应各家官方公布的价目表。
+ * chat 按 token 计费（每 100 万 token 的价格），image 按次，video 按秒。
+ */
 export type ModelPrice = {
   id: number
   model: string
   kind: ChannelKind
-  cost_credits: number
   display_name: string | null
   enabled: boolean
   protocol: ChannelProtocol
   context_limit: number | null
-  // video-kind billing: (base_credits + per_second × 秒) × 尺寸倍率
-  base_credits: number
-  per_second: number
+  /** 每 100 万 token 的微美元价格 */
+  input_price: number
+  output_price: number
+  /** null 表示该模型没有缓存折扣，缓存 token 按输入价计费 */
+  cached_input_price: number | null
+  /** 每次生图的微美元价格 */
+  per_call_price: number
+  // video 计费：(base_price + per_second_price × 秒) × 尺寸倍率
+  base_price: number
+  per_second_price: number
   allowed_seconds: number[] | null
   size_rules: VideoSizeRule[] | null
 }
@@ -91,13 +101,16 @@ export type PricingInput = {
   kind: ChannelKind
   /** Replace model-to-channel bindings when present; omit to preserve them. */
   channel_ids?: number[]
-  cost_credits: number
   display_name?: string | null
   enabled?: boolean
   protocol: ChannelProtocol
   context_limit?: number | null
-  base_credits?: number
-  per_second?: number
+  input_price?: number
+  output_price?: number
+  cached_input_price?: number | null
+  per_call_price?: number
+  base_price?: number
+  per_second_price?: number
   allowed_seconds?: number[] | null
   size_rules?: VideoSizeRule[] | null
 }

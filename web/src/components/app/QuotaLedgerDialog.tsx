@@ -9,7 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { creditsApi, type LedgerEntry } from "@/lib/credits"
+import { formatQuota, quotaApi, type LedgerEntry } from "@/lib/quota"
 import { StatsView } from "./StatsView"
 
 type Props = {
@@ -57,6 +57,7 @@ function prettifyReason(raw: string): string {
   if (raw === "refund_upstream_error") return "退款 · 上游错误(旧记录)"
   if (raw === "refund_job_create_error") return "退款 · 任务创建失败(旧记录)"
   if (raw === "refund_studio_error") return "退款 · 工作室"
+  // 对话改为按 token 事后结算后不再产生退款，这些只会出现在历史记录里。
   if (raw.startsWith("refund_chat_")) {
     const rest = raw.slice("refund_chat_".length)
     if (rest.endsWith("_all_failed")) {
@@ -66,6 +67,13 @@ function prettifyReason(raw: string): string {
       return `退款 · 对话 · ${rest.slice(0, -"_stream_empty".length)} · 流为空`
     }
     return `退款 · 对话 · ${rest}`
+  }
+  if (raw.startsWith("refund_video_")) {
+    const rest = raw.slice("refund_video_".length)
+    if (rest.endsWith("_no_channel")) {
+      return `退款 · 视频 · ${rest.slice(0, -"_no_channel".length)} · 无可用渠道`
+    }
+    return `退款 · 视频 · ${rest}`
   }
   if (raw.startsWith("refund_image_")) {
     const rest = raw.slice("refund_image_".length)
@@ -99,6 +107,9 @@ function prettifyReason(raw: string): string {
     }
     return `图像 · ${PROTOCOL_LABEL[rest] ?? rest}`
   }
+  if (raw.startsWith("video_")) return `视频 · ${raw.slice("video_".length)}`
+  if (raw === "worker_agent") return "工蜂 · 执行"
+  if (raw === "worker_compact") return "工蜂 · 压缩上下文"
   if (raw === "studio_generate") return "工作室生图"
 
   // admin manual adjustments (admin-supplied reasons get the literal text)
@@ -108,9 +119,24 @@ function prettifyReason(raw: string): string {
   return raw
 }
 
+/** 列表里的 token 摘要：没有 token 的条目（充值、赠送、生图）留空。 */
+function summarizeTokens(e: LedgerEntry): string {
+  if (e.input_tokens <= 0 && e.output_tokens <= 0) return "—"
+  const fmt = (n: number) => n.toLocaleString("zh-CN")
+  return `${fmt(e.input_tokens)}↑ ${fmt(e.output_tokens)}↓`
+}
+
+/** 悬停时展示完整分解，含命中缓存的输入 token。 */
+function describeTokens(e: LedgerEntry): string {
+  if (e.input_tokens <= 0 && e.output_tokens <= 0) return ""
+  const parts = [`输入 ${e.input_tokens}`, `输出 ${e.output_tokens}`]
+  if (e.cached_tokens > 0) parts.push(`其中缓存命中 ${e.cached_tokens}`)
+  return parts.join(" · ")
+}
+
 type Tab = "stats" | "ledger"
 
-export function CreditsLedgerDialog({ open, onClose }: Props) {
+export function QuotaLedgerDialog({ open, onClose }: Props) {
   const [tab, setTab] = useState<Tab>("stats")
   const [entries, setEntries] = useState<LedgerEntry[]>([])
   const [page, setPage] = useState(1)
@@ -118,7 +144,7 @@ export function CreditsLedgerDialog({ open, onClose }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [hasMore, setHasMore] = useState(true)
 
-  const statsLoader = useCallback(creditsApi.stats, [])
+  const statsLoader = useCallback(quotaApi.stats, [])
 
   useEffect(() => {
     if (!open) return
@@ -135,7 +161,7 @@ export function CreditsLedgerDialog({ open, onClose }: Props) {
     setLoading(true)
     setError(null)
     try {
-      const rows = await creditsApi.ledger(p)
+      const rows = await quotaApi.ledger(p)
       setEntries((prev) => (reset ? rows : [...prev, ...rows]))
       // If the server returned fewer than a typical page, assume we hit the end.
       setHasMore(rows.length >= PAGE_SIZE)
@@ -157,7 +183,7 @@ export function CreditsLedgerDialog({ open, onClose }: Props) {
         <DialogHeader className="flex-row items-start justify-between gap-2 text-left">
           <div>
             <DialogTitle className="flex items-center gap-2">
-              <Receipt className="size-5" /> 积分中心
+              <Receipt className="size-5" /> 额度中心
             </DialogTitle>
             <DialogDescription className="text-xs">
               {tab === "stats"
@@ -208,7 +234,7 @@ export function CreditsLedgerDialog({ open, onClose }: Props) {
             <div className="rounded-md border border-border">
               {entries.length === 0 && !loading ? (
                 <p className="px-3 py-10 text-center text-sm text-muted-foreground">
-                  {error ? "加载失败" : "还没有积分变动记录"}
+                  {error ? "加载失败" : "还没有额度变动记录"}
                 </p>
               ) : (
                 <table className="w-full text-sm">
@@ -216,6 +242,7 @@ export function CreditsLedgerDialog({ open, onClose }: Props) {
                     <tr>
                       <th className="px-3 py-2 text-left font-medium">时间</th>
                       <th className="px-3 py-2 text-right font-medium">变动</th>
+                      <th className="px-3 py-2 text-right font-medium">Tokens</th>
                       <th className="px-3 py-2 text-left font-medium">原因</th>
                     </tr>
                   </thead>
@@ -236,7 +263,13 @@ export function CreditsLedgerDialog({ open, onClose }: Props) {
                           }
                         >
                           {e.delta > 0 ? "+" : ""}
-                          {e.delta}
+                          {formatQuota(e.delta)}
+                        </td>
+                        <td
+                          className="whitespace-nowrap px-3 py-1.5 text-right text-xs tabular-nums text-muted-foreground"
+                          title={describeTokens(e)}
+                        >
+                          {summarizeTokens(e)}
                         </td>
                         <td
                           className="break-all px-3 py-1.5 text-xs"

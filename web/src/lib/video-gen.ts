@@ -14,8 +14,9 @@ export type SizeRule = { size: string; multiplier: number }
 export type VideoModel = {
   model: string
   display_name: string | null
-  base_credits: number
-  per_second: number
+  /** 额度价格，后端已按站点汇率与倍率换算完毕 */
+  base_quota: number
+  per_second_quota: number
   allowed_seconds: number[]
   size_rules: SizeRule[]
 }
@@ -31,7 +32,7 @@ export type VideoJob = {
   progress: number
   video_path: string | null
   error: string | null
-  cost_credits: number
+  cost_quota: number
   refunded: boolean
   created_at: string
   finished_at: string | null
@@ -75,19 +76,22 @@ function customModels(models: string[]): VideoModel[] {
   return models.filter(Boolean).map((model) => ({
     model,
     display_name: null,
-    base_credits: 0,
-    per_second: 0,
+    base_quota: 0,
+    per_second_quota: 0,
     allowed_seconds: CUSTOM_VIDEO_SECONDS,
     size_rules: CUSTOM_VIDEO_SIZES,
   }))
 }
 
-/** Same formula as videos::compute_cost: (base + per_second*s) * multiplier / 100. */
+/**
+ * 预估额度消耗。后端已把美元价折算成额度下发，这里只按同样的
+ * (base + per_second × 秒) × 尺寸倍率 公式取整，与 videos::compute_cost 对齐。
+ */
 export function computeVideoCost(m: VideoModel, seconds: number, size: string): number | null {
   if (!m.allowed_seconds.includes(seconds)) return null
   const rule = m.size_rules.find((r) => r.size === size)
   if (!rule) return null
-  return Math.round(((m.base_credits + m.per_second * seconds) * rule.multiplier) / 100)
+  return Math.round(((m.base_quota + m.per_second_quota * seconds) * rule.multiplier) / 100)
 }
 
 export function isLocalVideoJob(job: VideoJob): job is LocalVideoJob {
@@ -328,7 +332,7 @@ export async function createLocalVideoJob(
     progress: progressValue(body),
     video_path: null,
     error: status === "failed" ? localFailure(body) : null,
-    cost_credits: 0,
+    cost_quota: 0,
     refunded: false,
     created_at: now,
     finished_at: status === "failed" ? now : null,

@@ -377,6 +377,24 @@ async fn call_claude(
     Err("所有 Claude 渠道均不可用".into())
 }
 
+/// 按 Claude 响应里的真实 token 用量结算工蜂调用的额度。
+///
+/// 工蜂走非流式接口，响应体里就带完整 `usage`，因此无需像聊天代理那样边转发
+/// 边解析。上游没报 usage 时不计费，避免凭空估算 token。
+async fn settle_worker_chat(
+    pool: &crate::db::Pool,
+    kind: crate::db::DbKind,
+    user_id: i64,
+    model: &str,
+    resp: &serde_json::Value,
+    reason: &str,
+) {
+    let Some(usage) = crate::usage::extract_usage(resp) else {
+        return;
+    };
+    channels::settle_chat(pool, kind, user_id, model, "claude", usage, reason).await;
+}
+
 /// 落库一条 worker_message（无需返回 id）。
 async fn insert_message(
     pool: &crate::db::Pool,
@@ -678,21 +696,13 @@ async fn compact(
         "content": "请用中文简洁总结以上对话历史，保留关键事实、涉及的文件路径、命令及其结果、尚未完成的任务，供后续继续。只输出摘要正文，不要寒暄。"
     }));
 
-    // 6. 扣费
-    let cost = match channels::try_deduct_for_model(
-        &pool,
-        kind,
-        user.id,
-        &req.model,
-        "chat",
-        "claude",
-        "worker_compact",
-    )
-    .await
+    // 6. 额度校验（实际扣费在拿到 usage 之后）
+    if channels::authorize_chat(&pool, kind, user.id, &req.model)
+        .await
+        .is_err()
     {
-        Ok((_bal, deducted)) => deducted,
-        Err(_) => fail!("积分不足或模型未启用"),
-    };
+        fail!("额度不足或模型未启用");
+    }
 
     // 7. 调 Claude（不带 tools）
     let resp = match call_claude(
@@ -705,21 +715,12 @@ async fn compact(
     .await
     {
         Ok(v) => v,
-        Err(e) => {
-            if cost > 0 {
-                let _ = crate::credits::grant(
-                    &pool,
-                    kind,
-                    user.id,
-                    cost,
-                    &format!("refund_worker_compact_{}_failed", req.model),
-                    &crate::credits::LedgerMeta::refund_chat("claude", &req.model),
-                )
-                .await;
-            }
-            fail!(e);
-        }
+        // No tokens were delivered, so there is nothing to charge.
+        Err(e) => fail!(e),
     };
+
+    // 压缩调用按上游实际返回的 token 用量结算。
+    settle_worker_chat(&pool, kind, user.id, &req.model, &resp, "worker_compact").await;
 
     // 8. 提取摘要文本
     let summary_text = resp
@@ -733,17 +734,8 @@ async fn compact(
         .unwrap_or("")
         .to_string();
     if summary_text.is_empty() {
-        if cost > 0 {
-            let _ = crate::credits::grant(
-                &pool,
-                kind,
-                user.id,
-                cost,
-                &format!("refund_worker_compact_{}_empty", req.model),
-                &crate::credits::LedgerMeta::refund_chat("claude", &req.model),
-            )
-            .await;
-        }
+        // Already settled above: the upstream consumed and billed these tokens
+        // even though the summary came back unusable.
         fail!("压缩失败：摘要为空");
     }
 
@@ -901,41 +893,25 @@ async fn session_message(
                 );
                 return;
             }
-            // a. 扣费
-            let cost = match channels::try_deduct_for_model(
-                &pool,
-                kind,
-                user.id,
-                &req.model,
-                "chat",
-                "claude",
-                "worker_agent",
-            )
-            .await
+            // a. 额度校验。每轮都查一次，这样余额耗尽时循环会停在下一轮，
+            //    而不是把已经欠费的会话继续跑下去。
+            if channels::authorize_chat(&pool, kind, user.id, &req.model)
+                .await
+                .is_err()
             {
-                Ok((_bal, deducted)) => deducted,
-                Err(_) => emit_err!("积分不足或模型未启用"),
-            };
+                emit_err!("额度不足或模型未启用");
+            }
 
             // b. 调 Claude
             let messages_val = serde_json::Value::Array(messages.clone());
             let resp = match call_claude(&state, &chain, &req.model, &messages_val, true).await {
                 Ok(v) => v,
-                Err(e) => {
-                    if cost > 0 {
-                        let _ = crate::credits::grant(
-                            &pool,
-                            kind,
-                            user.id,
-                            cost,
-                            &format!("refund_worker_agent_{}_failed", req.model),
-                            &crate::credits::LedgerMeta::refund_chat("claude", &req.model),
-                        )
-                        .await;
-                    }
-                    emit_err!(e);
-                }
+                // Nothing came back, so nothing is billed.
+                Err(e) => emit_err!(e),
             };
+
+            // 本轮按上游返回的 token 用量结算。
+            settle_worker_chat(&pool, kind, user.id, &req.model, &resp, "worker_agent").await;
 
             // 发出本轮真实 token 用量(input+output ≈ 下一轮 context 起点)
             {

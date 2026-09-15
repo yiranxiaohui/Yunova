@@ -1,7 +1,7 @@
 # Yunova
 
 Yunova 是基于 Rust Axum + React 的自托管 Agent 整合平台，将多模型对话、
-工蜂工具执行、图片与视频创作、媒体剪辑和工作流放在统一工作空间中，内置积分计费。
+工蜂工具执行、图片与视频创作、媒体剪辑和工作流放在统一工作空间中，内置按 token 计费的额度体系。
 
 源码仓库：[yiranxiaohui/Yunova](https://github.com/yiranxiaohui/Yunova)。
 
@@ -27,31 +27,47 @@ Yunova 镜像。不要直接用新模板覆盖旧部署，否则可能创建一�
 需要使用模板连接现有目录时，可指定 `YUNOVA_DATA_PATH`、`YUNOVA_MYSQL_DATA_PATH` 和
 `YUNOVA_POSTGRES_DATA_PATH`；数据库名称和账号仍需匹配原有配置。
 
-## 计费模型（v2，2026-05）
+## 计费模型（v3，2026-09）
 
-v1 的「全局共享上游 + cost_chat / cost_image 两档定价」已被替换为：
+v1 的「全局共享上游 + cost_chat / cost_image 两档定价」和 v2 的「按次积分」已被替换为
+**按 token 计费的站点额度制**：
 
-- **多渠道（Channel）路由**：每种协议（OpenAI / Claude / Gemini）可配置 N 个上游 channel；按 `priority` 升序 fallback，第一个成功的 channel 处理请求。
-- **按模型定价（ModelPricing）白名单**：`model_pricing` 表里没有的 model 直接 403 `NotWhitelisted`；`cost_credits=0` 表示放行不扣费。
-- **扣费链路**：`try_deduct_for_model` 在请求前查 `model_pricing` 一次性扣；失败全部 channel 后通过 `cost_for_model` 二次查价精确退款。
-- **Ledger reason 格式**：成功 `chat_<model>@<channel_name>`，全失败退款 `refund_chat_<model>_all_failed`。
+- **额度（quota）是本站自有单位**，界面直接显示整数，不带货币符号。
+- **模型价格照抄官方美元价目表**：对话填每 100 万 token 的输入/输出（及可选的缓存输入）
+  单价，图像填每次调用单价，视频填基础价 + 每秒价。价格以**微美元**（1 美元 = 1_000_000）
+  整数存储，`$1.25` 就是 `1250000`，不存在浮点误差。
+- **两个全局开关**把上游美元成本换算成额度：`quota_per_usd`（默认 500000）
+  与 `price_multiplier_percent`（默认 100，即不加价）。改价立即生效，无需重启。
+- **对话事后结算**：请求前只做白名单校验和「余额是否为正」的准入判断，不预扣。
+  代理在转发 SSE 的同时旁路解析上游返回的 usage，流结束后按真实 token 扣费。
+  上游失败或没返回 usage 就**不计费**，因此不再需要退款链路。
+  图像按次、视频按秒仍是先扣后退（这些接口不返回 token）。
+- **多渠道（Channel）路由**：每种协议可配置 N 个上游 channel；按 `priority` 升序 fallback。
+- **按模型定价白名单**：`model_pricing` 里没有的 model 直接 403 `NotWhitelisted`；
+  价格填 0 表示放行不扣费。
+- **Ledger**：每条流水都带 `kind` / `protocol` / `model` 和
+  `input_tokens` / `output_tokens` / `cached_tokens`，统计面板据此做按模型聚合。
 
 ### 数据流
 
 ```
-POST /api/chat {model:"gpt-5",...}
- → lookup_pricing("gpt-5")    → cost=3, kind="chat"
- → try_deduct_for_model       → balance -= 3
- → list_channels_for_model    → [ch1(p=10), ch2(p=20)]
+POST /api/proxy/openai {model:"gpt-5",...}
+ → authorize_chat("gpt-5")     → 白名单通过 && 余额 > 0（不扣费）
+ → list_channels_for_model     → [ch1(p=10), ch2(p=20)]
  → try ch1 → 503 → try ch2 → 200 OK stream
- → ledger: -3 "chat_gpt-5@Azure"
-全失败 → grant(+3 "refund_chat_gpt-5_all_failed") → 502
+ → MeteredStream 边转发边解析 usage
+ → 流结束 settle_chat(input=1000, output=500)
+     $1.25/1M × 1000 + $10/1M × 500 = $0.00625
+     × quota_per_usd(500000) = 3125 额度
+ → ledger: -3125 "chat_openai" (model=gpt-5, in=1000, out=500)
+全渠道失败 → 不扣费 → 502
 ```
 
 ### 后台管理
 
 `Admin → Channels`：CRUD 渠道、启用/停用、绑定 model 列表（每行 `model` 或 `model=client_model=upstream_id`）。
-`Admin → Pricing`：CRUD model 白名单 + 单价。
+`Admin → Pricing`：CRUD model 白名单 + 官方美元单价（录入时实时预览折算后的额度）。
+`Admin → 设置 → 额度换算`：调整 `quota_per_usd`、全局加价倍率、注册与邀请赠送额度。
 
 旧的「Shared Backend」面板与 KV (`shared_chat_openai_*` 等) 暂时保留只用于历史 seed，新链路不再读它们。
 
@@ -94,7 +110,7 @@ cd web && bun run dev    # 前端 :5173 → /api 走 vite proxy
 
 视频工作室支持切换到「本地 API」模式，填写 OpenAI 兼容服务的 Base URL、
 API Key（可选）和模型。模型查询、创建、轮询和 MP4 下载都由当前浏览器直接
-访问本地服务，不经过 Yunova 后端；自定义任务不扣平台积分，凭据和任务记录
+访问本地服务，不经过 Yunova 后端；自定义任务不扣平台额度，凭据和任务记录
 只保存在浏览器，不会写入数据库或云端同步。服务提供 `/v1/models` 时可在页面
 加载模型列表，否则可以手动填写模型、时长和分辨率。
 

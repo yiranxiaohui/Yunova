@@ -2340,7 +2340,7 @@ function GenerationDialog({
           )}
         </div>
         <div className="flex items-center justify-between border-t border-white/10 bg-black/10 px-5 py-3">
-          <span className="text-[10px] text-zinc-500">{generating ? <span className="flex items-center gap-2 text-violet-300"><Loader2 className="size-3 animate-spin" /> {status}</span> : cost != null ? `预计消耗 ${cost} 积分` : "使用平台视频生成额度"}</span>
+          <span className="text-[10px] text-zinc-500">{generating ? <span className="flex items-center gap-2 text-violet-300"><Loader2 className="size-3 animate-spin" /> {status}</span> : cost != null ? `预计消耗 ${cost} 额度` : "使用平台视频生成额度"}</span>
           <Button size="sm" className="bg-violet-500 text-white hover:bg-violet-400" disabled={!active || !prompt.trim() || generating} onClick={onGenerate}>{generating ? <Loader2 className="animate-spin" /> : <Sparkles />} {generating ? "生成中" : "启动补片流水线"}</Button>
         </div>
       </div>

@@ -100,10 +100,10 @@ export function RechargeDialog({ open, onClose, onPaid }: Props) {
       <DialogContent className="flex flex-col gap-4">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Coins className="size-5" /> 充值积分
+            <Coins className="size-5" /> 充值额度
           </DialogTitle>
           <DialogDescription>
-            支付完成后，积分将在几秒内到账。若长时间未到账请联系管理员。
+            支付完成后，额度将在几秒内到账。若长时间未到账请联系管理员。
           </DialogDescription>
         </DialogHeader>
 
@@ -197,7 +197,7 @@ export function RechargeDialog({ open, onClose, onPaid }: Props) {
                   <TableRow>
                     <TableHead>订单号</TableHead>
                     <TableHead className="text-right">金额</TableHead>
-                    <TableHead className="text-right">积分</TableHead>
+                    <TableHead className="text-right">额度</TableHead>
                     <TableHead>状态</TableHead>
                   </TableRow>
                 </TableHeader>
@@ -211,7 +211,7 @@ export function RechargeDialog({ open, onClose, onPaid }: Props) {
                         ¥{(o.amount_cents / 100).toFixed(2)}
                       </TableCell>
                       <TableCell className="text-right tabular-nums">
-                        +{o.credits}
+                        +{o.quota}
                       </TableCell>
                       <TableCell>
                         <StatusPill status={o.status} />

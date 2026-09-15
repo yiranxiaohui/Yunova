@@ -102,6 +102,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (35, include_str!("../migrations/sqlite/0035_video_editor.sql")),
     (36, include_str!("../migrations/sqlite/0036_unify_media_library.sql")),
     (37, include_str!("../migrations/sqlite/0037_yunova_brand.sql")),
+    (38, include_str!("../migrations/sqlite/0038_token_quota_billing.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -141,6 +142,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (35, include_str!("../migrations/mysql/0035_video_editor.sql")),
     (36, include_str!("../migrations/mysql/0036_unify_media_library.sql")),
     (37, include_str!("../migrations/mysql/0037_yunova_brand.sql")),
+    (38, include_str!("../migrations/mysql/0038_token_quota_billing.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -180,6 +182,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (35, include_str!("../migrations/postgres/0035_video_editor.sql")),
     (36, include_str!("../migrations/postgres/0036_unify_media_library.sql")),
     (37, include_str!("../migrations/postgres/0037_yunova_brand.sql")),
+    (38, include_str!("../migrations/postgres/0038_token_quota_billing.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -416,6 +419,78 @@ pub fn day_bucket(kind: DbKind, col: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Migration 38 must carry every account's purchasing power across the
+    /// credit→quota switch: balances scale by 500 and per-call prices become
+    /// the micro-USD that buys the same amount at 500_000 quota per USD.
+    #[tokio::test]
+    async fn quota_migration_preserves_purchasing_power() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // Rewind to the pre-quota schema and re-create the old-shaped rows.
+        pool.execute("DELETE FROM _migrations WHERE id = 38").await.unwrap();
+        pool.execute("ALTER TABLE user_balances RENAME TO user_credits").await.unwrap();
+        pool.execute("ALTER TABLE balance_ledger RENAME TO credit_ledger").await.unwrap();
+        for col in ["input_tokens", "output_tokens", "cached_tokens"] {
+            pool.execute(format!("ALTER TABLE credit_ledger DROP COLUMN {col}").as_str()).await.unwrap();
+        }
+        for col in ["input_price", "output_price", "cached_input_price"] {
+            pool.execute(format!("ALTER TABLE model_pricing DROP COLUMN {col}").as_str()).await.unwrap();
+        }
+        pool.execute("ALTER TABLE model_pricing RENAME COLUMN per_call_price TO cost_credits").await.unwrap();
+        pool.execute("ALTER TABLE model_pricing RENAME COLUMN base_price TO base_credits").await.unwrap();
+        pool.execute("ALTER TABLE model_pricing RENAME COLUMN per_second_price TO per_second").await.unwrap();
+        pool.execute("ALTER TABLE video_jobs RENAME COLUMN cost_quota TO cost_credits").await.unwrap();
+        pool.execute("ALTER TABLE payment_orders RENAME COLUMN quota TO credits").await.unwrap();
+        pool.execute("DELETE FROM app_settings WHERE k IN ('quota_per_usd', 'price_multiplier_percent')").await.unwrap();
+        pool.execute("UPDATE app_settings SET k = 'epay_credits_per_yuan' WHERE k = 'epay_quota_per_yuan'").await.unwrap();
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')").await.unwrap();
+        pool.execute("INSERT INTO user_credits (user_id, balance, lifetime_used) VALUES (1, 200, 40)").await.unwrap();
+        pool.execute("INSERT INTO credit_ledger (user_id, delta, reason) VALUES (1, -5, 'chat_openai')").await.unwrap();
+        pool.execute("INSERT INTO model_pricing (model, kind, cost_credits, enabled, protocol, base_credits, per_second) \
+                      VALUES ('gpt-x', 'image', 5, 1, 'openai', 0, 0)").await.unwrap();
+
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // 200 credits bought 2 CNY of usage; it must still buy 100_000 quota.
+        let (balance, lifetime): (i64, i64) =
+            sqlx::query_as("SELECT balance, lifetime_used FROM user_balances WHERE user_id = 1")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!((balance, lifetime), (100_000, 20_000));
+
+        let (delta,): (i64,) =
+            sqlx::query_as("SELECT delta FROM balance_ledger WHERE user_id = 1")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(delta, -2_500);
+
+        // A 5-credit image call cost 1/40 CNY; at 500k quota/USD that is
+        // 5_000 micro-USD, which still charges exactly 2_500 quota.
+        let (per_call,): (i64,) =
+            sqlx::query_as("SELECT per_call_price FROM model_pricing WHERE model = 'gpt-x'")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(per_call, 5_000);
+
+        let (rate,): (String,) =
+            sqlx::query_as("SELECT v FROM app_settings WHERE k = 'quota_per_usd'")
+                .fetch_one(&pool).await.unwrap();
+        let quota_per_usd: i64 = rate.parse().unwrap();
+        assert_eq!(per_call * quota_per_usd / 1_000_000, 2_500);
+
+        // The obsolete global per-call settings are gone.
+        let (leftover,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM app_settings WHERE k IN ('cost_chat', 'cost_image')",
+        )
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(leftover, 0);
+
+        pool.close().await;
+    }
+
     #[tokio::test]
     async fn brand_migration_updates_defaults_and_preserves_custom_settings() {
         install_drivers();
@@ -428,7 +503,7 @@ mod tests {
         let read = "SELECT k, v FROM app_settings WHERE k IN ('smtp_from_name', 'epay_product_name') ORDER BY k";
         let defaults: Vec<(String, String)> = sqlx::query_as(read).fetch_all(&pool).await.unwrap();
         assert_eq!(defaults, vec![
-            ("epay_product_name".into(), "Yunova 积分充值".into()),
+            ("epay_product_name".into(), "Yunova 额度充值".into()),
             ("smtp_from_name".into(), "Yunova".into()),
         ]);
 

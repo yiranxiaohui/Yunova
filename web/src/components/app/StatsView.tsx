@@ -2,16 +2,17 @@ import { useEffect, useMemo, useState } from "react"
 import { RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
-import type {
-  AdminCreditsStats,
-  CreditsStats,
-  DailyPoint,
-  ModelBucket,
-  StatsPeriod,
-  TopUserRow,
-} from "@/lib/credits"
+import {
+  formatQuota,
+  type AdminQuotaStats,
+  type DailyPoint,
+  type ModelBucket,
+  type QuotaStats,
+  type StatsPeriod,
+  type TopUserRow,
+} from "@/lib/quota"
 
-type Loader = (period: StatsPeriod) => Promise<CreditsStats | AdminCreditsStats>
+type Loader = (period: StatsPeriod) => Promise<QuotaStats | AdminQuotaStats>
 
 type Props = {
   loader: Loader
@@ -33,9 +34,15 @@ const PROTOCOL_LABEL: Record<string, string> = {
   gemini: "Gemini",
 }
 
+const KIND_LABEL: Record<string, string> = {
+  chat: "对话",
+  image: "图像",
+  video: "视频",
+}
+
 export function StatsView({ loader, showTopUsers, active = true }: Props) {
   const [period, setPeriod] = useState<StatsPeriod>("7d")
-  const [data, setData] = useState<CreditsStats | AdminCreditsStats | null>(null)
+  const [data, setData] = useState<QuotaStats | AdminQuotaStats | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -59,7 +66,7 @@ export function StatsView({ loader, showTopUsers, active = true }: Props) {
     }
   }, [period, active, loader])
 
-  const topUsers = (data as AdminCreditsStats | null)?.top_users ?? []
+  const topUsers = (data as AdminQuotaStats | null)?.top_users ?? []
 
   return (
     <div className="flex flex-col gap-4">
@@ -132,14 +139,19 @@ export function StatsView({ loader, showTopUsers, active = true }: Props) {
   )
 }
 
-function SummaryCards({ data }: { data: CreditsStats }) {
+function SummaryCards({ data }: { data: QuotaStats }) {
   return (
-    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+    <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
       <StatCard label="净消费" value={data.net_spent} tone="spend" />
       <StatCard label="总扣费" value={data.spent} />
       <StatCard label="退款" value={data.refunded} tone="positive" />
       <StatCard label="充值入账" value={data.recharged} tone="positive" />
       <StatCard label="赠送(注册/邀请)" value={data.granted} tone="positive" />
+      <StatCard
+        label="Tokens (入/出)"
+        value={data.input_tokens + data.output_tokens}
+        hint={`输入 ${formatQuota(data.input_tokens)} · 输出 ${formatQuota(data.output_tokens)}`}
+      />
     </div>
   )
 }
@@ -148,10 +160,12 @@ function StatCard({
   label,
   value,
   tone,
+  hint,
 }: {
   label: string
   value: number
   tone?: "spend" | "positive"
+  hint?: string
 }) {
   const color =
     tone === "spend"
@@ -164,7 +178,15 @@ function StatCard({
       <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
         {label}
       </p>
-      <p className={"mt-1 text-xl font-semibold tabular-nums " + color}>{value}</p>
+      <p
+        className={"mt-1 text-xl font-semibold tabular-nums " + color}
+        title={hint}
+      >
+        {formatQuota(value)}
+      </p>
+      {hint && (
+        <p className="mt-0.5 truncate text-[10px] text-muted-foreground">{hint}</p>
+      )}
     </div>
   )
 }
@@ -210,7 +232,7 @@ function DailyBarChart({ daily }: { daily: DailyPoint[] }) {
           const refundH = max > 0 ? (d.refunded / max) * height : 0
           return (
             <g key={d.date}>
-              <title>{`${d.date}\n扣费 ${d.spent}\n退款 ${d.refunded}`}</title>
+              <title>{`${d.date}\n扣费 ${formatQuota(d.spent)}\n退款 ${formatQuota(d.refunded)}`}</title>
               <rect
                 x={x}
                 y={height - spentH}
@@ -255,7 +277,7 @@ function ModelBarList({ rows }: { rows: ModelBucket[] }) {
             <div className="flex items-center justify-between gap-2">
               <div className="flex min-w-0 items-center gap-1.5">
                 <span className="inline-block rounded-sm bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
-                  {r.kind === "chat" ? "对话" : "图像"}
+                  {KIND_LABEL[r.kind] ?? r.kind}
                 </span>
                 {r.protocol && (
                   <span className="text-[10px] text-muted-foreground">
@@ -264,12 +286,19 @@ function ModelBarList({ rows }: { rows: ModelBucket[] }) {
                 )}
                 <span className="truncate font-mono text-xs">{r.model}</span>
               </div>
-              <div className="flex shrink-0 items-center gap-2 text-xs tabular-nums">
+              <div
+                className="flex shrink-0 items-center gap-2 text-xs tabular-nums"
+                title={
+                  r.input_tokens > 0 || r.output_tokens > 0
+                    ? `输入 ${formatQuota(r.input_tokens)} tokens · 输出 ${formatQuota(r.output_tokens)} tokens`
+                    : undefined
+                }
+              >
                 <span className="text-muted-foreground">{r.count} 次</span>
-                <span className="font-medium">{r.spent}</span>
+                <span className="font-medium">{formatQuota(r.spent)}</span>
                 {r.refunded > 0 && (
                   <span className="text-emerald-600 dark:text-emerald-400">
-                    -{r.refunded}
+                    -{formatQuota(r.refunded)}
                   </span>
                 )}
               </div>
@@ -306,10 +335,10 @@ function TopUserList({ rows }: { rows: TopUserRow[] }) {
                 </span>
               </div>
               <div className="flex shrink-0 items-center gap-2 text-xs tabular-nums">
-                <span className="font-medium">{r.spent}</span>
+                <span className="font-medium">{formatQuota(r.spent)}</span>
                 {r.refunded > 0 && (
                   <span className="text-emerald-600 dark:text-emerald-400">
-                    -{r.refunded}
+                    -{formatQuota(r.refunded)}
                   </span>
                 )}
               </div>
