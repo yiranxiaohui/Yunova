@@ -1024,8 +1024,6 @@ export default function ChatPage() {
     return () => window.clearTimeout(t)
   }, [highlightedMsgId])
 
-  // 进入工蜂会话：拉历史回看并进入工蜂模式
-
   async function refreshAttachedSkills(convId: number) {
     try {
       const list = await skillsApi.listForConversation(convId)
