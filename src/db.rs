@@ -103,6 +103,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (36, include_str!("../migrations/sqlite/0036_unify_media_library.sql")),
     (37, include_str!("../migrations/sqlite/0037_yunova_brand.sql")),
     (38, include_str!("../migrations/sqlite/0038_token_quota_billing.sql")),
+    (39, include_str!("../migrations/sqlite/0039_disable_unpriced_chat_models.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -143,6 +144,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (36, include_str!("../migrations/mysql/0036_unify_media_library.sql")),
     (37, include_str!("../migrations/mysql/0037_yunova_brand.sql")),
     (38, include_str!("../migrations/mysql/0038_token_quota_billing.sql")),
+    (39, include_str!("../migrations/mysql/0039_disable_unpriced_chat_models.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -183,6 +185,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (36, include_str!("../migrations/postgres/0036_unify_media_library.sql")),
     (37, include_str!("../migrations/postgres/0037_yunova_brand.sql")),
     (38, include_str!("../migrations/postgres/0038_token_quota_billing.sql")),
+    (39, include_str!("../migrations/postgres/0039_disable_unpriced_chat_models.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -418,6 +421,88 @@ pub fn day_bucket(kind: DbKind, col: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A chat model priced only under the old per-call scheme cannot be
+    /// converted to token rates — the single credit figure carries no
+    /// input/output split. Such a row must end up disabled rather than
+    /// enabled at zero, which would serve the model for free.
+    #[tokio::test]
+    async fn quota_migration_disables_chat_models_it_cannot_price() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // Rewind past the quota migrations and rebuild a pre-0038 pricing row,
+        // mirroring what a real upgrade from the credit era looks like.
+        pool.execute("DELETE FROM _migrations WHERE id IN (38, 39)").await.unwrap();
+        pool.execute("ALTER TABLE user_balances RENAME TO user_credits").await.unwrap();
+        pool.execute("ALTER TABLE balance_ledger RENAME TO credit_ledger").await.unwrap();
+        for col in ["input_tokens", "output_tokens", "cached_tokens"] {
+            pool.execute(format!("ALTER TABLE credit_ledger DROP COLUMN {col}").as_str()).await.unwrap();
+        }
+        for col in ["input_price", "output_price", "cached_input_price"] {
+            pool.execute(format!("ALTER TABLE model_pricing DROP COLUMN {col}").as_str()).await.unwrap();
+        }
+        pool.execute("ALTER TABLE model_pricing RENAME COLUMN per_call_price TO cost_credits").await.unwrap();
+        pool.execute("ALTER TABLE model_pricing RENAME COLUMN base_price TO base_credits").await.unwrap();
+        pool.execute("ALTER TABLE model_pricing RENAME COLUMN per_second_price TO per_second").await.unwrap();
+        pool.execute("ALTER TABLE video_jobs RENAME COLUMN cost_quota TO cost_credits").await.unwrap();
+        pool.execute("ALTER TABLE payment_orders RENAME COLUMN quota TO credits").await.unwrap();
+        pool.execute("DELETE FROM app_settings WHERE k IN ('quota_per_usd', 'price_multiplier_percent')").await.unwrap();
+        pool.execute("UPDATE app_settings SET k = 'epay_credits_per_yuan' WHERE k = 'epay_quota_per_yuan'").await.unwrap();
+        // An enabled per-call chat model, plus an image model that converts fine.
+        pool.execute("INSERT INTO model_pricing (model, kind, cost_credits, enabled, protocol, base_credits, per_second) \
+                      VALUES ('legacy-chat', 'chat', 3, 1, 'openai', 0, 0)").await.unwrap();
+        pool.execute("INSERT INTO model_pricing (model, kind, cost_credits, enabled, protocol, base_credits, per_second) \
+                      VALUES ('legacy-image', 'image', 5, 1, 'openai', 0, 0)").await.unwrap();
+
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // The chat row is parked, not silently free.
+        let (enabled, per_call, input, output): (i64, i64, i64, i64) = sqlx::query_as(
+            "SELECT enabled, per_call_price, input_price, output_price \
+             FROM model_pricing WHERE model = 'legacy-chat'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(enabled, 0, "an unpriceable chat model must be disabled");
+        assert_eq!((input, output), (0, 0));
+        // The old figure is retained so an admin can see what it used to cost.
+        assert_eq!(per_call, 3_000);
+
+        // Image billing is per call, so that row converts cleanly and stays on.
+        let (img_enabled, img_price): (i64, i64) = sqlx::query_as(
+            "SELECT enabled, per_call_price FROM model_pricing WHERE model = 'legacy-image'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(img_enabled, 1, "image pricing converts cleanly and stays enabled");
+        assert_eq!(img_price, 5_000);
+
+        // Re-running must not disable a model that now has real token rates.
+        pool.execute(
+            "UPDATE model_pricing SET input_price = 2000000, output_price = 10000000, enabled = 1 \
+             WHERE model = 'legacy-chat'",
+        )
+        .await
+        .unwrap();
+        pool.execute("DELETE FROM _migrations WHERE id = 39").await.unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+        let (still_on,): (i64,) =
+            sqlx::query_as("SELECT enabled FROM model_pricing WHERE model = 'legacy-chat'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(still_on, 1, "a properly priced model must stay enabled");
+
+        pool.close().await;
+    }
 
     /// Migration 38 must carry every account's purchasing power across the
     /// credit→quota switch: balances scale by 500 and per-call prices become
