@@ -149,7 +149,9 @@ async fn deduct_image_quota(
         Err(channels::DeductError::Insufficient { balance, cost }) => Err((
             StatusCode::PAYMENT_REQUIRED,
             format!(
-                "额度不足：当前剩余 {balance}，本次生图需要 {cost}；请在设置里填入自己的 API Key，或联系管理员充值"
+                "额度不足：当前剩余 {}，本次生图需要 {}；请在设置里填入自己的 API Key，或联系管理员充值",
+                quota::format_quota(balance),
+                quota::format_quota(cost)
             ),
         )
             .into_response()),

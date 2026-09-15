@@ -164,10 +164,6 @@ async fn create_order(
             .into_response();
     }
 
-    let per_yuan = quota::get_setting_i64(pool, kind, "epay_quota_per_yuan", 100)
-        .await
-        .max(1);
-
     let api_url = epay_submit_url(&s(pool, kind, "epay_api_url").await);
     let pid = s(pool, kind, "epay_pid").await;
     let key = s(pool, kind, "epay_key").await;
@@ -193,7 +189,9 @@ async fn create_order(
     }
 
     let amount_cents = body.yuan * 100;
-    let quota_to_grant = body.yuan * per_yuan;
+    // Quota is denominated in CNY: 1 yuan paid credits 1 quota. Stored in
+    // micro-quota, the same unit balances and charges use.
+    let quota_to_grant = body.yuan * quota::MICRO_QUOTA;
     let out_trade_no = random_out_trade_no(user.id);
 
     // persist the order as pending
@@ -535,7 +533,6 @@ struct AdminPaymentConfig {
     pid: String,
     key_set: bool,
     sign_type: String,
-    quota_per_yuan: i64,
     product_name: String,
     min_yuan: i64,
     max_yuan: i64,
@@ -560,7 +557,6 @@ async fn admin_get_config(Extension(installed): Extension<InstalledState>) -> Re
             let v = s(pool, kind, "epay_sign_type").await;
             if v.is_empty() { "MD5".into() } else { v }
         },
-        quota_per_yuan: quota::get_setting_i64(pool, kind, "epay_quota_per_yuan", 100).await,
         product_name: s(pool, kind, "epay_product_name").await,
         min_yuan: quota::get_setting_i64(pool, kind, "epay_min_yuan", 1).await,
         max_yuan: quota::get_setting_i64(pool, kind, "epay_max_yuan", 5000).await,
@@ -579,7 +575,6 @@ struct AdminPaymentConfigUpdate {
     /// absent = unchanged, "" = clear, non-empty = set
     key: Option<String>,
     sign_type: Option<String>,
-    quota_per_yuan: Option<i64>,
     product_name: Option<String>,
     min_yuan: Option<i64>,
     max_yuan: Option<i64>,
@@ -612,9 +607,6 @@ async fn admin_patch_config(
     }
     if let Some(v) = body.sign_type {
         ops.push(("epay_sign_type", v.trim().to_uppercase()));
-    }
-    if let Some(v) = body.quota_per_yuan {
-        ops.push(("epay_quota_per_yuan", v.max(1).to_string()));
     }
     if let Some(v) = body.product_name {
         ops.push(("epay_product_name", v.trim().to_string()));

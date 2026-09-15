@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
+import { formatQuota } from "@/lib/quota"
 import {
   ArrowLeft,
   Clapperboard,
@@ -110,8 +111,8 @@ function customModel(model: string): VideoModel {
   return {
     model,
     display_name: null,
-    base_quota: 0,
-    per_second_quota: 0,
+    base_micro_quota: 0,
+    per_second_micro_quota: 0,
     allowed_seconds: Array.from({ length: 15 }, (_, index) => index + 1),
     size_rules: [
       { size: "1280x720", multiplier: 100 },
@@ -869,7 +870,7 @@ export default function VideoStudioPage() {
             {videoMode === "byok"
               ? "生成视频（本地 API）"
               : cost != null
-                ? `生成视频（消耗 ${cost} 额度）`
+                ? `生成视频（消耗 ${formatQuota(cost)} 元）`
                 : "生成视频"}
               </>
             )}
@@ -1007,7 +1008,7 @@ function VideoJobCard({
         </p>
         {job.refunded && (
           <p className="text-[11px] text-muted-foreground">
-            已退还 {job.cost_quota} 额度
+            已退还 {formatQuota(job.cost_quota)} 元
           </p>
         )}
         <div className="mt-1 flex flex-wrap gap-2">
@@ -1067,7 +1068,7 @@ function VideoJobCard({
           {isLocalVideoJob(job)
             ? "本地 API"
             : job.cost_quota > 0
-              ? `消耗 ${job.cost_quota} 额度`
+              ? `消耗 ${formatQuota(job.cost_quota)} 元`
               : "云端任务"}
         </span>
       </div>

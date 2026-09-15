@@ -1,14 +1,20 @@
 // 站点额度（quota）API 客户端。
 //
-// 额度是本站自有单位，直接以整数展示，不带货币符号。模型价格由管理员照抄各家
-// 官方美元价目表录入，后端按 `quota_per_usd` 与全局倍率换算成额度。
-// 对话按 token 实际用量事后结算，生图按次、视频按秒。
+// 额度以人民币计价：1 额度 = 1 元。但一次对话常只花几分甚至几毫，因此后端一律
+// 以「微额度」（1 额度 = 1_000_000）存储和传输，前端只在展示时换算成元。
+// 整数微额度保证每一笔扣费精确，用浮点保存余额会逐渐产生偏差。
+//
+// 模型价格由管理员照抄各家官方美元价目表录入，后端按 `usd_to_cny_rate_micro`
+// 汇率与全局倍率换算成额度。对话按 token 实际用量事后结算，生图按次、视频按秒。
 
 export type QuotaMe = {
+  /** 微额度。除以 1e6 得到元。 */
   balance: number
   lifetime_used: number
-  /** 1 美元上游成本折算多少额度 */
-  quota_per_usd: number
+  /** 每 1 额度对应多少微额度，避免前端硬编码倍数 */
+  micro_per_quota: number
+  /** 汇率：1 美元 = 多少微额度（即多少元 × 1e6） */
+  usd_to_cny_rate_micro: number
   /** 全局加价倍率，100 = 1.0 倍 */
   price_multiplier_percent: number
 }
@@ -106,7 +112,7 @@ export const quotaApi = {
 export type AdminSettings = {
   registration_enabled: boolean
   signup_grant: number
-  quota_per_usd: number
+  usd_to_cny_rate_micro: number
   price_multiplier_percent: number
   invite_grant_inviter: number
   invite_grant_invitee: number
@@ -191,24 +197,50 @@ export const adminQuotaApi = {
 }
 
 // ---------------------------------------------------------------------------
-// 展示与换算helpers
+// 展示与换算 helpers
 // ---------------------------------------------------------------------------
 
-/** 微美元换算成额度的基准单位：价格字段都以每 100 万 token 计。 */
+/** 微美元换算基准：价格字段都以每 100 万 token 计。 */
 export const MICRO_USD = 1_000_000
 
-/** 千分位展示，额度是纯数字、不带货币符号。 */
-export function formatQuota(n: number): string {
-  return Math.round(n).toLocaleString("zh-CN")
+/** 每 1 额度（= 1 元）对应的微额度数。 */
+export const MICRO_QUOTA = 1_000_000
+
+/**
+ * 微额度 → 元的展示字符串。
+ *
+ * 去掉无意义的尾随零：整数额显示「5」而不是「5.000000」；不足一分的小额
+ * 保留足以看出非零的位数，避免显示成 0 让人以为没扣费。
+ */
+export function formatQuota(micro: number): string {
+  const neg = micro < 0
+  const abs = Math.abs(Math.round(micro))
+  const whole = Math.floor(abs / MICRO_QUOTA)
+  const frac = abs % MICRO_QUOTA
+  const sign = neg ? "-" : ""
+  if (frac === 0) return `${sign}${whole.toLocaleString("zh-CN")}`
+  const fracStr = String(frac).padStart(6, "0").replace(/0+$/, "")
+  return `${sign}${whole.toLocaleString("zh-CN")}.${fracStr}`
 }
 
-/** 大额额度的紧凑展示（徽章等空间有限处使用）。 */
-export function formatQuotaCompact(n: number): string {
-  const v = Math.round(n)
-  const abs = Math.abs(v)
-  if (abs >= 100_000_000) return `${(v / 100_000_000).toFixed(2)}亿`
-  if (abs >= 10_000) return `${(v / 10_000).toFixed(v % 10_000 === 0 ? 0 : 1)}万`
-  return v.toLocaleString("zh-CN")
+/** 带「元」后缀的展示形式。 */
+export function formatQuotaYuan(micro: number): string {
+  return `${formatQuota(micro)} 元`
+}
+
+/**
+ * 徽章等窄处的紧凑展示。金额较大时省略小数，较小时保留 2 位，
+ * 这样余额不足时用户仍能看出还剩多少。
+ */
+export function formatQuotaCompact(micro: number): string {
+  const yuanValue = micro / MICRO_QUOTA
+  const abs = Math.abs(yuanValue)
+  if (abs >= 10_000) return `${(yuanValue / 10_000).toFixed(1)}万`
+  if (abs >= 100) return Math.round(yuanValue).toLocaleString("zh-CN")
+  if (abs === 0) return "0"
+  // 小额保留两位小数，但不要显示成 0.00 掩盖仍有余额的事实
+  if (abs < 0.01) return yuanValue > 0 ? "<0.01" : ">-0.01"
+  return yuanValue.toFixed(2)
 }
 
 /** 微美元 → 美元字符串，用于后台价格输入框的回显。 */
@@ -224,17 +256,35 @@ export function usdToMicroUsd(usd: string | number): number {
   return Math.round(n * MICRO_USD)
 }
 
-/** 把模型的微美元单价按站点汇率折算成额度，用于后台预览。 */
-export function quotaForMicroUsd(
-  micro: number,
-  quotaPerUsd: number,
-  multiplierPercent = 100
-): number {
-  if (micro <= 0 || quotaPerUsd <= 0 || multiplierPercent <= 0) return 0
-  return Math.ceil((micro * quotaPerUsd * multiplierPercent) / (MICRO_USD * 100))
+/** 元输入 → 微额度整数。 */
+export function yuanToMicroQuota(yuan: string | number): number {
+  const n = typeof yuan === "number" ? yuan : Number.parseFloat(yuan)
+  if (!Number.isFinite(n)) return 0
+  return Math.round(n * MICRO_QUOTA)
 }
 
-/** 某次对话的额度花费预估，与后端 `chat_quota_cost` 保持同一套取整规则。 */
+/** 微额度 → 元的输入框回显（不带千分位，便于再次编辑）。 */
+export function microQuotaToYuanInput(micro: number): string {
+  if (!micro) return "0"
+  return String(Number((micro / MICRO_QUOTA).toFixed(6)))
+}
+
+/**
+ * 模型的微美元单价按汇率折算成微额度，用于后台预览。
+ * 与后端 `QuotaRate::micro_quota_for_micro_usd` 保持同一套取整规则。
+ */
+export function microQuotaForMicroUsd(
+  microUsd: number,
+  usdToCnyRateMicro: number,
+  multiplierPercent = 100
+): number {
+  if (microUsd <= 0 || usdToCnyRateMicro <= 0 || multiplierPercent <= 0) return 0
+  return Math.ceil(
+    (microUsd * usdToCnyRateMicro * multiplierPercent) / (MICRO_USD * 100)
+  )
+}
+
+/** 某次对话的额度花费预估，与后端 `chat_quota_cost` 同一套取整规则。 */
 export function estimateChatQuota(args: {
   inputPrice: number
   outputPrice: number
@@ -242,7 +292,7 @@ export function estimateChatQuota(args: {
   inputTokens: number
   outputTokens: number
   cachedTokens?: number
-  quotaPerUsd: number
+  usdToCnyRateMicro: number
   multiplierPercent?: number
 }): number {
   const cached = Math.max(0, args.cachedTokens ?? 0)
@@ -253,5 +303,9 @@ export function estimateChatQuota(args: {
     Math.max(0, args.outputTokens) * Math.max(0, args.outputPrice) +
     cached * Math.max(0, cachedRate)
   const microUsd = Math.ceil(micro / MICRO_USD)
-  return quotaForMicroUsd(microUsd, args.quotaPerUsd, args.multiplierPercent ?? 100)
+  return microQuotaForMicroUsd(
+    microUsd,
+    args.usdToCnyRateMicro,
+    args.multiplierPercent ?? 100
+  )
 }

@@ -63,6 +63,9 @@ import {
 } from "@/lib/admin"
 import {
   adminQuotaApi,
+  formatQuota,
+  microQuotaToYuanInput,
+  yuanToMicroQuota,
   type AdminSettings,
   type AdminSettingsUpdate,
   type AdminUserQuota,
@@ -982,10 +985,10 @@ function QuotaPanel() {
               <div className="mt-0.5 flex gap-3 text-xs">
                 <span>
                   <span className="text-muted-foreground">余额 </span>
-                  <span className="tabular-nums font-medium">{r.balance}</span>
+                  <span className="tabular-nums font-medium">{formatQuota(r.balance)}</span>
                 </span>
                 <span className="text-muted-foreground">
-                  消耗 <span className="tabular-nums">{r.lifetime_used}</span>
+                  消耗 <span className="tabular-nums">{formatQuota(r.lifetime_used)}</span>
                 </span>
               </div>
             </div>
@@ -1027,9 +1030,11 @@ function QuotaPanel() {
               <TableRow key={r.user_id}>
                 <TableCell className="tabular-nums text-muted-foreground">{r.user_id}</TableCell>
                 <TableCell className="font-medium">{r.username}</TableCell>
-                <TableCell className="text-right tabular-nums">{r.balance}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {formatQuota(r.balance)}
+                </TableCell>
                 <TableCell className="text-right tabular-nums text-muted-foreground">
-                  {r.lifetime_used}
+                  {formatQuota(r.lifetime_used)}
                 </TableCell>
                 <TableCell>
                   <div className="flex justify-end">
@@ -1074,8 +1079,9 @@ function AdjustCreditsDialog({
   onSaved: () => void
 }) {
   const [mode, setMode] = useState<"delta" | "balance">("delta")
-  const [delta, setDelta] = useState("100")
-  const [balance, setBalance] = useState(String(row.balance))
+  // 输入框以「元」为单位，提交时换算成后端使用的微额度
+  const [delta, setDelta] = useState("1")
+  const [balance, setBalance] = useState(microQuotaToYuanInput(row.balance))
   const [reason, setReason] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -1087,23 +1093,23 @@ function AdjustCreditsDialog({
       if (mode === "delta") {
         const n = Number(delta)
         if (!Number.isFinite(n) || n === 0) {
-          setError("增减值需为非零整数（正数充值，负数扣减）")
+          setError("增减金额需为非零数值（正数充值，负数扣减），单位：元")
           setSaving(false)
           return
         }
         await adminQuotaApi.adjust(row.user_id, {
-          delta: Math.trunc(n),
+          delta: yuanToMicroQuota(n),
           reason: reason.trim() || undefined,
         })
       } else {
         const n = Number(balance)
         if (!Number.isFinite(n) || n < 0) {
-          setError("余额需为 >= 0 的整数")
+          setError("余额需为 >= 0 的金额，单位：元")
           setSaving(false)
           return
         }
         await adminQuotaApi.adjust(row.user_id, {
-          balance: Math.trunc(n),
+          balance: yuanToMicroQuota(n),
           reason: reason.trim() || undefined,
         })
       }
@@ -1122,7 +1128,8 @@ function AdjustCreditsDialog({
         <DialogHeader>
           <DialogTitle>调整额度 · {row.username}</DialogTitle>
           <DialogDescription>
-            当前余额 {row.balance}，累计消耗 {row.lifetime_used}。所有改动都会写入流水。
+            当前余额 {formatQuota(row.balance)} 元，累计消耗{" "}
+            {formatQuota(row.lifetime_used)} 元。金额单位为元，所有改动都会写入流水。
           </DialogDescription>
         </DialogHeader>
 
@@ -1492,22 +1499,26 @@ function EmailPanel() {
       </div>
 
       <div className="rounded-xl border border-border bg-card p-4 shadow-sm">
-        <h2 className="mb-3 text-sm font-semibold">额度换算</h2>
+        <h2 className="mb-3 text-sm font-semibold">额度与汇率</h2>
         <p className="mb-3 text-xs text-muted-foreground">
-          模型价格在「模型计费」中按各家<b>官方美元价目表</b>填写，这里决定美元如何折算成站内额度。
+          <b>额度以人民币计价：1 额度 = 1 元。</b>模型价格在「模型计费」中按各家
+          <b>官方美元价目表</b>填写，这里的汇率决定美元成本折算成多少元。
           对话按上游返回的真实 token 用量结算，生图按次、视频按秒。
         </p>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">1 美元 = 多少额度</Label>
+            <Label className="text-xs">汇率：1 美元 = 多少元</Label>
             <Input
               type="number"
-              min={1}
-              defaultValue={cfg.quota_per_usd}
-              onChange={(e) => set("quota_per_usd", Number(e.target.value) || 1)}
+              min={0}
+              step="0.01"
+              defaultValue={microQuotaToYuanInput(cfg.usd_to_cny_rate_micro)}
+              onChange={(e) =>
+                set("usd_to_cny_rate_micro", yuanToMicroQuota(e.target.value))
+              }
             />
             <p className="text-[11px] text-muted-foreground">
-              上游每花费 1 美元，从用户余额扣除的额度数。数值越大，额度单位越细。
+              上游每花费 1 美元，从用户余额扣除的人民币金额。
             </p>
           </div>
           <div className="flex flex-col gap-1.5">
@@ -1525,34 +1536,37 @@ function EmailPanel() {
             </p>
           </div>
           <div className="flex flex-col gap-1.5">
-            <Label className="text-xs">注册赠送额度</Label>
+            <Label className="text-xs">注册赠送（元）</Label>
             <Input
               type="number"
               min={0}
-              defaultValue={cfg.signup_grant}
-              onChange={(e) => set("signup_grant", Number(e.target.value) || 0)}
+              step="0.01"
+              defaultValue={microQuotaToYuanInput(cfg.signup_grant)}
+              onChange={(e) => set("signup_grant", yuanToMicroQuota(e.target.value))}
             />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="flex flex-col gap-1.5">
-              <Label className="text-xs">邀请人奖励</Label>
+              <Label className="text-xs">邀请人奖励（元）</Label>
               <Input
                 type="number"
                 min={0}
-                defaultValue={cfg.invite_grant_inviter}
+                step="0.01"
+                defaultValue={microQuotaToYuanInput(cfg.invite_grant_inviter)}
                 onChange={(e) =>
-                  set("invite_grant_inviter", Number(e.target.value) || 0)
+                  set("invite_grant_inviter", yuanToMicroQuota(e.target.value))
                 }
               />
             </div>
             <div className="flex flex-col gap-1.5">
-              <Label className="text-xs">被邀请人奖励</Label>
+              <Label className="text-xs">被邀请人奖励（元）</Label>
               <Input
                 type="number"
                 min={0}
-                defaultValue={cfg.invite_grant_invitee}
+                step="0.01"
+                defaultValue={microQuotaToYuanInput(cfg.invite_grant_invitee)}
                 onChange={(e) =>
-                  set("invite_grant_invitee", Number(e.target.value) || 0)
+                  set("invite_grant_invitee", yuanToMicroQuota(e.target.value))
                 }
               />
             </div>

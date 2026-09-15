@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { formatQuota } from "@/lib/quota"
 import { Check, Copy, Users } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -333,14 +334,14 @@ export function ProfileDialog({ open, onClose }: Props) {
               <span className="ml-auto text-xs text-muted-foreground">
                 已邀请 <b className="text-foreground">{invite.invited_count}</b>{" "}
                 · 获得 <b className="text-foreground">{invite.total_earned}</b>{" "}
-                额度
+                奖励
               </span>
             </div>
             <p className="text-xs text-muted-foreground">
               好友用你的邀请码注册后，你获得{" "}
-              <b className="text-foreground">{invite.grant_inviter}</b> 额度，
+              <b className="text-foreground">{formatQuota(invite.grant_inviter)}</b> 元，
               对方额外获得{" "}
-              <b className="text-foreground">{invite.grant_invitee}</b> 额度。
+              <b className="text-foreground">{formatQuota(invite.grant_invitee)}</b> 元。
             </p>
             <div className="flex items-center gap-2">
               <Input

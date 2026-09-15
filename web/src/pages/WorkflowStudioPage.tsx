@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react"
+import { formatQuota } from "@/lib/quota"
 import { Link } from "react-router-dom"
 import {
   ArrowLeft,
@@ -373,7 +374,7 @@ export default function WorkflowStudioPage() {
           return (
             total +
             (imageModels.find((model) => model.model === node.data.model)
-              ?.per_call_quota ?? 0)
+              ?.per_call_micro_quota ?? 0)
           )
         }
         if (node.type === "video_generation") {
@@ -850,7 +851,7 @@ export default function WorkflowStudioPage() {
                 {starting ? <Loader2 className="animate-spin" /> : <Play />}
                 <span className="sm:hidden">运行</span>
                 <span className="hidden sm:inline">
-                  运行流水线{estimatedQuota > 0 ? ` · 预计 ${estimatedQuota} 额度` : ""}
+                  运行流水线{estimatedQuota > 0 ? ` · 预计 ${formatQuota(estimatedQuota)} 元` : ""}
                 </span>
               </Button>
             )}

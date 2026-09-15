@@ -104,6 +104,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (37, include_str!("../migrations/sqlite/0037_yunova_brand.sql")),
     (38, include_str!("../migrations/sqlite/0038_token_quota_billing.sql")),
     (39, include_str!("../migrations/sqlite/0039_disable_unpriced_chat_models.sql")),
+    (40, include_str!("../migrations/sqlite/0040_quota_in_cny.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -145,6 +146,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (37, include_str!("../migrations/mysql/0037_yunova_brand.sql")),
     (38, include_str!("../migrations/mysql/0038_token_quota_billing.sql")),
     (39, include_str!("../migrations/mysql/0039_disable_unpriced_chat_models.sql")),
+    (40, include_str!("../migrations/mysql/0040_quota_in_cny.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -186,6 +188,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (37, include_str!("../migrations/postgres/0037_yunova_brand.sql")),
     (38, include_str!("../migrations/postgres/0038_token_quota_billing.sql")),
     (39, include_str!("../migrations/postgres/0039_disable_unpriced_chat_models.sql")),
+    (40, include_str!("../migrations/postgres/0040_quota_in_cny.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -421,6 +424,68 @@ pub fn day_bucket(kind: DbKind, col: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Quota is denominated in CNY, so migration 40 must rescale balances from
+    /// the old point scale (50000 points per yuan) into micro-quota
+    /// (1_000_000 per yuan) without changing what anyone can buy.
+    #[tokio::test]
+    async fn cny_migration_preserves_value_and_derives_the_exchange_rate() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // Rewind migration 40 and restore the point-scale settings it removes.
+        pool.execute("DELETE FROM _migrations WHERE id = 40").await.unwrap();
+        pool.execute("DELETE FROM app_settings WHERE k = 'usd_to_cny_rate_micro'").await.unwrap();
+        pool.execute("INSERT INTO app_settings (k, v) VALUES ('quota_per_usd', '500000')").await.unwrap();
+        pool.execute("INSERT INTO app_settings (k, v) VALUES ('epay_quota_per_yuan', '50000')").await.unwrap();
+        pool.execute("UPDATE app_settings SET v = '100000' WHERE k = 'signup_grant'").await.unwrap();
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')").await.unwrap();
+        // 100000 points at 50000 points/yuan = 2 yuan of purchasing power.
+        pool.execute("INSERT INTO user_balances (user_id, balance, lifetime_used) VALUES (1, 100000, 50000)").await.unwrap();
+        pool.execute("INSERT INTO balance_ledger (user_id, delta, reason) VALUES (1, -25000, 'chat_openai')").await.unwrap();
+
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // 2 yuan must still be 2 yuan, now expressed in micro-quota.
+        let (balance, lifetime): (i64, i64) =
+            sqlx::query_as("SELECT balance, lifetime_used FROM user_balances WHERE user_id = 1")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(balance, 2_000_000, "100000 points = 2 yuan = 2e6 micro-quota");
+        assert_eq!(lifetime, 1_000_000);
+
+        // A 25000-point charge was half a yuan and must stay half a yuan.
+        let (delta,): (i64,) =
+            sqlx::query_as("SELECT delta FROM balance_ledger WHERE user_id = 1")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(delta, -500_000);
+
+        // The two old knobs collapse into one exchange rate:
+        // 500000 points/USD ÷ 50000 points/yuan = 10 CNY per USD.
+        let (rate,): (String,) =
+            sqlx::query_as("SELECT v FROM app_settings WHERE k = 'usd_to_cny_rate_micro'")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(rate, "10000000", "derived from the operator's own old settings");
+
+        // Grants are amounts of money too.
+        let (grant,): (String,) =
+            sqlx::query_as("SELECT v FROM app_settings WHERE k = 'signup_grant'")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(grant, "2000000", "100000 points = 2 yuan");
+
+        // The obsolete point-scale settings are gone.
+        let (leftover,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM app_settings WHERE k IN ('quota_per_usd', 'epay_quota_per_yuan')",
+        )
+        .fetch_one(&pool).await.unwrap();
+        assert_eq!(leftover, 0);
+
+        pool.close().await;
+    }
 
     /// A chat model priced only under the old per-call scheme cannot be
     /// converted to token rates — the single credit figure carries no

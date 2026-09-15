@@ -1164,12 +1164,13 @@ struct PlatformModel {
     kind: String, // "chat" | "image" | "video"
     protocol: String, // top-priority channel's protocol
     context_limit: Option<i64>,
-    /// Rates already converted to site quota so the picker can show what a
-    /// model costs without knowing about USD or the markup.
-    input_quota_per_1m: i64,
-    output_quota_per_1m: i64,
-    cached_input_quota_per_1m: Option<i64>,
-    per_call_quota: i64,
+    // Rates already converted to site quota so the picker can show what a
+    // model costs without knowing about USD or the markup. All in
+    // micro-quota (1 quota = 1 CNY = 1e6 micro-quota).
+    input_micro_quota_per_1m: i64,
+    output_micro_quota_per_1m: i64,
+    cached_input_micro_quota_per_1m: Option<i64>,
+    per_call_micro_quota: i64,
 }
 
 async fn user_list_platform_models(
@@ -1204,12 +1205,12 @@ async fn user_list_platform_models(
             kind: p.kind.clone(),
             protocol: p.protocol.clone(),
             context_limit: p.context_limit,
-            input_quota_per_1m: rate.quota_for_micro_usd(p.input_price),
-            output_quota_per_1m: rate.quota_for_micro_usd(p.output_price),
-            cached_input_quota_per_1m: p
+            input_micro_quota_per_1m: rate.micro_quota_for_micro_usd(p.input_price),
+            output_micro_quota_per_1m: rate.micro_quota_for_micro_usd(p.output_price),
+            cached_input_micro_quota_per_1m: p
                 .cached_input_price
-                .map(|v| rate.quota_for_micro_usd(v)),
-            per_call_quota: rate.quota_for_micro_usd(p.per_call_price),
+                .map(|v| rate.micro_quota_for_micro_usd(v)),
+            per_call_micro_quota: rate.micro_quota_for_micro_usd(p.per_call_price),
         });
     }
     Json(out).into_response()
@@ -1474,7 +1475,7 @@ pub async fn try_deduct_per_call(
         .await
         .ok_or(DeductError::NotWhitelisted)?;
     let rate = crate::quota::QuotaRate::load(pool, kind).await;
-    let cost = rate.quota_for_micro_usd(price.per_call_price.max(0));
+    let cost = rate.micro_quota_for_micro_usd(price.per_call_price.max(0));
     let meta = crate::quota::LedgerMeta::image(protocol, model);
     match crate::quota::try_deduct(pool, kind, user_id, cost, reason, &meta).await {
         Ok(bal) => Ok((bal, cost)),
@@ -1482,8 +1483,8 @@ pub async fn try_deduct_per_call(
     }
 }
 
-/// Quota cost of one per-call generation without deducting — used by refund
-/// paths that already deducted via [`try_deduct_per_call`].
+/// Micro-quota cost of one per-call generation without deducting — used by
+/// refund paths that already deducted via [`try_deduct_per_call`].
 pub async fn per_call_quota(
     pool: &Pool,
     kind: DbKind,
@@ -1492,5 +1493,5 @@ pub async fn per_call_quota(
 ) -> Option<i64> {
     let price = enabled_price(pool, kind, model, flavor).await?;
     let rate = crate::quota::QuotaRate::load(pool, kind).await;
-    Some(rate.quota_for_micro_usd(price.per_call_price.max(0)))
+    Some(rate.micro_quota_for_micro_usd(price.per_call_price.max(0)))
 }

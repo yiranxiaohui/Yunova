@@ -1,12 +1,16 @@
 //! Site quota: balance, ledger, and the token-metered pricing engine.
 //!
-//! Quota is Yunova's own unit. It is an integer with no currency attached —
-//! the UI prints the number directly. Model prices are configured against the
-//! provider's *official USD rate* and stored as micro-USD (1 USD = 1_000_000),
-//! so an admin transcribes published pricing instead of inventing per-model
-//! credit values. Two global settings turn upstream cost into quota:
+//! Quota is denominated in CNY — 1 quota is 1 yuan, so a balance reads as an
+//! amount of money rather than an invented point scale. Because a single chat
+//! call often costs a fraction of a fen, quota is *stored* in micro-quota
+//! (1 quota = 1_000_000) and only formatted as yuan for display. Integer
+//! micro-units keep every charge exact; a float balance would drift.
 //!
-//!   * `quota_per_usd`            — quota charged per 1 USD of upstream spend
+//! Model prices are configured against the provider's *official USD rate* and
+//! stored as micro-USD (1 USD = 1_000_000), so an admin transcribes published
+//! pricing verbatim. Two global settings turn upstream cost into quota:
+//!
+//!   * `usd_to_cny_rate_micro` — exchange rate in micro-CNY per 1 USD
 //!   * `price_multiplier_percent` — markup applied to every model (100 = 1.0x)
 //!
 //! Chat is billed **after** the response, from the upstream's reported token
@@ -32,12 +36,19 @@ use crate::{
 /// $0.15 / 1M tokens is the exact integer 150_000 rather than a float.
 pub const MICRO_USD: i64 = 1_000_000;
 
+/// Micro-quota per 1 quota (= per 1 CNY). Balances, grants and charges are all
+/// stored in micro-quota so that sub-fen costs survive as exact integers.
+pub const MICRO_QUOTA: i64 = 1_000_000;
+
 /// Divisor for per-token rates, which are configured per 1M tokens.
 pub const TOKENS_PER_PRICE_UNIT: i64 = 1_000_000;
 
-pub const DEFAULT_QUOTA_PER_USD: i64 = 500_000;
-pub const DEFAULT_SIGNUP_GRANT: i64 = 100_000;
-pub const DEFAULT_INVITE_GRANT: i64 = 50_000;
+/// Default USD→CNY rate, in micro-CNY per USD (7.2 CNY per USD).
+pub const DEFAULT_USD_TO_CNY_MICRO: i64 = 7_200_000;
+
+/// Signup and invite grants, in micro-quota. 1 quota = 1 CNY.
+pub const DEFAULT_SIGNUP_GRANT: i64 = 1 * MICRO_QUOTA;
+pub const DEFAULT_INVITE_GRANT: i64 = 1 * MICRO_QUOTA;
 
 // ---------------------------------------------------------------------------
 // app-wide settings (KV)
@@ -110,32 +121,41 @@ pub async fn set_setting(
 /// without restarting.
 #[derive(Debug, Clone, Copy)]
 pub struct QuotaRate {
-    pub quota_per_usd: i64,
+    /// Micro-CNY per 1 USD of upstream spend.
+    pub usd_to_cny_micro: i64,
     pub multiplier_percent: i64,
 }
 
 impl QuotaRate {
     pub async fn load(pool: &Pool, kind: DbKind) -> Self {
         Self {
-            quota_per_usd: get_setting_i64(pool, kind, "quota_per_usd", DEFAULT_QUOTA_PER_USD)
-                .await
-                .max(0),
+            usd_to_cny_micro: get_setting_i64(
+                pool,
+                kind,
+                "usd_to_cny_rate_micro",
+                DEFAULT_USD_TO_CNY_MICRO,
+            )
+            .await
+            .max(0),
             multiplier_percent: get_setting_i64(pool, kind, "price_multiplier_percent", 100)
                 .await
                 .max(0),
         }
     }
 
-    /// Convert an upstream price in micro-USD to quota, applying the markup.
-    /// Rounds up so that a non-zero cost never bills as free — otherwise a
+    /// Convert an upstream price in micro-USD to micro-quota, applying the
+    /// markup. Rounds up so a non-zero cost never bills as free — otherwise a
     /// stream of tiny requests would be unbounded free usage.
-    pub fn quota_for_micro_usd(&self, micro_usd: i64) -> i64 {
-        if micro_usd <= 0 || self.quota_per_usd <= 0 || self.multiplier_percent <= 0 {
+    ///
+    /// Both operands are micro-scaled, so the product is divided by
+    /// `MICRO_USD` once to land back in micro-quota.
+    pub fn micro_quota_for_micro_usd(&self, micro_usd: i64) -> i64 {
+        if micro_usd <= 0 || self.usd_to_cny_micro <= 0 || self.multiplier_percent <= 0 {
             return 0;
         }
-        // (micro_usd / 1e6) * quota_per_usd * (multiplier / 100)
-        let scaled =
-            (micro_usd as i128) * (self.quota_per_usd as i128) * (self.multiplier_percent as i128);
+        let scaled = (micro_usd as i128)
+            * (self.usd_to_cny_micro as i128)
+            * (self.multiplier_percent as i128);
         let divisor = (MICRO_USD as i128) * 100;
         let quota = (scaled + divisor - 1) / divisor; // ceil
         quota.clamp(0, i64::MAX as i128) as i64
@@ -164,7 +184,7 @@ impl TokenUsage {
     }
 }
 
-/// Quota cost of one chat completion given the model's rates.
+/// Micro-quota cost of one chat completion given the model's rates.
 /// `input_price` / `output_price` / `cached_input_price` are micro-USD per 1M
 /// tokens; a NULL cached price bills cached tokens at the normal input rate.
 pub fn chat_quota_cost(
@@ -182,7 +202,25 @@ pub fn chat_quota_cost(
     // so sub-unit usage still costs something.
     let per_unit = TOKENS_PER_PRICE_UNIT as i128;
     let micro_usd = ((micro + per_unit - 1) / per_unit).clamp(0, i64::MAX as i128) as i64;
-    rate.quota_for_micro_usd(micro_usd)
+    rate.micro_quota_for_micro_usd(micro_usd)
+}
+
+/// Render micro-quota as a yuan amount for user-facing messages.
+///
+/// Trailing zeros are trimmed so a whole amount reads "5" rather than
+/// "5.000000", while a sub-fen charge keeps the digits that make it non-zero.
+pub fn format_quota(micro: i64) -> String {
+    let neg = micro < 0;
+    let abs = micro.unsigned_abs();
+    let whole = abs / MICRO_QUOTA as u64;
+    let frac = abs % MICRO_QUOTA as u64;
+    let sign = if neg { "-" } else { "" };
+    if frac == 0 {
+        return format!("{sign}{whole}");
+    }
+    let frac = format!("{frac:06}");
+    let frac = frac.trim_end_matches('0');
+    format!("{sign}{whole}.{frac}")
 }
 
 // ---------------------------------------------------------------------------
@@ -485,9 +523,12 @@ pub async fn set_balance(
 
 #[derive(Serialize)]
 struct BalanceMe {
+    /// Micro-quota. The client divides by 1e6 to render yuan.
     balance: i64,
     lifetime_used: i64,
-    quota_per_usd: i64,
+    /// Micro-quota per 1 quota, so the client never hardcodes the scale.
+    micro_per_quota: i64,
+    usd_to_cny_rate_micro: i64,
     price_multiplier_percent: i64,
 }
 
@@ -509,7 +550,8 @@ async fn get_my_balance(
     Json(BalanceMe {
         balance: row.0,
         lifetime_used: row.1,
-        quota_per_usd: rate.quota_per_usd,
+        micro_per_quota: MICRO_QUOTA,
+        usd_to_cny_rate_micro: rate.usd_to_cny_micro,
         price_multiplier_percent: rate.multiplier_percent,
     })
     .into_response()
@@ -882,7 +924,7 @@ async fn admin_get_stats(
 struct AdminSettingsView {
     registration_enabled: bool,
     signup_grant: i64,
-    quota_per_usd: i64,
+    usd_to_cny_rate_micro: i64,
     price_multiplier_percent: i64,
     invite_grant_inviter: i64,
     invite_grant_invitee: i64,
@@ -914,7 +956,13 @@ async fn admin_get_settings(Extension(installed): Extension<InstalledState>) -> 
     let view = AdminSettingsView {
         registration_enabled: get_setting_bool(pool, kind, "registration_enabled", true).await,
         signup_grant: get_setting_i64(pool, kind, "signup_grant", DEFAULT_SIGNUP_GRANT).await,
-        quota_per_usd: get_setting_i64(pool, kind, "quota_per_usd", DEFAULT_QUOTA_PER_USD).await,
+        usd_to_cny_rate_micro: get_setting_i64(
+            pool,
+            kind,
+            "usd_to_cny_rate_micro",
+            DEFAULT_USD_TO_CNY_MICRO,
+        )
+        .await,
         price_multiplier_percent: get_setting_i64(pool, kind, "price_multiplier_percent", 100).await,
         invite_grant_inviter: get_setting_i64(pool, kind, "invite_grant_inviter", DEFAULT_INVITE_GRANT).await,
         invite_grant_invitee: get_setting_i64(pool, kind, "invite_grant_invitee", DEFAULT_INVITE_GRANT).await,
@@ -937,7 +985,7 @@ async fn admin_get_settings(Extension(installed): Extension<InstalledState>) -> 
 struct AdminSettingsUpdate {
     registration_enabled: Option<bool>,
     signup_grant: Option<i64>,
-    quota_per_usd: Option<i64>,
+    usd_to_cny_rate_micro: Option<i64>,
     price_multiplier_percent: Option<i64>,
     invite_grant_inviter: Option<i64>,
     invite_grant_invitee: Option<i64>,
@@ -974,8 +1022,8 @@ async fn admin_patch_settings(
     let ops: Vec<(&str, Option<String>)> = vec![
         ("registration_enabled", body.registration_enabled.map(|b| b.to_string())),
         ("signup_grant", body.signup_grant.map(|v| v.max(0).to_string())),
-        // 0 would make every model free; clamp to at least 1 quota per USD.
-        ("quota_per_usd", body.quota_per_usd.map(|v| v.max(1).to_string())),
+        // 0 would make every model free; clamp to a positive rate.
+        ("usd_to_cny_rate_micro", body.usd_to_cny_rate_micro.map(|v| v.max(1).to_string())),
         ("price_multiplier_percent", body.price_multiplier_percent.map(|v| v.max(0).to_string())),
         ("invite_grant_inviter", body.invite_grant_inviter.map(|v| v.max(0).to_string())),
         ("invite_grant_invitee", body.invite_grant_invitee.map(|v| v.max(0).to_string())),
@@ -1094,33 +1142,52 @@ pub fn admin_routes() -> Router<AppState> {
 mod pricing_tests {
     use super::*;
 
-    const RATE: QuotaRate = QuotaRate { quota_per_usd: 500_000, multiplier_percent: 100 };
+    /// $1 of upstream spend costs ¥7.2, with no markup.
+    const RATE: QuotaRate =
+        QuotaRate { usd_to_cny_micro: 7_200_000, multiplier_percent: 100 };
+
+    /// Micro-quota for a whole number of yuan, for readable expectations.
+    fn yuan(n: f64) -> i64 {
+        (n * MICRO_QUOTA as f64).round() as i64
+    }
 
     #[test]
-    fn official_usd_rates_convert_to_whole_quota() {
-        // GPT-5-class pricing: $1.25 in / $10 out per 1M tokens.
-        // 1M input tokens = $1.25 -> 625_000 quota at 500k quota/USD.
-        assert_eq!(
-            chat_quota_cost(
-                RATE,
-                1_250_000,
-                10_000_000,
-                None,
-                TokenUsage { input: 1_000_000, output: 0, cached_input: 0 },
-            ),
-            625_000
+    fn upstream_dollars_convert_to_yuan_at_the_configured_rate() {
+        // 1M input tokens of a $1.25/1M model = $1.25 = ¥9.00.
+        let cost = chat_quota_cost(
+            RATE,
+            1_250_000,
+            10_000_000,
+            None,
+            TokenUsage { input: 1_000_000, output: 0, cached_input: 0 },
         );
-        // 1M output tokens = $10 -> 5_000_000 quota.
-        assert_eq!(
-            chat_quota_cost(
-                RATE,
-                1_250_000,
-                10_000_000,
-                None,
-                TokenUsage { input: 0, output: 1_000_000, cached_input: 0 },
-            ),
-            5_000_000
+        assert_eq!(cost, yuan(9.0));
+
+        // 1M output tokens at $10/1M = $10 = ¥72.
+        let cost = chat_quota_cost(
+            RATE,
+            1_250_000,
+            10_000_000,
+            None,
+            TokenUsage { input: 0, output: 1_000_000, cached_input: 0 },
         );
+        assert_eq!(cost, yuan(72.0));
+    }
+
+    /// A realistic single request costs a fraction of a fen. Storing quota in
+    /// micro-units is what keeps that from rounding away to nothing.
+    #[test]
+    fn a_typical_request_keeps_its_sub_fen_cost() {
+        // 1000 in + 500 out on $1.25/$10 = $0.00625 = ¥0.045.
+        let cost = chat_quota_cost(
+            RATE,
+            1_250_000,
+            10_000_000,
+            None,
+            TokenUsage { input: 1_000, output: 500, cached_input: 0 },
+        );
+        assert_eq!(cost, 45_000);
+        assert_eq!(format_quota(cost), "0.045");
     }
 
     #[test]
@@ -1128,8 +1195,8 @@ mod pricing_tests {
         // 1M input of which 900k cached, cached rate is 1/10th of input.
         let usage = TokenUsage { input: 1_000_000, output: 0, cached_input: 900_000 };
         let cost = chat_quota_cost(RATE, 1_250_000, 10_000_000, Some(125_000), usage);
-        // 100k * 1.25 + 900k * 0.125 per 1M = $0.125 + $0.1125 = $0.2375
-        assert_eq!(cost, (0.2375_f64 * 500_000.0).round() as i64);
+        // 100k * $1.25 + 900k * $0.125 per 1M = $0.2375 = ¥1.71
+        assert_eq!(cost, yuan(1.71));
     }
 
     #[test]
@@ -1148,7 +1215,7 @@ mod pricing_tests {
 
     #[test]
     fn the_global_multiplier_marks_every_model_up() {
-        let doubled = QuotaRate { quota_per_usd: 500_000, multiplier_percent: 200 };
+        let doubled = QuotaRate { usd_to_cny_micro: 7_200_000, multiplier_percent: 200 };
         let usage = TokenUsage { input: 1_000_000, output: 0, cached_input: 0 };
         assert_eq!(
             chat_quota_cost(doubled, 1_250_000, 0, None, usage),
@@ -1157,11 +1224,16 @@ mod pricing_tests {
     }
 
     #[test]
-    fn tiny_usage_still_costs_at_least_one_quota() {
-        // A single token against a cheap model rounds up rather than to zero,
-        // so high-frequency小额 calls can't be free.
+    fn tiny_usage_still_costs_at_least_one_micro_quota() {
+        // A single token against a cheap model must round up rather than to
+        // zero, otherwise high-frequency calls would be free. The exact figure
+        // reflects a ceil at both the micro-USD and micro-quota steps, so
+        // assert the property rather than a magic number.
         let usage = TokenUsage { input: 1, output: 0, cached_input: 0 };
-        assert_eq!(chat_quota_cost(RATE, 150_000, 600_000, None, usage), 1);
+        let cost = chat_quota_cost(RATE, 150_000, 600_000, None, usage);
+        assert!(cost > 0, "a billable token must never cost zero");
+        // Still far below one fen — the micro scale is what makes this possible.
+        assert!(cost < MICRO_QUOTA / 100);
     }
 
     #[test]
@@ -1175,5 +1247,25 @@ mod pricing_tests {
         assert!(TokenUsage::default().is_empty());
         assert!(TokenUsage { input: 0, output: 0, cached_input: 7 }.is_empty());
         assert!(!TokenUsage { input: 1, output: 0, cached_input: 0 }.is_empty());
+    }
+
+    #[test]
+    fn balances_render_as_yuan_without_trailing_noise() {
+        assert_eq!(format_quota(0), "0");
+        assert_eq!(format_quota(MICRO_QUOTA), "1");
+        assert_eq!(format_quota(5 * MICRO_QUOTA), "5");
+        assert_eq!(format_quota(1_500_000), "1.5");
+        assert_eq!(format_quota(45_000), "0.045");
+        // A sub-fen charge keeps the digits that make it non-zero.
+        assert_eq!(format_quota(2), "0.000002");
+        // An overdrawn balance reads as negative rather than wrapping.
+        assert_eq!(format_quota(-1_500_000), "-1.5");
+    }
+
+    #[test]
+    fn one_yuan_of_recharge_is_exactly_one_quota() {
+        // The recharge path grants `yuan * MICRO_QUOTA`; 1 yuan must read "1".
+        assert_eq!(format_quota(1 * MICRO_QUOTA), "1");
+        assert_eq!(format_quota(100 * MICRO_QUOTA), "100");
     }
 }

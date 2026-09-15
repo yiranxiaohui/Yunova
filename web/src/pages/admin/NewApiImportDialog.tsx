@@ -16,7 +16,7 @@ import {
   type Channel,
   type NewApiSyncResult,
 } from "@/lib/channels"
-import { adminQuotaApi, formatQuota, quotaForMicroUsd } from "@/lib/quota"
+import { adminQuotaApi, formatQuota, microQuotaForMicroUsd } from "@/lib/quota"
 
 /**
  * 从 NewAPI 站点导入模型价格。
@@ -43,7 +43,7 @@ export function NewApiImportDialog({
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [done, setDone] = useState<NewApiSyncResult | null>(null)
-  const [quotaPerUsd, setQuotaPerUsd] = useState(500_000)
+  const [usdToCnyRateMicro, setUsdToCnyRateMicro] = useState(7_200_000)
   const [multiplier, setMultiplier] = useState(100)
 
   useEffect(() => {
@@ -59,7 +59,7 @@ export function NewApiImportDialog({
       .getSettings()
       .then((s) => {
         if (cancelled) return
-        setQuotaPerUsd(s.quota_per_usd)
+        setUsdToCnyRateMicro(s.usd_to_cny_rate_micro)
         setMultiplier(s.price_multiplier_percent)
       })
       .catch(() => {})
@@ -264,7 +264,7 @@ export function NewApiImportDialog({
                           价格（美元）
                         </th>
                         <th className="px-3 py-1.5 text-right font-medium">
-                          折算额度
+                          折算（元）
                         </th>
                       </tr>
                     </thead>
@@ -292,7 +292,7 @@ export function NewApiImportDialog({
                             {describeUsd(m)}
                           </td>
                           <td className="px-3 py-1 text-right tabular-nums text-muted-foreground">
-                            {describeQuota(m, quotaPerUsd, multiplier)}
+                            {describeQuota(m, usdToCnyRateMicro, multiplier)}
                           </td>
                         </tr>
                       ))}
@@ -346,11 +346,11 @@ function describeUsd(m: {
 
 function describeQuota(
   m: { kind: string; input_price: number; output_price: number; per_call_price: number },
-  quotaPerUsd: number,
+  usdToCnyRateMicro: number,
   multiplier: number
 ): string {
   const q = (micro: number) =>
-    formatQuota(quotaForMicroUsd(micro, quotaPerUsd, multiplier))
+    formatQuota(microQuotaForMicroUsd(micro, usdToCnyRateMicro, multiplier))
   if (m.kind === "image") {
     return m.per_call_price > 0 ? `${q(m.per_call_price)}/次` : "—"
   }

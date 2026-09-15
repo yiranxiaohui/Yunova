@@ -532,7 +532,11 @@ async fn submit_generate(
             Err(channels::DeductError::Insufficient { balance, cost }) => {
                 return err(
                     StatusCode::PAYMENT_REQUIRED,
-                    format!("额度不足：当前剩余 {balance}，本次需要 {cost}"),
+                    format!(
+                        "额度不足：当前剩余 {}，本次需要 {}",
+                        quota::format_quota(balance),
+                        quota::format_quota(cost)
+                    ),
                 );
             }
         }

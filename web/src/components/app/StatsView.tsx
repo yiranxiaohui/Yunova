@@ -142,11 +142,11 @@ export function StatsView({ loader, showTopUsers, active = true }: Props) {
 function SummaryCards({ data }: { data: QuotaStats }) {
   return (
     <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
-      <StatCard label="净消费" value={data.net_spent} tone="spend" />
-      <StatCard label="总扣费" value={data.spent} />
-      <StatCard label="退款" value={data.refunded} tone="positive" />
-      <StatCard label="充值入账" value={data.recharged} tone="positive" />
-      <StatCard label="赠送(注册/邀请)" value={data.granted} tone="positive" />
+      <StatCard label="净消费(元)" value={data.net_spent} tone="spend" />
+      <StatCard label="总扣费(元)" value={data.spent} />
+      <StatCard label="退款(元)" value={data.refunded} tone="positive" />
+      <StatCard label="充值入账(元)" value={data.recharged} tone="positive" />
+      <StatCard label="赠送(元)" value={data.granted} tone="positive" />
       <StatCard
         label="Tokens (入/出)"
         value={data.input_tokens + data.output_tokens}
@@ -232,7 +232,7 @@ function DailyBarChart({ daily }: { daily: DailyPoint[] }) {
           const refundH = max > 0 ? (d.refunded / max) * height : 0
           return (
             <g key={d.date}>
-              <title>{`${d.date}\n扣费 ${formatQuota(d.spent)}\n退款 ${formatQuota(d.refunded)}`}</title>
+              <title>{`${d.date}\n扣费 ${formatQuota(d.spent)} 元\n退款 ${formatQuota(d.refunded)} 元`}</title>
               <rect
                 x={x}
                 y={height - spentH}

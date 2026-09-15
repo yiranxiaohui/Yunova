@@ -51,8 +51,8 @@ import { NewApiImportDialog } from "./NewApiImportDialog"
 import {
   adminQuotaApi,
   formatQuota,
+  microQuotaForMicroUsd,
   microUsdToUsd,
-  quotaForMicroUsd,
   usdToMicroUsd,
   type AdminSettings,
 } from "@/lib/quota"
@@ -86,14 +86,14 @@ function UsdPriceField({
   label,
   value,
   onChange,
-  quotaPerUsd,
+  usdToCnyRateMicro,
   multiplierPercent,
   placeholder,
 }: {
   label: string
   value: number | null
   onChange: (microUsd: number) => void
-  quotaPerUsd: number
+  usdToCnyRateMicro: number
   multiplierPercent: number
   placeholder?: string
 }) {
@@ -105,7 +105,7 @@ function UsdPriceField({
     setText(microUsdToUsd(value ?? 0))
   }
   const micro = value ?? 0
-  const quota = quotaForMicroUsd(micro, quotaPerUsd, multiplierPercent)
+  const quota = microQuotaForMicroUsd(micro, usdToCnyRateMicro, multiplierPercent)
   return (
     <div>
       <Label>{label}</Label>
@@ -127,7 +127,7 @@ function UsdPriceField({
         />
       </div>
       <p className="mt-1 text-[11px] text-muted-foreground tabular-nums">
-        {micro > 0 ? `≈ ${formatQuota(quota)} 额度` : "免费"}
+        {micro > 0 ? `≈ ${formatQuota(quota)} 元` : "免费"}
       </p>
     </div>
   )
@@ -438,7 +438,7 @@ function PricingDialog({
   // 汇率与倍率只用于把美元价预览成额度；取不到时退回默认值，不阻塞保存。
   const [rate, setRate] = useState<Pick<
     AdminSettings,
-    "quota_per_usd" | "price_multiplier_percent"
+    "usd_to_cny_rate_micro" | "price_multiplier_percent"
   > | null>(null)
   useEffect(() => {
     let cancelled = false
@@ -452,7 +452,7 @@ function PricingDialog({
       cancelled = true
     }
   }, [])
-  const quotaPerUsd = rate?.quota_per_usd ?? 500_000
+  const usdToCnyRateMicro = rate?.usd_to_cny_rate_micro ?? 7_200_000
   const multiplierPercent = rate?.price_multiplier_percent ?? 100
   const [allModels, setAllModels] = useState<AllChannelModel[]>([])
   const [probeErrors, setProbeErrors] = useState<
@@ -964,14 +964,14 @@ function PricingDialog({
                     label="输入 / 1M tokens"
                     value={form.input_price ?? 0}
                     onChange={(micro) => setForm({ ...form, input_price: micro })}
-                    quotaPerUsd={quotaPerUsd}
+                    usdToCnyRateMicro={usdToCnyRateMicro}
                     multiplierPercent={multiplierPercent}
                   />
                   <UsdPriceField
                     label="输出 / 1M tokens"
                     value={form.output_price ?? 0}
                     onChange={(micro) => setForm({ ...form, output_price: micro })}
-                    quotaPerUsd={quotaPerUsd}
+                    usdToCnyRateMicro={usdToCnyRateMicro}
                     multiplierPercent={multiplierPercent}
                   />
                   <UsdPriceField
@@ -980,7 +980,7 @@ function PricingDialog({
                     onChange={(micro) =>
                       setForm({ ...form, cached_input_price: micro > 0 ? micro : null })
                     }
-                    quotaPerUsd={quotaPerUsd}
+                    usdToCnyRateMicro={usdToCnyRateMicro}
                     multiplierPercent={multiplierPercent}
                     placeholder="留空＝按输入价"
                   />
@@ -1017,7 +1017,7 @@ function PricingDialog({
                     label="每次调用"
                     value={form.per_call_price ?? 0}
                     onChange={(micro) => setForm({ ...form, per_call_price: micro })}
-                    quotaPerUsd={quotaPerUsd}
+                    usdToCnyRateMicro={usdToCnyRateMicro}
                     multiplierPercent={multiplierPercent}
                   />
                 </div>
@@ -1038,14 +1038,14 @@ function PricingDialog({
                       label="基础价"
                       value={form.base_price ?? 0}
                       onChange={(micro) => setForm({ ...form, base_price: micro })}
-                      quotaPerUsd={quotaPerUsd}
+                      usdToCnyRateMicro={usdToCnyRateMicro}
                       multiplierPercent={multiplierPercent}
                     />
                     <UsdPriceField
                       label="每秒价格"
                       value={form.per_second_price ?? 0}
                       onChange={(micro) => setForm({ ...form, per_second_price: micro })}
-                      quotaPerUsd={quotaPerUsd}
+                      usdToCnyRateMicro={usdToCnyRateMicro}
                       multiplierPercent={multiplierPercent}
                     />
                   </div>
@@ -1058,9 +1058,13 @@ function PricingDialog({
                       <span className="text-sm font-semibold tabular-nums text-foreground">
                         {previewSeconds} 秒 · {displayVideoSize(previewRule.size)} ={" "}
                         {formatQuota(
-                          quotaForMicroUsd(previewMicroUsd, quotaPerUsd, multiplierPercent)
+                          microQuotaForMicroUsd(
+                            previewMicroUsd,
+                            usdToCnyRateMicro,
+                            multiplierPercent
+                          )
                         )}{" "}
-                        额度
+                        元
                       </span>
                     ) : (
                       <span className="text-xs text-muted-foreground">

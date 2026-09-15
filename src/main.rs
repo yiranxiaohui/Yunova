@@ -735,7 +735,10 @@ async fn proxy_forward(
                         .into_response(),
                     channels::DeductError::Insufficient { balance, .. } => (
                         StatusCode::PAYMENT_REQUIRED,
-                        format!("额度不足：当前剩余 {balance}；请在设置里填入自己的 API Key，或联系管理员充值"),
+                        format!(
+                            "额度不足：当前剩余 {}；请在设置里填入自己的 API Key，或联系管理员充值",
+                            quota::format_quota(balance)
+                        ),
                     )
                         .into_response(),
                 };

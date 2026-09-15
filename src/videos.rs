@@ -77,15 +77,16 @@ pub fn compute_price(p: &ModelPrice, seconds: i64, size: &str) -> Option<i64> {
 
 /// Quota charged for one clip, applying the site's USD→quota rate and markup.
 pub fn compute_cost(rate: QuotaRate, p: &ModelPrice, seconds: i64, size: &str) -> Option<i64> {
-    compute_price(p, seconds, size).map(|micro| rate.quota_for_micro_usd(micro))
+    compute_price(p, seconds, size).map(|micro| rate.micro_quota_for_micro_usd(micro))
 }
 
 #[cfg(test)]
 mod pricing_tests {
     use super::*;
 
-    /// $1 of upstream spend = 500_000 quota, no markup.
-    const RATE: QuotaRate = QuotaRate { quota_per_usd: 500_000, multiplier_percent: 100 };
+    /// $1 of upstream spend costs ¥7.2, no markup.
+    const RATE: QuotaRate =
+        QuotaRate { usd_to_cny_micro: 7_200_000, multiplier_percent: 100 };
 
     /// A clip model priced at $0.005 base + $0.005/second, the micro-USD
     /// equivalent of the 5 + 5 credits these tests used before the quota switch.
@@ -115,7 +116,7 @@ mod pricing_tests {
     /// Quota for a price expressed in the per-1000-micro-USD "credit" unit the
     /// old fixtures used, so the expectations below stay readable.
     fn quota_of(units: i64) -> i64 {
-        RATE.quota_for_micro_usd(units * 1_000)
+        RATE.micro_quota_for_micro_usd(units * 1_000)
     }
 
     #[test]
@@ -157,7 +158,8 @@ mod pricing_tests {
     #[test]
     fn the_global_markup_raises_the_quota_charged_for_a_clip() {
         let price = video_price("veo3.1-fast", vec![4]);
-        let marked_up = QuotaRate { quota_per_usd: 500_000, multiplier_percent: 150 };
+        let marked_up =
+            QuotaRate { usd_to_cny_micro: 7_200_000, multiplier_percent: 150 };
 
         let base = compute_cost(RATE, &price, 4, "1280x720").unwrap();
         assert_eq!(
@@ -234,8 +236,9 @@ fn parse_custom_models(body: &serde_json::Value) -> Vec<String> {
 struct UserVideoModel {
     model: String,
     display_name: Option<String>,
-    base_quota: i64,
-    per_second_quota: i64,
+    // micro-quota (1 quota = 1 CNY = 1e6 micro-quota)
+    base_micro_quota: i64,
+    per_second_micro_quota: i64,
     allowed_seconds: Vec<i64>,
     size_rules: Vec<SizeRule>,
 }
@@ -262,8 +265,8 @@ async fn user_list_models(Extension(s): Extension<InstalledState>) -> Response {
             UserVideoModel {
                 model: p.model,
                 display_name: p.display_name,
-                base_quota: rate.quota_for_micro_usd(p.base_price),
-                per_second_quota: rate.quota_for_micro_usd(p.per_second_price),
+                base_micro_quota: rate.micro_quota_for_micro_usd(p.base_price),
+                per_second_micro_quota: rate.micro_quota_for_micro_usd(p.per_second_price),
                 allowed_seconds,
                 size_rules: p.size_rules.unwrap_or_default(),
             }
@@ -624,7 +627,11 @@ async fn create_job(
             Err(balance) => {
                 return err(
                     StatusCode::PAYMENT_REQUIRED,
-                    format!("额度不足：需要 {cost}，当前剩余 {balance}"),
+                    format!(
+                        "额度不足：需要 {}，当前剩余 {}",
+                        quota::format_quota(cost),
+                        quota::format_quota(balance)
+                    ),
                 );
             }
         }

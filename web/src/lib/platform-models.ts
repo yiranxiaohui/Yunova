@@ -4,17 +4,19 @@
 // Distinct from `lib/models.ts` which lists models from the *user's* BYOK
 // upstream — these two sources never mix.
 
+import { formatQuota } from "./quota"
+
 export type PlatformModel = {
   model: string
   display_name: string | null
   kind: "chat" | "image"
   protocol: "openai" | "claude" | "gemini"
   context_limit: number | null
-  /** 额度价格，后端已按站点汇率与倍率换算完毕 */
-  input_quota_per_1m: number
-  output_quota_per_1m: number
-  cached_input_quota_per_1m: number | null
-  per_call_quota: number
+  // 价格，后端已按站点汇率与倍率换算完毕，单位为微额度（1 额度 = 1 元 = 1e6）
+  input_micro_quota_per_1m: number
+  output_micro_quota_per_1m: number
+  cached_input_micro_quota_per_1m: number | null
+  per_call_micro_quota: number
 }
 
 export async function listPlatformModels(
@@ -34,13 +36,18 @@ export async function listPlatformModels(
 
 /**
  * 模型价格的简短中文描述，用于模型选择器等空间有限的位置。
- * 对话按 token 计价，所以展示每 100 万 token 的额度，而不是「每次」。
+ * 对话按 token 计价，所以展示每 100 万 token 的价格，而不是「每次」。
  */
 export function describeModelQuota(m: PlatformModel): string {
-  const fmt = (n: number) => Math.round(n).toLocaleString("zh-CN")
   if (m.kind === "image") {
-    return m.per_call_quota > 0 ? `${fmt(m.per_call_quota)} 额度/次` : "免费"
+    return m.per_call_micro_quota > 0
+      ? `${formatQuota(m.per_call_micro_quota)} 元/次`
+      : "免费"
   }
-  if (m.input_quota_per_1m === 0 && m.output_quota_per_1m === 0) return "免费"
-  return `${fmt(m.input_quota_per_1m)}/${fmt(m.output_quota_per_1m)} 额度每1M`
+  if (m.input_micro_quota_per_1m === 0 && m.output_micro_quota_per_1m === 0) {
+    return "免费"
+  }
+  return `${formatQuota(m.input_micro_quota_per_1m)}/${formatQuota(
+    m.output_micro_quota_per_1m
+  )} 元每1M`
 }

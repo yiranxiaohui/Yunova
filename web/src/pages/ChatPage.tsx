@@ -170,10 +170,10 @@ function ModelPicker({
               protocol: fetchProtocol as Protocol,
               context_limit: null,
               // BYOK 模型由用户自己的 Key 付费，站内不计额度。
-              input_quota_per_1m: 0,
-              output_quota_per_1m: 0,
-              cached_input_quota_per_1m: null,
-              per_call_quota: 0,
+              input_micro_quota_per_1m: 0,
+              output_micro_quota_per_1m: 0,
+              cached_input_micro_quota_per_1m: null,
+              per_call_micro_quota: 0,
             }))
       setModels(list)
     } catch (e) {
@@ -1881,9 +1881,9 @@ export default function ChatPage() {
                   type="button"
                   onClick={() => setLedgerOpen(true)}
                   className="inline-flex items-center gap-1 px-2 py-1.5 hover:bg-primary/10 md:px-2.5"
-                  title={`剩余额度 ${formatQuota(quotaMe.balance)}｜点击查看额度明细`}
+                  title={`剩余额度 ${formatQuota(quotaMe.balance)} 元｜点击查看额度明细`}
                 >
-                  <span className="hidden text-muted-foreground md:inline">额度</span>
+                  <span className="hidden text-muted-foreground md:inline">¥</span>
                   <span className="font-medium">{formatQuotaCompact(quotaMe.balance)}</span>
                 </button>
                 <button
