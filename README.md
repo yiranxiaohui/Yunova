@@ -289,6 +289,43 @@ Anthropic 拼 `/v1/messages`），因此网关额外暴露了
 - **不改 ChatPage**。对话是标签页拥有的一问一答，任务是服务端拥有、多端可加入的
   长会话；合成一个组件意味着总有一方在被绕过。
 
+### 移动端（遥控）
+
+手机是**遥控器，不是执行目标**：它驱动跑在云电脑或已配对电脑上的任务。
+所以移动端用 Capacitor 打包**同一份** React 构建产物，只补上浏览器做不到的事——
+主要是在 Agent 被审批阶住时通知用户。
+
+平台差异全部收在 `web/src/lib/platform.ts` 一层里。组件问的是「能不能通知」而不是
+「是不是 iOS」，因此某个能力日后出现在新平台上时不需要改组件。其中
+`canExecuteLocally` 有产品含义：只有桌面外壳为 `true`，所以手机不会声称
+能在本机跑任务。
+
+```bash
+cd web
+bun run mobile:sync      # 构建 + cap sync
+bun run mobile:android   # 并打开 Android Studio
+bun run mobile:ios       # 并打开 Xcode（需 macOS）
+```
+
+`web/android` 和 `web/ios` **不入版本库**：它们由 `capacitor.config.ts` 完整生成，
+且无需手改（通知权限由插件通过 manifest merge 注入）。克隆后跑一次
+`bun run mobile:sync` 即可。
+
+几个实现要点：
+
+- **审批本地通知**。请求来自客户端已经持有的 socket，所以用本地通知即可，
+  **不需要服务端推送基础设施**。固定通知 id 让重复请求折叠而不是堆满通知栏。
+- **切回前景时从服务端重对账**。手机会挂起定时器并可能掉连接，所以恢复时
+  重拉镜像，而不是假定屏上内容仍然完整。
+- **安全区垫边**。`viewport-fit=cover` 配合 `.safe-top` / `.safe-bottom`，
+  否则底部输入框会压在 Home 指示条下面变得部分不可点。
+- **触摸点击区**。`.tap-target` / `.tap-target-sm` 只在 `pointer: coarse` 下生效，
+  因此不会把桌面端的控件撑大。
+- **不允许明文流量**。自托管实例必须走 HTTPS，否则会话 cookie 和配对码
+  会在网络上裸奔。
+
+iOS 出包仍需 macOS 与开发者账号，Android 出包需 Android SDK。
+
 ### 本地电脑（桌面客户端）
 
 `desktop/` 是独立的 `yunova-desktop` 二进制：把用户自己的电脑变成执行目标。

@@ -4,7 +4,13 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/png" href="/favicon.png" />
     <link rel="apple-touch-icon" href="/logo.png" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- `viewport-fit=cover` is required for env(safe-area-inset-*) to report
+         real values; without it iOS letterboxes the page and the bottom
+         composer sits under the home indicator. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
     <meta
       name="description"
       content="Yunova — 统一的 Agent 工作空间，整合多模型对话、工具执行、创作与工作流，支持自托管。"

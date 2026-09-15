@@ -68,7 +68,6 @@ export function ModeSelector({
           label="工作"
         />
       </div>
-
       {mode === "work" && (
         <TargetPicker
           target={target}
@@ -103,7 +102,7 @@ function ModeTab({
       onClick={onClick}
       aria-pressed={active}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+        "tap-target-sm inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
         active
           ? "bg-background text-foreground shadow-sm"
           : "text-muted-foreground hover:text-foreground",
@@ -157,18 +156,23 @@ function TargetPicker({
         }
       }}
     >
-      <SelectTrigger size="sm" className="h-8 w-[10.5rem] text-xs">
+      <SelectTrigger size="sm" className="tap-target-sm h-8 w-[10.5rem] text-xs">
         <SelectValue placeholder="选择执行位置" />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value="cloud">
+        <SelectItem value="cloud" className="tap-target-sm">
           <span className="flex items-center gap-2">
             <Cloud className="size-3.5" />
             云电脑
           </span>
         </SelectItem>
         {devices.map((d) => (
-          <SelectItem key={d.id} value={`device:${d.id}`} disabled={!d.online}>
+          <SelectItem
+            key={d.id}
+            value={`device:${d.id}`}
+            disabled={!d.online}
+            className="tap-target-sm"
+          >
             <span className="flex items-center gap-2">
               <Laptop className="size-3.5" />
               {d.name}

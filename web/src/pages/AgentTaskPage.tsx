@@ -17,6 +17,13 @@ import {
   type AgentSession,
   type AgentTarget,
 } from "@/lib/agent"
+import {
+  capabilities,
+  notifyApprovalPending,
+  onAppStateChange,
+  requestNotificationPermission,
+} from "@/lib/platform"
+import { approvalTitle } from "@/lib/agent"
 import { toast } from "sonner"
 
 /**
@@ -173,6 +180,12 @@ export default function AgentTaskPage() {
             setApprovals((prev) =>
               prev.some((p) => p?.id === e.data?.id) ? prev : [...prev, e.data]
             )
+            // A blocked agent is useless if the user never learns it is
+            // waiting, which is the main reason to package a mobile app.
+            void notifyApprovalPending(
+              approvalTitle(e.data),
+              "Agent 正在等待你确认"
+            )
             break
           case "approval_resolved":
             // Answered here or on another device; either way the card is no
@@ -209,6 +222,32 @@ export default function AgentTaskPage() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: "end" })
   }, [items.length, streamingText])
+
+  // Ask for notification permission once, and only where it means something.
+  //
+  // Requested on entering the task workspace rather than at launch: the prompt
+  // is self-explanatory here, because this is the screen whose approvals the
+  // user would want to be told about.
+  useEffect(() => {
+    if (!capabilities().canNotify) return
+    void requestNotificationPermission()
+  }, [])
+
+  // Reconcile after returning to the foreground.
+  //
+  // A phone suspends timers and can drop the event stream while backgrounded,
+  // so the transcript on screen may be stale. The mirror is authoritative, so
+  // resync instead of trusting what survived.
+  useEffect(() => {
+    if (sessionId == null) return
+    let dispose: (() => void) | undefined
+    void onAppStateChange((active) => {
+      if (active) void syncEntries(sessionId, true)
+    }).then((off) => {
+      dispose = off
+    })
+    return () => dispose?.()
+  }, [sessionId, syncEntries])
 
   const ensureRuntime = useCallback(async () => {
     if (sessionId == null) return false
@@ -317,10 +356,10 @@ export default function AgentTaskPage() {
 
   const header = useMemo(
     () => (
-      <div className="flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
+      <div className="safe-top flex flex-wrap items-center gap-2 border-b px-4 py-2.5">
         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
           <SheetTrigger asChild>
-            <Button variant="ghost" size="icon-sm" className="md:hidden">
+            <Button variant="ghost" size="icon-sm" className="tap-target md:hidden">
               <Menu />
             </Button>
           </SheetTrigger>
@@ -394,11 +433,14 @@ export default function AgentTaskPage() {
           </div>
         </div>
 
-        <div className="border-t px-4 py-3">
+        {/* `safe-bottom` keeps the composer clear of the home indicator; a
+            bottom-anchored control would otherwise be partly untappable in
+            the packaged app. */}
+        <div className="safe-bottom border-t px-4 py-3">
           <div className="mx-auto w-full max-w-3xl space-y-2">
             {/* The target cannot change once a session exists: its runtime and
                 transcript already belong to one machine. */}
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <ModeSelector
                 mode="work"
                 onModeChange={(m) => {
@@ -416,7 +458,7 @@ export default function AgentTaskPage() {
               <Button
                 variant="ghost"
                 size="sm"
-                className="shrink-0 text-xs"
+                className="tap-target-sm shrink-0 text-xs"
                 onClick={() => setDevicesOpen(true)}
               >
                 <Laptop className="size-3.5" />

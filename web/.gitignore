@@ -22,3 +22,13 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Capacitor native projects.
+#
+# Regenerated from capacitor.config.ts with `cap add android|ios`, and nothing
+# in them is hand-edited: the notification permission is contributed by the
+# plugin through manifest merge. Committing 4 MB of generated Gradle and Xcode
+# scaffolding that cannot be built or verified on the CI host would be code
+# nobody reviews. Run `bun run mobile:sync` after cloning.
+/android
+/ios

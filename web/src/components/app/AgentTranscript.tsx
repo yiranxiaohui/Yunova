@@ -63,7 +63,7 @@ function ToolCard({ item }: { item: Extract<AgentItem, { kind: "tool" }> }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+        className="tap-target-sm flex w-full items-center gap-2 px-3 py-2 text-left"
       >
         <Terminal className="size-3.5 shrink-0 text-muted-foreground" />
         <span className="font-mono text-xs font-medium">{item.name}</span>
@@ -104,7 +104,7 @@ function Thinking({ text }: { text: string }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-muted-foreground"
+        className="tap-target-sm flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-muted-foreground"
       >
         <Brain className="size-3.5" />
         思考过程
@@ -155,16 +155,16 @@ export function ApprovalCard({
       <div className="mt-2.5 flex flex-wrap gap-2">
         {method === "select" &&
           options.map((o) => (
-            <Button key={o} size="sm" variant="outline" disabled={busy} onClick={() => onAnswer({ value: o })}>
+            <Button key={o} size="sm" variant="outline" className="tap-target-sm" disabled={busy} onClick={() => onAnswer({ value: o })}>
               {o}
             </Button>
           ))}
         {method === "confirm" && (
           <>
-            <Button size="sm" disabled={busy} onClick={() => onAnswer({ confirmed: true })}>
+            <Button size="sm" className="tap-target-sm" disabled={busy} onClick={() => onAnswer({ confirmed: true })}>
               允许
             </Button>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => onAnswer({ confirmed: false })}>
+            <Button size="sm" variant="outline" className="tap-target-sm" disabled={busy} onClick={() => onAnswer({ confirmed: false })}>
               拒绝
             </Button>
           </>
@@ -172,7 +172,7 @@ export function ApprovalCard({
         {(method === "input" || method === "editor") && (
           <InlineInput busy={busy} onSubmit={(v) => onAnswer({ value: v })} />
         )}
-        <Button size="sm" variant="ghost" disabled={busy} onClick={() => onAnswer({ cancelled: true })}>
+        <Button size="sm" variant="ghost" className="tap-target-sm" disabled={busy} onClick={() => onAnswer({ cancelled: true })}>
           忽略
         </Button>
       </div>
@@ -202,10 +202,10 @@ function InlineInput({
       <input
         value={v}
         onChange={(e) => setV(e.target.value)}
-        className="h-8 rounded-md border bg-background px-2 text-xs"
+        className="tap-target-sm h-8 rounded-md border bg-background px-2 text-xs"
         placeholder="输入内容…"
       />
-      <Button size="sm" type="submit" disabled={busy}>
+      <Button size="sm" type="submit" className="tap-target-sm" disabled={busy}>
         提交
       </Button>
     </form>

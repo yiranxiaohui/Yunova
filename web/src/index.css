@@ -294,6 +294,35 @@
     linear-gradient(135deg, color-mix(in oklch, var(--background) 96%, var(--primary)), var(--background));
 }
 
+/* Safe-area helpers for the packaged mobile app.
+ *
+ * A WebView runs edge to edge under the notch and the home indicator, so a
+ * bottom-anchored composer becomes partly untappable and a top bar hides
+ * behind the status bar. These pad by the real inset and collapse to zero on
+ * hardware without one, so the same markup serves web and app. */
+.safe-top {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+
+.safe-bottom {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Touch devices get comfortable hit areas without inflating the desktop UI,
+ * where a pointer is precise and vertical space is scarcer. Apple and Android
+ * both recommend roughly 44px. */
+@media (pointer: coarse) {
+  .tap-target {
+    min-height: 2.75rem;
+    min-width: 2.75rem;
+  }
+
+  .tap-target-sm {
+    min-height: 2.25rem;
+    min-width: 2.25rem;
+  }
+}
+
 .glass-surface {
   background: color-mix(in oklch, var(--card) 80%, transparent);
   border: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
