@@ -77,7 +77,7 @@ import { PromptLibrary } from "@/components/app/PromptLibrary"
 import { SkillsDialog } from "@/components/app/SkillsDialog"
 import { ShareDialog } from "@/components/app/ShareDialog"
 import { ImagePreview } from "@/components/app/ImagePreview"
-import { conversationsApi } from "@/lib/conversations"
+import { conversationsApi, type StoredMessage } from "@/lib/conversations"
 import {
   skillsApi,
   composeSystemPromptWithSkills,
@@ -101,12 +101,23 @@ import {
 } from "@/lib/worker"
 import { WorkerLog, type WorkerLogItem } from "@/components/app/WorkerEvents"
 
-// reasoning / reasoningMs 是纯前端字段：思考过程不落库，也不会进 append
-// 请求体，刷新页面后消失。
+// reasoning / reasoningMs 随消息一起落库（messages.reasoning /
+// messages.reasoning_ms），所以刷新页面后仍能看到思考过程。
 type UiMessage = ChatMessage & {
   id?: number
   reasoning?: string
   reasoningMs?: number
+}
+
+/** 把服务端消息转成前端消息，把 null 归一到 undefined。 */
+function toUiMessage(m: StoredMessage): UiMessage {
+  return {
+    id: m.id,
+    role: m.role,
+    content: m.content,
+    ...(m.reasoning ? { reasoning: m.reasoning } : {}),
+    ...(m.reasoning_ms != null ? { reasoningMs: m.reasoning_ms } : {}),
+  }
 }
 
 const PROTOCOL_COLOR: Record<Protocol, string> = {
@@ -656,6 +667,9 @@ function Bubble({
             <ReasoningBlock
               reasoning={message.reasoning}
               elapsedMs={message.reasoningMs}
+              // 已落库的消息肯定不在生成中，就算旧数据没有耗时也不能显示
+              // 成「思考中…」。
+              done={message.id !== undefined ? true : undefined}
             />
           )}
           <ReactMarkdown
@@ -971,9 +985,7 @@ export default function ChatPage() {
         const current = convs.find((c) => c.id === conversationId)
         setSystemPrompt(current?.system_prompt ?? "")
         setCurrentConversation(current ?? null)
-        setMessages(
-          rows.map((m) => ({ id: m.id, role: m.role, content: m.content }))
-        )
+        setMessages(rows.map(toUiMessage))
         setAttachedSkills(skills)
         setChatUsageTokens(null)
       })
@@ -1328,22 +1340,7 @@ export default function ChatPage() {
   async function refetchMessages(convId: number) {
     try {
       const rows = await conversationsApi.messages(convId)
-      setMessages((prev) =>
-        rows.map((m, i) => {
-          const base = { id: m.id, role: m.role, content: m.content }
-          // 思考过程不落库，这里按位置把本地那份贴回去——否则回答刚保存完
-          // 就会被这次整体重建冲掉，思考区会一闪而过。refetch 紧跟 append，
-          // 两边顺序天然对齐。
-          const local = prev[i]
-          return local?.role === m.role && local.reasoning
-            ? {
-                ...base,
-                reasoning: local.reasoning,
-                reasoningMs: local.reasoningMs,
-              }
-            : base
-        })
-      )
+      setMessages(rows.map(toUiMessage))
     } catch {
       // tolerate; IDs can't be refreshed, retry/edit just won't work
     }
@@ -1433,6 +1430,7 @@ export default function ChatPage() {
     abortRef.current = ctrl
 
     let assistantContent = ""
+    let assistantReasoning = ""
     let streamError: Error | null = null
     // 思考计时：首个思考增量开始计，正文首字定格。
     let reasoningStart = 0
@@ -1461,6 +1459,7 @@ export default function ChatPage() {
         signal: ctrl.signal,
         onReasoning: (delta) => {
           if (!reasoningStart) reasoningStart = Date.now()
+          assistantReasoning += delta
           setMessages((prev) => {
             const copy = prev.slice()
             const last = copy[copy.length - 1]
@@ -1512,6 +1511,11 @@ export default function ChatPage() {
       abortRef.current = null
       void refreshCredits()
       freezeReasoning(reasoningStart)
+      // 中途停止 / 上游断流时 onDelta 没来得及定格，这里补上，好让落库的
+      // 耗时和界面显示一致。
+      if (reasoningStart && reasoningMs === undefined) {
+        reasoningMs = Date.now() - reasoningStart
+      }
     }
 
     if (streamError) {
@@ -1525,11 +1529,21 @@ export default function ChatPage() {
       return
     }
 
-    const toSave: Array<{ role: "user" | "assistant"; content: string }> = [
-      { role: "user", content: composed },
-    ]
+    const toSave: Array<{
+      role: "user" | "assistant"
+      content: string
+      reasoning?: string
+      reasoning_ms?: number
+    }> = [{ role: "user", content: composed }]
     if (assistantContent) {
-      toSave.push({ role: "assistant", content: assistantContent })
+      toSave.push({
+        role: "assistant",
+        content: assistantContent,
+        ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+        ...(assistantReasoning && reasoningMs !== undefined
+          ? { reasoning_ms: reasoningMs }
+          : {}),
+      })
     }
     try {
       if (!user || !convId) return
@@ -1568,6 +1582,7 @@ export default function ChatPage() {
     const ctrl = new AbortController()
     abortRef.current = ctrl
     let assistantContent = ""
+    let assistantReasoning = ""
     let streamError: Error | null = null
     // 思考计时：首个思考增量开始计，正文首字定格。
     let reasoningStart = 0
@@ -1596,6 +1611,7 @@ export default function ChatPage() {
         signal: ctrl.signal,
         onReasoning: (delta) => {
           if (!reasoningStart) reasoningStart = Date.now()
+          assistantReasoning += delta
           setMessages((prev) => {
             const copy = prev.slice()
             const tail = copy[copy.length - 1]
@@ -1646,6 +1662,10 @@ export default function ChatPage() {
       setStreaming(false)
       abortRef.current = null
       freezeReasoning(reasoningStart)
+      // 同 send()：中途停止时补上耗时，保证落库值与界面一致。
+      if (reasoningStart && reasoningMs === undefined) {
+        reasoningMs = Date.now() - reasoningStart
+      }
     }
 
     if (streamError) {
@@ -1662,7 +1682,14 @@ export default function ChatPage() {
     if (assistantContent && user && conversationId) {
       try {
         await conversationsApi.append(conversationId, [
-          { role: "assistant", content: assistantContent },
+          {
+            role: "assistant",
+            content: assistantContent,
+            ...(assistantReasoning ? { reasoning: assistantReasoning } : {}),
+            ...(assistantReasoning && reasoningMs !== undefined
+              ? { reasoning_ms: reasoningMs }
+              : {}),
+          },
         ])
         setSidebarReload((x) => x + 1)
         await refetchMessages(conversationId)

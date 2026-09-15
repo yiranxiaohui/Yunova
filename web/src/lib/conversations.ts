@@ -10,6 +10,10 @@ export type StoredMessage = {
   id: number
   role: "system" | "user" | "assistant"
   content: string
+  /** 推理模型的思考过程，仅 assistant 消息可能有值。 */
+  reasoning?: string | null
+  /** 思考耗时（毫秒）。 */
+  reasoning_ms?: number | null
   created_at: string
 }
 
@@ -82,7 +86,12 @@ export const conversationsApi = {
   },
   async append(
     id: number,
-    messages: Array<{ role: "system" | "user" | "assistant"; content: string }>
+    messages: Array<{
+      role: "system" | "user" | "assistant"
+      content: string
+      reasoning?: string
+      reasoning_ms?: number
+    }>
   ): Promise<void> {
     await okOrThrow(
       await fetch(`/api/conversations/${id}/messages`, {

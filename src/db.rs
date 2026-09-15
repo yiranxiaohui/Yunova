@@ -105,6 +105,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (38, include_str!("../migrations/sqlite/0038_token_quota_billing.sql")),
     (39, include_str!("../migrations/sqlite/0039_disable_unpriced_chat_models.sql")),
     (40, include_str!("../migrations/sqlite/0040_quota_in_cny.sql")),
+    (41, include_str!("../migrations/sqlite/0041_message_reasoning.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -147,6 +148,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (38, include_str!("../migrations/mysql/0038_token_quota_billing.sql")),
     (39, include_str!("../migrations/mysql/0039_disable_unpriced_chat_models.sql")),
     (40, include_str!("../migrations/mysql/0040_quota_in_cny.sql")),
+    (41, include_str!("../migrations/mysql/0041_message_reasoning.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -189,6 +191,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (38, include_str!("../migrations/postgres/0038_token_quota_billing.sql")),
     (39, include_str!("../migrations/postgres/0039_disable_unpriced_chat_models.sql")),
     (40, include_str!("../migrations/postgres/0040_quota_in_cny.sql")),
+    (41, include_str!("../migrations/postgres/0041_message_reasoning.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -668,6 +671,56 @@ mod tests {
             ("epay_product_name".into(), "Custom credits".into()),
             ("smtp_from_name".into(), "My workspace".into()),
         ]);
+        pool.close().await;
+    }
+
+    /// Migration 41 adds the reasoning columns so a refresh can replay the
+    /// thinking block. Existing rows must survive with NULL reasoning.
+    #[tokio::test]
+    async fn reasoning_migration_adds_nullable_columns_and_keeps_old_messages() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // Rewind to the pre-reasoning schema and insert a legacy message.
+        pool.execute("DELETE FROM _migrations WHERE id = 41").await.unwrap();
+        pool.execute("ALTER TABLE messages DROP COLUMN reasoning").await.unwrap();
+        pool.execute("ALTER TABLE messages DROP COLUMN reasoning_ms").await.unwrap();
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')").await.unwrap();
+        pool.execute("INSERT INTO conversations (id, user_id, title) VALUES (1, 1, 'c')").await.unwrap();
+        pool.execute("INSERT INTO messages (conversation_id, role, content) VALUES (1, 'assistant', 'old')").await.unwrap();
+
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        let (content, reasoning, ms): (String, Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT content, reasoning, reasoning_ms FROM messages WHERE conversation_id = 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(content, "old");
+        assert_eq!(reasoning, None, "pre-41 messages have no stored thinking");
+        assert_eq!(ms, None);
+
+        // New messages round-trip the thinking block and its duration.
+        pool.execute(
+            "INSERT INTO messages (conversation_id, role, content, reasoning, reasoning_ms) \
+             VALUES (1, 'assistant', 'hi', 'let me think', 1200)",
+        )
+        .await
+        .unwrap();
+        let (reasoning, ms): (String, i64) = sqlx::query_as(
+            "SELECT reasoning, reasoning_ms FROM messages WHERE content = 'hi'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!((reasoning.as_str(), ms), ("let me think", 1200));
+
         pool.close().await;
     }
 }

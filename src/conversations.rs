@@ -23,6 +23,10 @@ pub struct Message {
     pub id: i64,
     pub role: String,
     pub content: String,
+    /// 推理模型的思考过程。只有 assistant 消息可能有值。
+    pub reasoning: Option<String>,
+    /// 思考耗时（毫秒），用于折叠标题里的「已思考 Ns」。
+    pub reasoning_ms: Option<i64>,
     pub created_at: String,
 }
 
@@ -52,6 +56,10 @@ pub struct TruncateQuery {
 pub struct NewMessage {
     pub role: String,
     pub content: String,
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
+    pub reasoning_ms: Option<i64>,
 }
 
 fn err(status: StatusCode, msg: impl Into<String>) -> Response {
@@ -268,7 +276,7 @@ async fn list_messages(
     }
     let sql = db::q(
         installed.kind,
-        "SELECT id, role, content, created_at FROM messages
+        "SELECT id, role, content, reasoning, reasoning_ms, created_at FROM messages
          WHERE conversation_id = ? ORDER BY id ASC",
     );
     let rows: Result<Vec<Message>, _> = sqlx::query_as(&sql)
@@ -300,6 +308,9 @@ async fn append_messages(
         if m.content.is_empty() {
             return err(StatusCode::BAD_REQUEST, "content is empty");
         }
+        if m.reasoning.as_ref().is_some_and(|r| r.len() > 200_000) {
+            return err(StatusCode::BAD_REQUEST, "reasoning too long");
+        }
     }
 
     let mut tx = match installed.pool.begin().await {
@@ -322,13 +333,23 @@ async fn append_messages(
 
     let insert_msg_sql = db::q(
         installed.kind,
-        "INSERT INTO messages (conversation_id, role, content) VALUES (?, ?, ?)",
+        "INSERT INTO messages (conversation_id, role, content, reasoning, reasoning_ms)
+         VALUES (?, ?, ?, ?, ?)",
     );
     for m in &body.messages {
+        // 思考过程只对 assistant 有意义，其他角色一律落 NULL。
+        let reasoning = if m.role == "assistant" {
+            m.reasoning.as_deref().filter(|r| !r.is_empty())
+        } else {
+            None
+        };
+        let reasoning_ms = reasoning.and(m.reasoning_ms).filter(|v| *v >= 0);
         if let Err(e) = sqlx::query(&insert_msg_sql)
             .bind(id)
             .bind(&m.role)
             .bind(&m.content)
+            .bind(reasoning)
+            .bind(reasoning_ms)
             .execute(&mut *tx)
             .await
         {
