@@ -40,6 +40,62 @@ pub struct Channel {
     pub priority: i64,
 }
 
+/// A channel as the admin UI sees it: identical to [`Channel`] except the key
+/// is a non-reversible hint instead of the secret.
+///
+/// A separate type rather than a skipped field, so adding a column to
+/// `Channel` cannot silently start leaking it through this endpoint — the
+/// mapping below has to be updated deliberately.
+#[derive(Debug, Clone, Serialize)]
+pub struct RedactedChannel {
+    pub id: i64,
+    pub name: String,
+    pub protocol: String,
+    pub base_url: String,
+    /// Masked form, e.g. `sk-1…cdef`. Enough to tell two keys apart when
+    /// checking which channel is misconfigured, useless if intercepted.
+    pub api_key_hint: String,
+    /// Whether a key is stored at all. The UI needs this to distinguish "not
+    /// configured" from "configured but hidden".
+    pub has_api_key: bool,
+    pub enabled: bool,
+    pub priority: i64,
+}
+
+impl From<&Channel> for RedactedChannel {
+    fn from(c: &Channel) -> Self {
+        Self {
+            id: c.id,
+            name: c.name.clone(),
+            protocol: c.protocol.clone(),
+            base_url: c.base_url.clone(),
+            api_key_hint: mask_secret(&c.api_key),
+            has_api_key: !c.api_key.trim().is_empty(),
+            enabled: c.enabled,
+            priority: c.priority,
+        }
+    }
+}
+
+/// Mask a secret to a recognisable but unusable hint.
+///
+/// Short values are masked entirely rather than partially: revealing 4 of 8
+/// characters is a meaningful fraction of the search space, while revealing 4
+/// of 48 is not.
+fn mask_secret(secret: &str) -> String {
+    let s = secret.trim();
+    let chars: Vec<char> = s.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    if chars.len() <= 12 {
+        return "…".repeat(3);
+    }
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    format!("{head}…{tail}")
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SizeRule {
     pub size: String,
@@ -846,7 +902,12 @@ fn err(status: StatusCode, msg: impl Into<String>) -> Response {
 
 async fn admin_list_channels(Extension(s): Extension<InstalledState>) -> Response {
     match list_channels(&s.pool, s.kind).await {
-        Ok(v) => Json(v).into_response(),
+        // Redacted: the list is a management view, and nothing in the UI needs
+        // the secret back. Returning it meant one compromised admin session,
+        // or one logged response, disclosed every upstream key at once — keys
+        // this deployment cannot rotate on its own. Editing still works
+        // because `admin_patch_channel` treats an omitted key as "unchanged".
+        Ok(v) => Json(v.iter().map(RedactedChannel::from).collect::<Vec<_>>()).into_response(),
         Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }
@@ -1201,6 +1262,44 @@ async fn probe_channel_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_admin_channel_list_never_carries_the_secret() {
+        // This endpoint is the one place an upstream key used to leave the
+        // server. Serialize the real payload and assert the secret is absent
+        // from the bytes, so a future field addition cannot reintroduce it.
+        let mut c = channel(1, "openai");
+        c.api_key = "sk-proj-supersecretvalue-0123456789".to_string();
+        let body = serde_json::to_string(&RedactedChannel::from(&c)).unwrap();
+
+        assert!(
+            !body.contains("sk-proj-supersecretvalue-0123456789"),
+            "the plaintext key must not be serialized: {body}"
+        );
+        assert!(!body.contains("\"api_key\""), "no api_key field at all: {body}");
+        assert!(body.contains("sk-p…6789"), "a usable hint is still shown: {body}");
+        assert!(body.contains("\"has_api_key\":true"));
+    }
+
+    #[test]
+    fn a_short_secret_is_masked_completely() {
+        // Revealing 8 of 10 characters would be worse than revealing nothing.
+        assert_eq!(mask_secret("sk-123"), "………");
+        assert_eq!(mask_secret("123456789012"), "………");
+        assert_eq!(mask_secret("1234567890123"), "1234…0123");
+    }
+
+    #[test]
+    fn an_unset_secret_is_reported_as_unconfigured() {
+        // The UI has to tell "hidden" apart from "never set", or a broken
+        // channel looks identical to a working one. An empty hint is correct
+        // here: there is no secret to hint at.
+        let mut c = channel(1, "openai");
+        c.api_key = "   ".to_string();
+        let r = RedactedChannel::from(&c);
+        assert!(!r.has_api_key);
+        assert_eq!(r.api_key_hint, "");
+    }
 
     fn channel(id: i64, protocol: &str) -> Channel {
         Channel {

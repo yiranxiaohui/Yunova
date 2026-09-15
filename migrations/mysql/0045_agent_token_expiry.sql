@@ -1,0 +1,15 @@
+-- Expiry for agent tokens.
+--
+-- A session-scoped credential used to outlive its session: only the cloud
+-- sandbox registered a lifetime task that revoked it, so a device session's
+-- token — which is handed to the user's own machine in plaintext and is
+-- therefore readable by that user — stayed valid forever once minted.
+--
+-- Stored as RFC3339 text rather than a native timestamp because the pool is
+-- `sqlx::Any`: text decodes identically on all three backends, and the
+-- comparison happens in Rust where the semantics are unambiguous.
+--
+-- NULL means "never expires" and is reserved for tokens the user created
+-- explicitly in the token manager, where the list and the revoke button are
+-- the intended control.
+ALTER TABLE agent_tokens ADD COLUMN expires_at VARCHAR(64);

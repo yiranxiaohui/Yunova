@@ -108,6 +108,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (42, include_str!("../migrations/sqlite/0042_agent_tokens.sql")),
     (43, include_str!("../migrations/sqlite/0043_agent_sessions.sql")),
     (44, include_str!("../migrations/sqlite/0044_drop_workers.sql")),
+    (45, include_str!("../migrations/sqlite/0045_agent_token_expiry.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -151,6 +152,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (42, include_str!("../migrations/mysql/0042_agent_tokens.sql")),
     (43, include_str!("../migrations/mysql/0043_agent_sessions.sql")),
     (44, include_str!("../migrations/mysql/0044_drop_workers.sql")),
+    (45, include_str!("../migrations/mysql/0045_agent_token_expiry.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -194,6 +196,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (42, include_str!("../migrations/postgres/0042_agent_tokens.sql")),
     (43, include_str!("../migrations/postgres/0043_agent_sessions.sql")),
     (44, include_str!("../migrations/postgres/0044_drop_workers.sql")),
+    (45, include_str!("../migrations/postgres/0045_agent_token_expiry.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -413,6 +416,16 @@ pub fn bool_true(kind: DbKind) -> &'static str {
     match kind {
         DbKind::Postgres => "TRUE",
         _ => "1",
+    }
+}
+
+/// Literal "false" value for the given dialect. Counterpart to [`bool_true`],
+/// so a query that filters on "not yet revoked" does not have to inline the
+/// dialect match at every call site.
+pub fn bool_false(kind: DbKind) -> &'static str {
+    match kind {
+        DbKind::Postgres => "FALSE",
+        _ => "0",
     }
 }
 

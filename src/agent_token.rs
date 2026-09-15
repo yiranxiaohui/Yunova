@@ -19,6 +19,12 @@
 //!
 //! Only the SHA-256 hash is stored, so a leaked database cannot be replayed
 //! against the gateway, and the plaintext is shown exactly once at creation.
+//!
+//! Session-scoped tokens additionally carry an expiry. A runtime credential is
+//! only meaningful while its session is live, and the device target hands the
+//! plaintext to the user's own machine, so "valid until someone remembers to
+//! revoke it" is the wrong default there. Tokens minted from the token manager
+//! keep `expires_at = NULL`, because that list *is* their control surface.
 
 use axum::{
     Extension, Json, Router,
@@ -45,6 +51,14 @@ const TOKEN_PREFIX: &str = "yna_";
 const DISPLAY_PREFIX_LEN: usize = TOKEN_PREFIX.len() + 8;
 
 const MAX_TOKENS_PER_USER: i64 = 20;
+
+/// Lifetime of a token minted for one agent session.
+///
+/// Deliberately generous relative to the sandbox lifetime ceiling: this is a
+/// backstop for the paths that cannot revoke deterministically (a device that
+/// never reports its runtime closing, a server that dies mid-session), not the
+/// primary control. Normal teardown revokes immediately.
+pub const SESSION_TOKEN_TTL_HOURS: i64 = 12;
 
 fn new_token() -> String {
     format!("{TOKEN_PREFIX}{}", auth::generate_token())
@@ -78,7 +92,8 @@ pub fn token_from_headers(headers: &HeaderMap) -> Option<String> {
         .map(|t| t.to_string())
 }
 
-/// Resolve an agent token to its owning user, refusing revoked tokens.
+/// Resolve an agent token to its owning user, refusing revoked or expired
+/// tokens.
 ///
 /// `last_used_at` is advanced on every successful lookup so a user can tell
 /// which tokens are live before revoking one. The update is best-effort: a
@@ -91,16 +106,26 @@ pub async fn user_for_token(pool: &Pool, kind: DbKind, token: &str) -> Option<i6
     let revoked_col = db::bool_as_int(kind, "revoked");
     let sql = db::q(
         kind,
-        &format!("SELECT id, user_id, {revoked_col} FROM agent_tokens WHERE token_hash = ?"),
+        &format!(
+            "SELECT id, user_id, {revoked_col}, expires_at FROM agent_tokens WHERE token_hash = ?"
+        ),
     );
-    let row: Option<(i64, i64, i64)> = sqlx::query_as(&sql)
+    let row: Option<(i64, i64, i64, Option<String>)> = sqlx::query_as(&sql)
         .bind(&hash)
         .fetch_optional(pool)
         .await
         .ok()
         .flatten();
-    let (id, user_id, revoked) = row?;
+    let (id, user_id, revoked, expires_at) = row?;
     if revoked != 0 {
+        return None;
+    }
+    // A NULL expiry means the token is managed by hand in the token list. An
+    // unparseable one is treated as expired: a credential whose lifetime we
+    // cannot establish must not keep spending quota.
+    if let Some(raw) = expires_at.as_deref()
+        && is_expired(raw, chrono::Utc::now())
+    {
         return None;
     }
 
@@ -114,6 +139,15 @@ pub async fn user_for_token(pool: &Pool, kind: DbKind, token: &str) -> Option<i6
     Some(user_id)
 }
 
+/// Whether an RFC3339 expiry has passed. An unparseable value counts as
+/// expired so a corrupt row fails closed rather than granting forever.
+fn is_expired(raw: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(raw) {
+        Ok(at) => at.with_timezone(&chrono::Utc) <= now,
+        Err(_) => true,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // management endpoints
 // ---------------------------------------------------------------------------
@@ -124,6 +158,17 @@ struct CreateReq {
     name: Option<String>,
 }
 
+/// One row of the token list query.
+type TokenRow = (
+    i64,            // id
+    String,         // name
+    String,         // prefix
+    String,         // created_at
+    Option<String>, // last_used_at
+    i64,            // revoked
+    Option<String>, // expires_at
+);
+
 async fn list_tokens(
     Extension(installed): Extension<InstalledState>,
     Extension(user): Extension<CurrentUser>,
@@ -132,27 +177,34 @@ async fn list_tokens(
     let sql = db::q(
         installed.kind,
         &format!(
-            "SELECT id, name, prefix, created_at, last_used_at, {revoked_col} \
+            "SELECT id, name, prefix, created_at, last_used_at, {revoked_col}, expires_at \
              FROM agent_tokens WHERE user_id = ? ORDER BY id DESC"
         ),
     );
-    let rows: Vec<(i64, String, String, String, Option<String>, i64)> = sqlx::query_as(&sql)
+    let rows: Vec<TokenRow> = sqlx::query_as(&sql)
         .bind(user.id)
         .fetch_all(&installed.pool)
         .await
         .unwrap_or_default();
+    let now = chrono::Utc::now();
     let out: Vec<_> = rows
         .into_iter()
-        .map(|(id, name, prefix, created_at, last_used_at, revoked)| {
-            json!({
-                "id": id,
-                "name": name,
-                "prefix": prefix,
-                "created_at": created_at,
-                "last_used_at": last_used_at,
-                "revoked": revoked != 0,
-            })
-        })
+        .map(
+            |(id, name, prefix, created_at, last_used_at, revoked, expires_at)| {
+                json!({
+                    "id": id,
+                    "name": name,
+                    "prefix": prefix,
+                    "created_at": created_at,
+                    "last_used_at": last_used_at,
+                    "revoked": revoked != 0,
+                    "expires_at": expires_at,
+                    // Precomputed so the list does not have to reimplement the
+                    // fail-closed parse rule the gateway applies.
+                    "expired": expires_at.as_deref().is_some_and(|raw| is_expired(raw, now)),
+                })
+            },
+        )
         .collect();
     Json(out).into_response()
 }
@@ -162,24 +214,32 @@ async fn list_tokens(
 /// Shared by the management endpoint and by the session launcher, which needs
 /// to provision a gateway credential for a runtime it is about to start.
 /// Returns the plaintext, which is the only time it exists outside the caller.
+///
+/// `ttl_hours` bounds how long the credential stays usable if it is never
+/// revoked explicitly. Pass `None` only for tokens the user manages by hand.
 pub async fn mint(
     pool: &Pool,
     kind: DbKind,
     user_id: i64,
     name: &str,
+    ttl_hours: Option<i64>,
 ) -> Result<String, String> {
     let token = new_token();
     let hash = auth::token_hash(&token);
     let prefix: String = token.chars().take(DISPLAY_PREFIX_LEN).collect();
+    let expires_at = ttl_hours
+        .map(|h| (chrono::Utc::now() + chrono::Duration::hours(h)).to_rfc3339());
     let sql = db::q(
         kind,
-        "INSERT INTO agent_tokens (user_id, name, token_hash, prefix) VALUES (?, ?, ?, ?)",
+        "INSERT INTO agent_tokens (user_id, name, token_hash, prefix, expires_at) \
+         VALUES (?, ?, ?, ?, ?)",
     );
     sqlx::query(&sql)
         .bind(user_id)
         .bind(name)
         .bind(&hash)
         .bind(&prefix)
+        .bind(expires_at.as_deref())
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -195,10 +255,7 @@ pub async fn revoke_by_plaintext(pool: &Pool, kind: DbKind, token: &str) {
         kind,
         &format!(
             "UPDATE agent_tokens SET revoked = {} WHERE token_hash = ?",
-            match kind {
-                DbKind::Postgres => "TRUE",
-                _ => "1",
-            }
+            db::bool_true(kind)
         ),
     );
     let _ = sqlx::query(&sql)
@@ -228,10 +285,7 @@ async fn create_token(
         installed.kind,
         &format!(
             "SELECT COUNT(*) FROM agent_tokens WHERE user_id = ? AND revoked = {}",
-            match installed.kind {
-                DbKind::Postgres => "FALSE",
-                _ => "0",
-            }
+            db::bool_false(installed.kind)
         ),
     );
     let live: i64 = sqlx::query_scalar(&live_sql)
@@ -247,24 +301,17 @@ async fn create_token(
             .into_response();
     }
 
-    let token = new_token();
-    let hash = auth::token_hash(&token);
+    // A token created here is managed by hand in the token list, so it gets no
+    // expiry: that list and its revoke button are the intended control. Session
+    // credentials are minted by the launcher with a TTL instead.
+    let token = match mint(&installed.pool, installed.kind, user.id, &name, None).await {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("[agent-token] create endpoint insert failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "创建令牌失败").into_response();
+        }
+    };
     let prefix: String = token.chars().take(DISPLAY_PREFIX_LEN).collect();
-    let sql = db::q(
-        installed.kind,
-        "INSERT INTO agent_tokens (user_id, name, token_hash, prefix) VALUES (?, ?, ?, ?)",
-    );
-    if let Err(e) = sqlx::query(&sql)
-        .bind(user.id)
-        .bind(&name)
-        .bind(&hash)
-        .bind(&prefix)
-        .execute(&installed.pool)
-        .await
-    {
-        eprintln!("[agent-token] create endpoint insert failed: {e}");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "创建令牌失败").into_response();
-    }
 
     // The only time the plaintext is ever returned.
     Json(json!({ "token": token, "name": name, "prefix": prefix })).into_response()
@@ -281,10 +328,7 @@ async fn revoke_token(
         installed.kind,
         &format!(
             "UPDATE agent_tokens SET revoked = {} WHERE id = ? AND user_id = ?",
-            match installed.kind {
-                DbKind::Postgres => "TRUE",
-                _ => "1",
-            }
+            db::bool_true(installed.kind)
         ),
     );
     match sqlx::query(&sql)
@@ -417,6 +461,87 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn an_expired_session_token_stops_authenticating() {
+        // End-to-end over a real pool, because the expiry check spans the
+        // migration, the INSERT and the lookup; a unit test of `is_expired`
+        // alone would not catch a column that was never written.
+        use crate::db::{DbKind, install_drivers};
+        use sqlx::any::AnyPoolOptions;
+
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool, DbKind::Sqlite).await.unwrap();
+        sqlx::query("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let live = mint(&pool, DbKind::Sqlite, 1, "session-1", Some(12))
+            .await
+            .unwrap();
+        assert_eq!(
+            user_for_token(&pool, DbKind::Sqlite, &live).await,
+            Some(1),
+            "a freshly minted session token must work"
+        );
+
+        // Backdate it rather than sleeping.
+        let past = (chrono::Utc::now() - chrono::Duration::minutes(1)).to_rfc3339();
+        sqlx::query("UPDATE agent_tokens SET expires_at = ? WHERE token_hash = ?")
+            .bind(&past)
+            .bind(auth::token_hash(&live))
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            user_for_token(&pool, DbKind::Sqlite, &live).await,
+            None,
+            "an expired token must stop spending quota even if never revoked"
+        );
+
+        // A hand-managed token has no expiry and keeps working.
+        let manual = mint(&pool, DbKind::Sqlite, 1, "laptop", None).await.unwrap();
+        assert_eq!(user_for_token(&pool, DbKind::Sqlite, &manual).await, Some(1));
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn revoking_by_plaintext_kills_the_credential() {
+        use crate::db::{DbKind, install_drivers};
+        use sqlx::any::AnyPoolOptions;
+
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool, DbKind::Sqlite).await.unwrap();
+        sqlx::query("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let token = mint(&pool, DbKind::Sqlite, 1, "session-1", Some(12))
+            .await
+            .unwrap();
+        assert_eq!(user_for_token(&pool, DbKind::Sqlite, &token).await, Some(1));
+
+        revoke_by_plaintext(&pool, DbKind::Sqlite, &token).await;
+        assert_eq!(user_for_token(&pool, DbKind::Sqlite, &token).await, None);
+        // Teardown paths may both fire; the second must be harmless.
+        revoke_by_plaintext(&pool, DbKind::Sqlite, &token).await;
+        assert_eq!(user_for_token(&pool, DbKind::Sqlite, &token).await, None);
+
+        pool.close().await;
+    }
+
     #[test]
     fn bearer_header_is_recognized() {
         let mut h = HeaderMap::new();
@@ -425,6 +550,33 @@ mod tests {
             HeaderValue::from_static("Bearer yna_abc"),
         );
         assert_eq!(token_from_headers(&h).as_deref(), Some("yna_abc"));
+    }
+
+    #[test]
+    fn an_expiry_in_the_past_retires_the_token() {
+        let now = chrono::Utc::now();
+        let past = (now - chrono::Duration::seconds(1)).to_rfc3339();
+        let future = (now + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(is_expired(&past, now));
+        assert!(!is_expired(&future, now));
+    }
+
+    #[test]
+    fn an_expiry_exactly_at_the_deadline_is_already_over() {
+        // Boundary is inclusive: a credential is not usable during the instant
+        // it expires.
+        let now = chrono::Utc::now();
+        assert!(is_expired(&now.to_rfc3339(), now));
+    }
+
+    #[test]
+    fn an_unparseable_expiry_fails_closed() {
+        // A corrupt row must not grant an unlimited credential. Failing open
+        // here would turn a storage bug into a quota-spending one.
+        let now = chrono::Utc::now();
+        for raw in ["", "never", "2026-13-45", "1789"] {
+            assert!(is_expired(raw, now), "{raw:?} must count as expired");
+        }
     }
 
     #[test]

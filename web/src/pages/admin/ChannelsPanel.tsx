@@ -165,8 +165,12 @@ export function ChannelsPanel() {
                 <TableCell className="max-w-[18rem] truncate font-mono text-xs text-muted-foreground">
                   {c.base_url}
                 </TableCell>
-                <TableCell className="max-w-[12rem] truncate font-mono text-xs text-muted-foreground" title={c.api_key}>
-                  {c.api_key}
+                <TableCell className="max-w-[12rem] truncate font-mono text-xs text-muted-foreground">
+                  {c.has_api_key ? (
+                    c.api_key_hint
+                  ) : (
+                    <span className="text-destructive">未配置</span>
+                  )}
                 </TableCell>
                 <TableCell className="tabular-nums">{c.priority}</TableCell>
                 <TableCell>
@@ -235,7 +239,8 @@ function ChannelDialog({
           name: mode.channel.name,
           protocol: mode.channel.protocol,
           base_url: mode.channel.base_url,
-          api_key: mode.channel.api_key,
+          // 编辑时永远从空开始：后端不再下发明文密钥，留空即表示不修改。
+          api_key: "",
           enabled: mode.channel.enabled,
           priority: mode.channel.priority,
         }
@@ -331,11 +336,25 @@ function ChannelDialog({
           <div className="col-span-2">
             <Label>API Key</Label>
             <Input
-              type="text"
+              type="password"
+              autoComplete="new-password"
               value={form.api_key}
               onChange={(e) => setForm({ ...form, api_key: e.target.value })}
-              placeholder="sk-..."
+              placeholder={
+                mode.kind === "edit" ? "留空则不修改现有密钥" : "sk-..."
+              }
             />
+            {mode.kind === "edit" && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                当前：
+                <span className="font-mono">
+                  {mode.channel.has_api_key
+                    ? mode.channel.api_key_hint
+                    : "未配置"}
+                </span>
+                。密钥不会被回显，只能整个替换。
+              </p>
+            )}
           </div>
           <div>
             <Label>优先级</Label>

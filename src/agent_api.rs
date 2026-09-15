@@ -597,6 +597,7 @@ async fn start_session(
         installed.kind,
         user.id,
         &format!("session-{sid}"),
+        Some(crate::agent_token::SESSION_TOKEN_TTL_HOURS),
     )
     .await
     {
@@ -690,6 +691,10 @@ async fn start_session(
                 Target::Device,
                 transport,
                 frame_rx,
+                // The device target is the reason this binding exists: the
+                // plaintext was just handed to a machine the user controls, so
+                // it must die with the session rather than outlive it.
+                Some(token),
             )
             .await;
         return Json(json!({ "ok": true, "reused": false, "sandboxed": false })).into_response();
@@ -740,6 +745,7 @@ async fn start_session(
             Target::Cloud,
             transport,
             frames,
+            Some(token.clone()),
         )
         .await;
 
@@ -751,7 +757,6 @@ async fn start_session(
         let registry = state.agent_sessions.clone();
         let pool = installed.pool.clone();
         let kind = installed.kind;
-        let token = token.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_secs(limits.max_lifetime_secs)).await;
             // Only act if this exact session is still the live one; a restart
@@ -769,7 +774,7 @@ async fn start_session(
                 live.shutdown().await;
                 crate::agent_sandbox::remove_container(live.session_id).await;
             }
-            crate::agent_token::revoke_by_plaintext(&pool, kind, &token).await;
+            live.revoke_token(&pool, kind).await;
         });
     }
 
@@ -789,6 +794,11 @@ async fn stop_session(
     match state.agent_sessions.remove(sid).await {
         Some(live) => {
             live.shutdown().await;
+            // Retire the credential here too. The frame pump revokes on its
+            // own exit, but `remove` already detached the session, so that
+            // path may never run for a runtime that ignores stdin EOF — and
+            // "stopped" must mean the token is dead, not dead within an hour.
+            live.revoke_token(&installed.pool, installed.kind).await;
             // Also clear the container. `--rm` handles the normal exit, but a
             // runtime that ignored stdin EOF would otherwise leak a container
             // and hold its name against the next start.

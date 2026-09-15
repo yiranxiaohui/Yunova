@@ -88,6 +88,15 @@ pub struct LiveSession {
     pub session_id: i64,
     pub user_id: i64,
     pub target: Target,
+    /// Plaintext gateway credential minted for this runtime, retired when the
+    /// session ends.
+    ///
+    /// Held here rather than only at the launch site because a session can end
+    /// in several ways — the user stops it, the runtime exits, the device
+    /// disconnects, the sandbox hits its lifetime ceiling — and every one of
+    /// them must kill the credential. Anchoring it to the session object means
+    /// teardown cannot forget a path.
+    session_token: Option<String>,
     transport: Arc<dyn AgentTransport>,
     events: broadcast::Sender<SessionEvent>,
     /// Blocking `extension_ui_request`s keyed by request id. A request left
@@ -170,6 +179,16 @@ impl LiveSession {
     pub async fn shutdown(&self) {
         self.transport.shutdown().await;
     }
+
+    /// Retire this session's gateway credential.
+    ///
+    /// Idempotent by construction: revoking an already-revoked hash is a
+    /// no-op update, so every teardown path may call it without coordinating.
+    pub async fn revoke_token(&self, pool: &Pool, kind: DbKind) {
+        if let Some(token) = &self.session_token {
+            crate::agent_token::revoke_by_plaintext(pool, kind, token).await;
+        }
+    }
 }
 
 /// All live sessions in this process, keyed by session id.
@@ -219,12 +238,14 @@ impl SessionRegistry {
         target: Target,
         transport: Arc<dyn AgentTransport>,
         mut frames: mpsc::Receiver<Value>,
+        session_token: Option<String>,
     ) -> Arc<LiveSession> {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let live = Arc::new(LiveSession {
             session_id,
             user_id,
             target,
+            session_token,
             transport,
             events,
             approvals: RwLock::new(HashMap::new()),
@@ -311,7 +332,14 @@ impl SessionRegistry {
             // further `get_entries` could ever be answered. Mirroring already
             // ran at each settle, which is the last point the transcript could
             // be read, so there is nothing left to persist here.
+            //
+            // This is the one exit every target shares — a sandbox exiting, a
+            // device reporting its runtime closed, a dropped socket — so it is
+            // where the credential dies. Waiting for an explicit stop would
+            // leave a usable token behind whenever the runtime ended on its
+            // own, and on the device target that token is in the user's hands.
             set_status(&pool, kind, session_id, "idle").await;
+            session.revoke_token(&pool, kind).await;
             let _ = session.events.send(SessionEvent::Closed {
                 reason: "运行时已退出".into(),
             });
@@ -436,11 +464,17 @@ pub async fn mirror_entries(
     Ok(written)
 }
 
-/// Clear `running` rows left behind by a restart.
+/// Clear `running` rows left behind by a restart, and retire the credentials
+/// their runtimes were holding.
 ///
 /// A live session is bound to a child process or an open socket, so nothing
 /// survives a restart. Without this, a session interrupted mid-stream would
 /// stay `running` forever and refuse new prompts.
+///
+/// The token half matters just as much: the in-memory `LiveSession` that owns
+/// a credential is gone after a restart, so nothing else can ever revoke it.
+/// Session tokens are named `session-<id>` by the launcher, which is what makes
+/// them identifiable here without storing the plaintext.
 pub async fn reset_running_sessions(pool: &Pool, kind: DbKind) {
     let sql = db::q(
         kind,
@@ -448,6 +482,23 @@ pub async fn reset_running_sessions(pool: &Pool, kind: DbKind) {
     );
     if let Err(e) = sqlx::query(&sql).execute(pool).await {
         eprintln!("[agent-session] resetting interrupted sessions failed: {e}");
+    }
+
+    let revoke = db::q(
+        kind,
+        &format!(
+            "UPDATE agent_tokens SET revoked = {} WHERE name LIKE 'session-%' AND revoked = {}",
+            db::bool_true(kind),
+            db::bool_false(kind),
+        ),
+    );
+    match sqlx::query(&revoke).execute(pool).await {
+        Ok(r) if r.rows_affected() > 0 => eprintln!(
+            "[agent-session] revoked {} orphaned session credential(s) from a previous run",
+            r.rows_affected()
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!("[agent-session] revoking orphaned session credentials failed: {e}"),
     }
 }
 
@@ -462,6 +513,49 @@ mod tests {
         }
         assert_eq!(Target::parse("local"), None);
         assert_eq!(Target::parse(""), None);
+    }
+
+    #[tokio::test]
+    async fn a_restart_retires_the_credentials_it_can_no_longer_revoke() {
+        // After a restart the LiveSession that owned a session credential is
+        // gone, so nothing else would ever revoke it. Hand-managed tokens must
+        // survive the same sweep.
+        use crate::db::install_drivers;
+        use sqlx::any::AnyPoolOptions;
+
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool, DbKind::Sqlite).await.unwrap();
+        sqlx::query("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let orphan = crate::agent_token::mint(&pool, DbKind::Sqlite, 1, "session-7", Some(12))
+            .await
+            .unwrap();
+        let manual = crate::agent_token::mint(&pool, DbKind::Sqlite, 1, "laptop", None)
+            .await
+            .unwrap();
+
+        reset_running_sessions(&pool, DbKind::Sqlite).await;
+
+        assert_eq!(
+            crate::agent_token::user_for_token(&pool, DbKind::Sqlite, &orphan).await,
+            None,
+            "a session credential cannot outlive the process that owned it"
+        );
+        assert_eq!(
+            crate::agent_token::user_for_token(&pool, DbKind::Sqlite, &manual).await,
+            Some(1),
+            "a token the user manages by hand must not be swept"
+        );
+
+        pool.close().await;
     }
 
     struct RecordingTransport {
@@ -485,6 +579,7 @@ mod tests {
             session_id: 7,
             user_id: 1,
             target: Target::Cloud,
+            session_token: None,
             transport,
             events: events.clone(),
             approvals: RwLock::new(HashMap::new()),
@@ -493,6 +588,58 @@ mod tests {
             next_id: std::sync::atomic::AtomicU64::new(1),
         });
         (live, events)
+    }
+
+    #[tokio::test]
+    async fn ending_a_session_retires_its_gateway_credential() {
+        // The device target hands this plaintext to a machine the user owns,
+        // so "the session ended" has to mean "the credential is dead".
+        use crate::db::install_drivers;
+        use sqlx::any::AnyPoolOptions;
+
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool, DbKind::Sqlite).await.unwrap();
+        sqlx::query("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let token = crate::agent_token::mint(&pool, DbKind::Sqlite, 1, "session-7", Some(12))
+            .await
+            .unwrap();
+
+        let (events, _) = broadcast::channel(16);
+        let live = Arc::new(LiveSession {
+            session_id: 7,
+            user_id: 1,
+            target: Target::Device,
+            session_token: Some(token.clone()),
+            transport: Arc::new(RecordingTransport {
+                sent: Arc::new(RwLock::new(Vec::new())),
+            }),
+            events,
+            approvals: RwLock::new(HashMap::new()),
+            inflight: RwLock::new(HashMap::new()),
+            mirror_lock: tokio::sync::Mutex::new(()),
+            next_id: std::sync::atomic::AtomicU64::new(1),
+        });
+
+        assert_eq!(
+            crate::agent_token::user_for_token(&pool, DbKind::Sqlite, &token).await,
+            Some(1)
+        );
+        live.revoke_token(&pool, DbKind::Sqlite).await;
+        assert_eq!(
+            crate::agent_token::user_for_token(&pool, DbKind::Sqlite, &token).await,
+            None,
+            "the credential must not survive the session"
+        );
+
+        pool.close().await;
     }
 
     #[tokio::test]

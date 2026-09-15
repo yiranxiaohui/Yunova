@@ -30,7 +30,10 @@ export type Channel = {
   name: string
   protocol: ChannelProtocol
   base_url: string
-  api_key: string
+  /** 掩码提示（如 `sk-1…cdef`），后端不再回显明文密钥。 */
+  api_key_hint: string
+  /** 是否已配置密钥，用于区分「未配置」和「已配置但隐藏」。 */
+  has_api_key: boolean
   enabled: boolean
   priority: number
 }

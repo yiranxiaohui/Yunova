@@ -43,6 +43,9 @@ v1 的「全局共享上游 + cost_chat / cost_image 两档定价」和 v2 的�
   上游失败或没返回 usage 就**不计费**，因此不再需要退款链路。
   图像按次、视频按秒仍是先扣后退（这些接口不返回 token）。
 - **多渠道（Channel）路由**：每种协议可配置 N 个上游 channel；按 `priority` 升序 fallback。
+  渠道的 `api_key` **只写不读**：`GET /api/admin/channels` 只返回 `api_key_hint`
+  （如 `sk-p…6789`）与 `has_api_key`，明文不离开服务端。编辑时该字段留空即表示
+  不修改，只能整个替换——一次管理员会话泄露不应等于全部上游 key 泄露。
 - **按模型定价白名单**：`model_pricing` 里没有的 model 直接 403 `NotWhitelisted`；
   价格填 0 表示放行不扣费。
 - **Ledger**：每条流水都带 `kind` / `protocol` / `model` 和
@@ -222,9 +225,20 @@ Agent 令牌是为此提供的 bearer 凭据：只绑定一个用户，数据库
 哈希，明文仅在创建时返回一次。它解析出的用户与 cookie 路径完全一致，因此
 现有的「白名单 → 授权 → 按 token 计费」链路一行都不用改。
 
+令牌分两类，区别只在生命周期：
+
+- **会话凭据**：启动云电脑/设备任务时由服务端自动签发（名称 `session-<id>`），
+  带 `expires_at`（默认 12 小时）。会话一结束就吊销——用户点停止、运行时退出、
+  设备断线、沙箱到达寿命上限、服务端重启后的孤儿清理，每条路径都会吊销。
+  TTL 只是兜底，正常路径不依赖它。
+- **手动令牌**：用户在令牌页自己创建，`expires_at` 为空，由该页面的撤销按钮管理。
+
+设备任务会把明文令牌下发到用户自己的机器上，这是设计使然（运行时在那边）。
+正因如此，它必须随会话消亡：否则用户可以把它抄出来长期使用。
+
 | 接口 | 说明 |
 | --- | --- |
-| `GET /api/agent/tokens` | 列出本人令牌（只返回前缀，不回显明文） |
+| `GET /api/agent/tokens` | 列出本人令牌（只返回前缀与 `expires_at`/`expired`，不回显明文） |
 | `POST /api/agent/tokens` | 创建令牌，响应中的 `token` 是唯一一次明文 |
 | `DELETE /api/agent/tokens/{id}` | 撤销（保留记录以便追溯，不物理删除） |
 | `POST /api/agent/runtime-config` | 生成运行时用的 `models.json` |
@@ -480,8 +494,8 @@ docker build -f docker/sandbox.Dockerfile -t yunova-sandbox:latest .
 生命周期：
 
 - 容器按会话命名（`yunova-agent-s<id>`），`--rm` 退出即删
-- `stop` 也会强制清除容器，幂等且可自愈
-- 启动时回收上次进程崩溃留下的孤儿容器
+- `stop` 会强制清除容器并立即吊销会话凭据，幂等且可自愈
+- 启动时回收上次进程崩溃留下的孤儿容器，并吊销其遗留的会话凭据
 - 超过 `YUNOVA_SANDBOX_MAX_LIFETIME` 后自动停止并吊销会话凭据
 
 目前云电脑**不按机时计费**，只按 token 计费（与对话模式一致）。
