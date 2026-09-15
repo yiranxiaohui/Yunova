@@ -11,6 +11,7 @@
 //! place.
 
 use std::convert::Infallible;
+use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -484,6 +485,27 @@ async fn set_status(pool: &Pool, kind: DbKind, session_id: i64, status: &str) {
 // runtime lifecycle
 // ---------------------------------------------------------------------------
 
+/// Port the gateway listens on, as seen from inside a sandbox.
+///
+/// A container reaches the host through its `host-gateway` alias, so only the
+/// port is needed; the hostname is supplied by the sandbox driver.
+fn gateway_port() -> u16 {
+    crate::runtime_env::var("YUNOVA_BIND")
+        .ok()
+        .and_then(|bind| bind.rsplit(':').next().and_then(|p| p.parse().ok()))
+        .unwrap_or(3000)
+}
+
+/// Base URL a sandboxed runtime should call.
+///
+/// Distinct from [`gateway_base_url`]: a container cannot reach a
+/// loopback-bound server through `127.0.0.1`, so the generated config must
+/// name the gateway alias the sandbox driver adds on its internal network.
+fn sandbox_gateway_url() -> String {
+    crate::runtime_env::var("YUNOVA_SANDBOX_GATEWAY_URL")
+        .unwrap_or_else(|_| format!("http://yunova-gateway:{}", gateway_port()))
+}
+
 /// Public origin the runtime should call back on.
 ///
 /// The runtime reaches the gateway over HTTP like any other client, so it
@@ -496,6 +518,21 @@ fn gateway_base_url() -> String {
             .unwrap_or_else(|_| "127.0.0.1:3000".to_string());
         format!("http://{bind}")
     })
+}
+
+/// Whether cloud sessions run in a container.
+///
+/// On by default: a work-mode task has a shell, and running that directly on
+/// the host would put every user's agent in the same filesystem and network
+/// namespace as the server. The escape hatch exists for development hosts
+/// without a usable container runtime.
+fn sandbox_enabled() -> bool {
+    !matches!(
+        crate::runtime_env::var("YUNOVA_SANDBOX")
+            .unwrap_or_default()
+            .as_str(),
+        "0" | "off" | "false"
+    )
 }
 
 /// Directory holding each session's private pi config.
@@ -558,8 +595,15 @@ async fn start_session(
             return (StatusCode::INTERNAL_SERVER_ERROR, "创建运行时凭据失败").into_response();
         }
     };
-    let models =
-        crate::agent_token::runtime_models_json(&prices, &gateway_base_url(), &token);
+    // A sandboxed runtime cannot reach a loopback-bound gateway, so the URL
+    // baked into its config differs by target.
+    let sandboxed = sandbox_enabled();
+    let base_url = if sandboxed {
+        sandbox_gateway_url()
+    } else {
+        gateway_base_url()
+    };
+    let models = crate::agent_token::runtime_models_json(&prices, &base_url, &token);
     if models["providers"]
         .as_object()
         .map(|m| m.is_empty())
@@ -586,15 +630,21 @@ async fn start_session(
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
 
-    let program = crate::runtime_env::var("YUNOVA_PI_BIN").unwrap_or_else(|_| "pi".to_string());
-    let (transport, frames) = match crate::agent_driver::spawn(crate::agent_driver::SpawnConfig {
-        program,
-        cwd,
-        agent_dir,
-        name: Some(format!("yunova-{sid}")),
-    })
-    .await
-    {
+    let spawned = if sandboxed {
+        let limits = crate::agent_sandbox::SandboxLimits::from_env();
+        crate::agent_sandbox::spawn(sid, &agent_dir, gateway_port(), &limits).await
+    } else {
+        let program =
+            crate::runtime_env::var("YUNOVA_PI_BIN").unwrap_or_else(|_| "pi".to_string());
+        crate::agent_driver::spawn(crate::agent_driver::SpawnConfig {
+            program,
+            cwd,
+            agent_dir,
+            name: Some(format!("yunova-{sid}")),
+        })
+        .await
+    };
+    let (transport, frames) = match spawned {
         Ok(v) => v,
         Err(e) => {
             crate::agent_token::revoke_by_plaintext(&installed.pool, installed.kind, &token).await;
@@ -602,7 +652,7 @@ async fn start_session(
         }
     };
 
-    state
+    let live = state
         .agent_sessions
         .attach(
             installed.pool.clone(),
@@ -615,7 +665,37 @@ async fn start_session(
         )
         .await;
 
-    Json(json!({ "ok": true, "reused": false })).into_response()
+    // Bound the sandbox's wall-clock lifetime. A session that is never stopped
+    // would otherwise hold its container, and its quota-spending credential,
+    // indefinitely. Retire both when the ceiling is reached.
+    if sandboxed {
+        let limits = crate::agent_sandbox::SandboxLimits::from_env();
+        let registry = state.agent_sessions.clone();
+        let pool = installed.pool.clone();
+        let kind = installed.kind;
+        let token = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(limits.max_lifetime_secs)).await;
+            // Only act if this exact session is still the live one; a restart
+            // in between would have replaced it.
+            if registry
+                .get(live.session_id)
+                .await
+                .is_some_and(|current| Arc::ptr_eq(&current, &live))
+            {
+                eprintln!(
+                    "[agent-sandbox] session {} hit its lifetime ceiling; stopping",
+                    live.session_id
+                );
+                registry.remove(live.session_id).await;
+                live.shutdown().await;
+                crate::agent_sandbox::remove_container(live.session_id).await;
+            }
+            crate::agent_token::revoke_by_plaintext(&pool, kind, &token).await;
+        });
+    }
+
+    Json(json!({ "ok": true, "reused": false, "sandboxed": sandboxed })).into_response()
 }
 
 /// Stop a session's runtime without deleting its transcript.
@@ -631,10 +711,19 @@ async fn stop_session(
     match state.agent_sessions.remove(sid).await {
         Some(live) => {
             live.shutdown().await;
+            // Also clear the container. `--rm` handles the normal exit, but a
+            // runtime that ignored stdin EOF would otherwise leak a container
+            // and hold its name against the next start.
+            crate::agent_sandbox::remove_container(sid).await;
             set_status(&installed.pool, installed.kind, sid, "idle").await;
             Json(json!({ "ok": true })).into_response()
         }
-        None => Json(json!({ "ok": true, "already_stopped": true })).into_response(),
+        None => {
+            // Nothing live in this process, but a container can still survive
+            // a crash; removing it keeps stop idempotent and self-healing.
+            crate::agent_sandbox::remove_container(sid).await;
+            Json(json!({ "ok": true, "already_stopped": true })).into_response()
+        }
     }
 }
 

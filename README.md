@@ -313,6 +313,63 @@ Anthropic 拼 `/v1/messages`），因此网关额外暴露了
 
 旧的工蜂（`/api/worker/*`）仍然可用，与新链路并行，历史会话不受影响。
 
+## 云电脑沙箱
+
+工作模式的 Agent 有 shell，所以云电脑任务跑在**每会话一个容器**里。隔离不是附加项：
+没有它就不能开自动批准，而逐条手动确认工具调用等于没有 Agent。
+
+镜像由 `docker/sandbox.Dockerfile` 构建，pi 版本在镜像里固定：
+
+```bash
+docker build -f docker/sandbox.Dockerfile -t yunova-sandbox:latest .
+```
+
+传输层没有变。`docker run -i` 的 stdio 与本地子进程一致，所以沙箱直接复用同一个
+`AgentTransport`，分帧、stderr 排水和关停行为完全相同——容器化是部署变更，不是协议变更。
+
+隔离策略（均已在 `docker inspect` 中验证生效）：
+
+| 措施 | 作用 |
+| --- | --- |
+| `--cap-drop ALL` + `--security-opt no-new-privileges` | 容器内无任何 capability，也无法重新获得 |
+| `--read-only` + tmpfs | 根文件系统只读；只有 `/workspace`、`/tmp`、`/home/agent` 可写且随容器销毁 |
+| `--pids-limit` | 挡 fork 炸弹——内存上限拦不住 |
+| `--memory` / `--cpus` | 资源上限 |
+| `--network yunova-sandbox`（`--internal`） | **无公网出口**，只能访问本站模型网关 |
+| `--user <服务进程 uid>` | 非 root；也让容器能读到 `0600` 的凭据文件 |
+| `models.json:ro` | Agent 可读但不能改写，无法把请求指到其他上游 |
+| 无 TTY | 防止 pty 控制字符污染 JSONL 流 |
+
+关于出网：**仅用 `--add-host` 是不够的**。它只给网关起了个名字，不限制路由；
+在默认 bridge 上沙箱仍能访问公网（实测过，返回 200），可用于外传数据或当代理。
+因此沙箱挂在专用的 `--internal` 网络上，它没有 masquerade 路由，但宿主仍可通过
+桥网关访问。
+
+生命周期：
+
+- 容器按会话命名（`yunova-agent-s<id>`），`--rm` 退出即删
+- `stop` 也会强制清除容器，幂等且可自愈
+- 启动时回收上次进程崩溃留下的孤儿容器
+- 超过 `YUNOVA_SANDBOX_MAX_LIFETIME` 后自动停止并吊销会话凭据
+
+目前云电脑**不按机时计费**，只按 token 计费（与对话模式一致）。
+
+| 环境变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `YUNOVA_SANDBOX` | 开启 | 设为 `0` 退回宿主进程（仅开发用，无隔离） |
+| `YUNOVA_SANDBOX_IMAGE` | `yunova-sandbox:latest` | 沙箱镜像 |
+| `YUNOVA_DOCKER_BIN` | `docker` | 可写 `sudo -n docker` 等包装命令 |
+| `YUNOVA_SANDBOX_CPUS` | `1` | CPU 上限 |
+| `YUNOVA_SANDBOX_MEMORY` | `1g` | 内存上限 |
+| `YUNOVA_SANDBOX_PIDS` | `256` | 进程数上限 |
+| `YUNOVA_SANDBOX_WORKSPACE_SIZE` | `1g` | 工作目录 tmpfs 大小 |
+| `YUNOVA_SANDBOX_MAX_LIFETIME` | `3600` | 沙箱最长存活秒数 |
+| `YUNOVA_SANDBOX_GATEWAY_URL` | `http://yunova-gateway:<port>` | 容器内看到的网关地址 |
+
+部署注意：Docker socket 等于 root 权限。要么把服务进程的用户加入 `docker` 组，
+要么用 `YUNOVA_DOCKER_BIN="sudo -n docker"`；两者都等于信任该进程。生产环境建议把沙箱
+宿主与主服务分开，并在宿主防火墙上叠加出网限制。
+
 ## 部署
 
 正式版本镜像 tag：`docker.yunnet.top/github/yiranxiaohui/yunova:X.Y.Z`。

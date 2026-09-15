@@ -93,18 +93,31 @@ pub async fn spawn(
         .env("PI_CODING_AGENT_DIR", &config.agent_dir)
         // No update checks or telemetry from a server-side runtime.
         .env("PI_OFFLINE", "1")
-        .env("PI_SKIP_VERSION_CHECK", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
+        .env("PI_SKIP_VERSION_CHECK", "1");
     if let Some(name) = &config.name {
         cmd.arg("--name").arg(name);
     }
 
+    spawn_piped(cmd, &config.program).await
+}
+
+/// Attach to an already-configured command over piped stdio.
+///
+/// Shared by the host runtime above and by the container driver, which only
+/// differs in the command it builds (`docker run -i …`). Keeping one pump
+/// means framing, stderr draining and shutdown behave identically in both.
+pub async fn spawn_piped(
+    mut cmd: Command,
+    label: &str,
+) -> Result<(Arc<SubprocessTransport>, mpsc::Receiver<Value>), String> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("启动 Agent 运行时失败（{}）: {e}", config.program))?;
+        .map_err(|e| format!("启动 Agent 运行时失败（{label}）: {e}"))?;
 
     let stdin = child.stdin.take().ok_or("无法获取运行时标准输入")?;
     let stdout = child.stdout.take().ok_or("无法获取运行时标准输出")?;

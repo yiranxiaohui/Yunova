@@ -2,6 +2,7 @@ mod admin;
 mod agent_api;
 mod agent_driver;
 mod agent_rpc;
+mod agent_sandbox;
 mod agent_session;
 mod agent_token;
 mod auth;
@@ -1425,6 +1426,10 @@ async fn main() {
                 // socket, so nothing survives a restart. Clear the `running`
                 // rows or those sessions would refuse new prompts forever.
                 agent_session::reset_running_sessions(&s.pool, s.kind).await;
+                // Sandbox containers are named per session, so a crashed
+                // process leaves them holding both their names and their
+                // resources. Clear them before any session can start.
+                agent_sandbox::reap_orphans().await;
                 *state.installed.write().await = Some(s.clone());
                 println!("  database: {} ({})", s.kind.as_str(), url);
             }
