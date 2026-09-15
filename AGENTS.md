@@ -5,11 +5,20 @@ checkout is `/home/orca/projects/Yunova`, and task worktrees belong under
 `/home/orca/worktrees/Yunova`. New builds use `yunova` and
 `ghcr.io/yiranxiaohui/yunova` (mirror: `docker.yunnet.top/github/yiranxiaohui/yunova`).
 
-The source rename does not relocate the existing production deployment:
-on `root@114.66.55.93` it still uses `/opt/NovaChat/docker-compose.yml`,
-service/container `novachat`, and host port `4300`. Inspect these live targets
-before deploying. Preserve existing database paths and mounts when switching
-to a Yunova image; do not assume `/opt/Yunova` already exists.
+Production was migrated on 2026-09-15 to a dedicated LXC and now runs on
+`root@10.1.51.1` from `/opt/yunova/docker-compose.yml`, service/container
+`yunova`, host port `4300`, with persistent state in the bind mount
+`/opt/yunova/data`. The former host `114.66.55.93` no longer runs it, and
+`/opt/NovaChat` there was removed. Inspect these live targets before deploying,
+and preserve existing database paths and mounts when updating the image.
+
+Two deployment details are easy to break. The Compose file pins
+`extra_hosts: hz.yunnet.top:10.1.10.1`, because the LAN resolver hands back a
+fake-ip for the S3 endpoint and TLS then fails; keep that mapping. The image is
+selected by `YUNOVA_IMAGE` in `/opt/yunova/.env`, so update that entry rather
+than editing the Compose file. The public entry point `https://chat.yunnet.top`
+still resolves to `114.66.55.93`, whose OpenResty proxies to `10.1.51.1:4300`;
+the user manages that reverse proxy himself.
 
 ## Release and deployment
 
@@ -19,9 +28,11 @@ When the user asks to publish a release, remember to complete the full flow:
 2. Publish the tag and GitHub Release, then wait for the container release
    workflow to succeed.
 3. Deploy directly from the current trusted host with SSH to
-   `root@114.66.55.93`; do not delegate production deployment to GitHub Actions.
-4. Back up the current deployment's Compose file and SQLite database, update the
-   application image to the release tag, and recreate only its application service.
+   `root@10.1.51.1`; do not delegate production deployment to GitHub Actions.
+4. Back up the current deployment's Compose file and SQLite database into
+   `/opt/yunova/backups`, update `YUNOVA_IMAGE` to the release tag, and
+   recreate only the application service with
+   `docker compose up -d --no-deps yunova`.
 5. Verify the container is healthy with zero restarts, HTTP returns 200,
    migrations and database integrity pass, and recent logs have no critical
    errors before reporting completion.
