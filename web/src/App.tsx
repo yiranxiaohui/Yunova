@@ -39,11 +39,21 @@ function Protected({ children }: { children: React.ReactNode }) {
   return <>{children}</>
 }
 
-function Ready({ children }: { children: React.ReactNode }) {
+/** `/`、`/c/:id` 和 `/w/:id` 必须用同一个组件类型包裹。
+ *
+ * 在首页发送第一条消息时，ChatPage 会先建会话再 navigate 到
+ * `/c/<id>`。若两条路由的 element 包裹类型不同（以前分别是 `Ready`
+ * 和 `Protected`），React 会当成不同的子树——卸载并重新挂载 ChatPage，
+ * 刚发出的消息、进行中的流以及「跳过首次加载」的 ref 全部丢失，
+ * 界面因此变回空会话，只有刷新才能看到已保存的记录。 */
+function ChatRoute({ requireAuth = false }: { requireAuth?: boolean }) {
   const { state } = useAuth()
   if (state.status === "loading") return <Loading />
   if (state.status === "setup") return <Navigate to="/setup" replace />
-  return <>{children}</>
+  // 首页允许游客自带密钥对话；具体会话属于账号，必须登录。
+  if (requireAuth && state.status === "anon")
+    return <Navigate to="/login" replace />
+  return <ChatPage />
 }
 
 function AnonOnly({ children }: { children: React.ReactNode }) {
@@ -91,22 +101,8 @@ export default function App() {
                 </AnonOnly>
               }
             />
-            <Route
-              path="/"
-              element={
-                <Ready>
-                  <ChatPage />
-                </Ready>
-              }
-            />
-            <Route
-              path="/c/:id"
-              element={
-                <Protected>
-                  <ChatPage />
-                </Protected>
-              }
-            />
+            <Route path="/" element={<ChatRoute />} />
+            <Route path="/c/:id" element={<ChatRoute requireAuth />} />
             <Route
               path="/admin"
               element={
@@ -187,14 +183,7 @@ export default function App() {
             />
             <Route path="/plaza" element={<Navigate to="/library" replace />} />
 
-            <Route
-              path="/w/:id"
-              element={
-                <Protected>
-                  <ChatPage />
-                </Protected>
-              }
-            />
+            <Route path="/w/:id" element={<ChatRoute requireAuth />} />
             <Route path="/s/:token" element={<SharedConversationPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
