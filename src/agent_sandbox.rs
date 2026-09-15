@@ -235,6 +235,19 @@ pub fn build_run_args(
     args.push("-e".into());
     args.push("YUNOVA_MODELS_SRC=/run/yunova/models.json".into());
 
+    // Session extensions, also read-only. Without this a sandbox could not be
+    // given a `tool_call` approval gate at all: the runtime only discovers
+    // extensions under its config dir, and that dir is an in-container tmpfs.
+    // Read-only matters because an extension can block tool calls, so the
+    // agent must not be able to edit away its own guardrails.
+    let ext_dir = agent_dir.join("extensions");
+    if ext_dir.is_dir() {
+        args.push("-v".into());
+        args.push(format!("{}:/run/yunova/extensions:ro", ext_dir.display()));
+        args.push("-e".into());
+        args.push("YUNOVA_EXT_SRC=/run/yunova/extensions".into());
+    }
+
     // --- network ---
     // An internal network with no route off the host, plus a name for the
     // gateway. The sandbox can make metered model calls and nothing else:
@@ -258,6 +271,9 @@ pub fn build_run_args(
     args.push(
         "set -e; mkdir -p \"$PI_CODING_AGENT_DIR\"; \
          cp \"$YUNOVA_MODELS_SRC\" \"$PI_CODING_AGENT_DIR/models.json\"; \
+         if [ -n \"$YUNOVA_EXT_SRC\" ] && [ -d \"$YUNOVA_EXT_SRC\" ]; then \
+           cp -r \"$YUNOVA_EXT_SRC\" \"$PI_CODING_AGENT_DIR/extensions\"; \
+         fi; \
          exec pi --mode rpc --no-session"
             .into(),
     );
@@ -489,6 +505,45 @@ mod tests {
         // pi must own stdio and receive the stop signal directly.
         let last = args_for_test().last().cloned().unwrap_or_default();
         assert!(last.contains("exec pi --mode rpc --no-session"));
+    }
+
+    /// A sandbox must be able to carry a `tool_call` approval gate. The
+    /// runtime only discovers extensions under its config dir, which is an
+    /// in-container tmpfs, so they have to be staged in from a bind mount.
+    #[test]
+    fn session_extensions_are_staged_in_read_only_when_present() {
+        let dir = std::env::temp_dir().join(format!(
+            "yunova-ext-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        std::fs::create_dir_all(dir.join("extensions")).unwrap();
+
+        let joined = build_run_args(
+            7,
+            &SandboxLimits::default(),
+            &dir,
+            "172.18.0.1",
+            3000,
+        )
+        .join(" ");
+        assert!(
+            joined.contains(&format!("{}:/run/yunova/extensions:ro", dir.join("extensions").display())),
+            "expected a read-only extensions bind, got: {joined}"
+        );
+        // An agent that could edit its own guardrails would not be gated.
+        assert!(joined.contains("/run/yunova/extensions:ro"));
+        assert!(joined.contains("cp -r \"$YUNOVA_EXT_SRC\""));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn no_extension_mount_is_added_when_the_session_has_none() {
+        // The common case must not reference a path that does not exist, or
+        // docker refuses to start the container.
+        let joined = args_for_test().join(" ");
+        assert!(!joined.contains("/run/yunova/extensions"));
     }
 
     #[test]

@@ -16,6 +16,7 @@ import { Toaster } from "@/components/ui/sonner"
 
 const VideoEditorPage = lazy(() => import("@/pages/VideoEditorPage"))
 const MediaLibraryPage = lazy(() => import("@/pages/MediaLibraryPage"))
+const AgentTaskPage = lazy(() => import("@/pages/AgentTaskPage"))
 
 function Loading() {
   return (
@@ -103,6 +104,25 @@ export default function App() {
             />
             <Route path="/" element={<ChatRoute />} />
             <Route path="/c/:id" element={<ChatRoute requireAuth />} />
+            {/* Work mode. `/t` composes a new task, `/t/:id` opens one; both
+                are wrapped identically so creating a task from `/t` does not
+                remount the page and lose the prompt in flight. */}
+            <Route
+              path="/t"
+              element={
+                <Protected>
+                  <AgentTaskPage />
+                </Protected>
+              }
+            />
+            <Route
+              path="/t/:id"
+              element={
+                <Protected>
+                  <AgentTaskPage />
+                </Protected>
+              }
+            />
             <Route
               path="/admin"
               element={

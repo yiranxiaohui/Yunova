@@ -69,6 +69,9 @@ const EVENT_BUFFER: usize = 512;
 pub enum SessionEvent {
     /// A runtime frame to render, forwarded verbatim.
     Frame(Value),
+    /// A blocking dialog was answered, by this client or another one. Lets
+    /// every subscriber retire the request instead of showing a stale card.
+    ApprovalResolved { request_id: String },
     /// The agent fully settled (no retry or queued work remains).
     Settled,
     /// The transport died; the session is no longer live.
@@ -144,7 +147,15 @@ impl LiveSession {
         if !existed {
             return Err("该审批请求已处理或已过期".into());
         }
-        self.notify(answer).await
+        self.notify(answer).await?;
+        // Tell every other client the request is settled. The runtime emits no
+        // event of its own when a dialog is answered, so without this a second
+        // device keeps showing a card that can no longer be acted on until it
+        // reloads — which defeats answering from whichever device is at hand.
+        let _ = self.events.send(SessionEvent::ApprovalResolved {
+            request_id: request_id.to_string(),
+        });
+        Ok(())
     }
 
     pub async fn pending_approvals(&self) -> Vec<Value> {
@@ -532,6 +543,30 @@ mod tests {
         assert_eq!(lines.len(), 1);
         let v: Value = serde_json::from_str(lines[0].trim()).unwrap();
         assert_eq!(v["confirmed"], true);
+    }
+
+    #[tokio::test]
+    async fn resolving_an_approval_tells_every_other_client() {
+        // The runtime emits nothing when a dialog is answered, so a second
+        // device would keep showing an unactionable card without this event.
+        let sent = Arc::new(RwLock::new(Vec::new()));
+        let (live, _events) = live_for_test(Arc::new(RecordingTransport { sent }));
+        live.approvals.write().await.insert(
+            "u1".into(),
+            PendingApproval {
+                request: json!({"id":"u1","method":"confirm"}),
+            },
+        );
+        let mut other = live.subscribe();
+
+        live.resolve_approval("u1", agent_rpc::extension_ui_confirm("u1", true))
+            .await
+            .unwrap();
+
+        match other.recv().await.unwrap() {
+            SessionEvent::ApprovalResolved { request_id } => assert_eq!(request_id, "u1"),
+            other => panic!("expected ApprovalResolved, got {other:?}"),
+        }
     }
 
     #[tokio::test]

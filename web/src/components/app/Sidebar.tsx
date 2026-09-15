@@ -12,6 +12,8 @@ import {
   MoreHorizontal,
   Pencil,
   Plus,
+  Cloud,
+  Laptop,
   Search,
   Scissors,
   Shield,
@@ -25,6 +27,7 @@ import { Input } from "@/components/ui/input"
 import { conversationsApi, type Conversation } from "@/lib/conversations"
 import { searchApi, type SearchHit } from "@/lib/search"
 import { workerApi, type WorkerSession } from "@/lib/worker"
+import { agentApi, type AgentSession, type AgentTarget } from "@/lib/agent"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
 import { useConfirm } from "@/lib/confirm-context"
@@ -32,7 +35,9 @@ import { BrandMark } from "./BrandMark"
 import { ProfileDialog } from "./ProfileDialog"
 
 type Props = {
-  reloadKey: number
+  /** Bump to force the session list to reload. Optional so pages that do not
+   *  mutate the list (for example the work-mode task page) can omit it. */
+  reloadKey?: number
   onCreated?: (c: Conversation) => void
   onOpenLibrary?: () => void
   onNewGuest?: () => void
@@ -44,9 +49,16 @@ type Props = {
 type SidebarItem =
   | { kind: "chat"; id: number; title: string; updated_at: string }
   | { kind: "worker"; id: number; title: string; updated_at: string }
+  | { kind: "agent"; id: number; title: string; updated_at: string; target: AgentTarget }
 
 function relativeTime(iso: string): string {
-  const d = new Date(iso.replace(" ", "T") + (iso.endsWith("Z") ? "" : "Z"))
+  // Timestamps arrive in two shapes: SQLite's `datetime('now')` ("2026-09-15
+  // 09:03:43", implicitly UTC) and RFC 3339 with an explicit offset. Appending
+  // "Z" unconditionally corrupts the latter into an unparseable string, which
+  // surfaced as "Invalid Date" in the list.
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(iso)
+  const d = new Date(iso.replace(" ", "T") + (hasZone ? "" : "Z"))
+  if (Number.isNaN(d.getTime())) return ""
   const diff = Date.now() - d.getTime()
   const m = Math.floor(diff / 60000)
   if (m < 1) return "刚刚"
@@ -70,6 +82,7 @@ export function Sidebar({
   const activeId = paramId ? Number(paramId) : null
   const location = useLocation()
   const activeWorker = location.pathname.startsWith("/w/")
+  const activeAgent = location.pathname.startsWith("/t/")
   const nav = useNavigate()
   const auth = useAuth()
   const user = auth.state.status === "authed" ? auth.state.user : null
@@ -101,8 +114,9 @@ export function Sidebar({
     Promise.all([
       conversationsApi.list().catch(() => [] as Conversation[]),
       workerApi.sessions().catch(() => [] as WorkerSession[]),
+      agentApi.sessions().catch(() => [] as AgentSession[]),
     ])
-      .then(([convs, sessions]) => {
+      .then(([convs, sessions, agents]) => {
         if (cancelled) return
         const merged: SidebarItem[] = [
           ...convs.map((c) => ({
@@ -116,6 +130,13 @@ export function Sidebar({
             id: s.id,
             title: s.title,
             updated_at: s.updated_at,
+          })),
+          ...agents.map((s) => ({
+            kind: "agent" as const,
+            id: s.id,
+            title: s.title,
+            updated_at: s.updated_at,
+            target: s.target,
           })),
         ].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
         setItems(merged)
@@ -205,6 +226,11 @@ export function Sidebar({
     try {
       if (c.kind === "worker") {
         await workerApi.renameSession(c.id, title)
+      } else if (c.kind === "agent") {
+        // Agent tasks have no rename endpoint yet; their title comes from the
+        // first prompt. Skip rather than show a misleading success.
+        setError("工作任务暂不支持重命名")
+        return
       } else {
         await conversationsApi.update(c.id, { title })
       }
@@ -227,12 +253,22 @@ export function Sidebar({
     try {
       if (c.kind === "worker") {
         await workerApi.removeSession(c.id)
+      } else if (c.kind === "agent") {
+        // Stopping releases the runtime and its container. The transcript is
+        // kept: there is no delete endpoint yet, and silently dropping the
+        // row from the list would hide work the user can still open.
+        await agentApi.stop(c.id)
+        setError("已停止该任务的运行时；记录仍可查看")
+        return
       } else {
         await conversationsApi.remove(c.id)
       }
       setItems((s) => s.filter((x) => !(x.kind === c.kind && x.id === c.id)))
+      // `agent` returned above, so only chat and worker reach here.
       const isActive =
-        c.kind === "worker" ? activeWorker && activeId === c.id : !activeWorker && activeId === c.id
+        c.kind === "worker"
+          ? activeWorker && activeId === c.id
+          : !activeWorker && !activeAgent && activeId === c.id
       if (isActive) nav("/")
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -272,6 +308,21 @@ export function Sidebar({
             <Plus className="size-4" />
           </span>
           <span className="font-semibold">开启新对话</span>
+        </Button>
+
+        {/* Work mode is a peer of chat, not a setting inside it: it starts an
+            agent that can run commands, so it gets its own entry point. */}
+        <Button
+          asChild
+          variant="outline"
+          className="h-10 w-full justify-start gap-2.5 rounded-xl px-3.5"
+        >
+          <Link to="/t" onClick={() => onNavigate?.()} title="启动可执行命令的 Agent 任务">
+            <span className="grid size-6 place-items-center rounded-md bg-primary/10 text-primary">
+              <Cloud className="size-4" />
+            </span>
+            <span className="font-semibold">新工作任务</span>
+          </Link>
         </Button>
 
         <div className="grid grid-cols-2 gap-2">
@@ -377,9 +428,12 @@ export function Sidebar({
         )}
         <ul className="flex flex-col gap-1">
           {filtered.map((c) => {
-            const active = activeWorker
-              ? c.kind === "worker" && activeId === c.id
-              : c.kind === "chat" && activeId === c.id
+            const active =
+              activeWorker
+                ? c.kind === "worker" && activeId === c.id
+                : activeAgent
+                  ? c.kind === "agent" && activeId === c.id
+                  : c.kind === "chat" && activeId === c.id
             const itemKey = `${c.kind}-${c.id}`
             return (
               <li key={itemKey} className="relative">
@@ -395,7 +449,13 @@ export function Sidebar({
                     <span className="absolute left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-sidebar-primary" />
                   )}
                   <Link
-                    to={c.kind === "worker" ? `/w/${c.id}` : `/c/${c.id}`}
+                    to={
+                      c.kind === "worker"
+                        ? `/w/${c.id}`
+                        : c.kind === "agent"
+                          ? `/t/${c.id}`
+                          : `/c/${c.id}`
+                    }
                     className="min-w-0 flex-1 px-3 py-2.5"
                     title={c.title}
                     onClick={() => {
@@ -407,6 +467,12 @@ export function Sidebar({
                       {c.kind === "worker" && (
                         <Bot className="size-3.5 shrink-0 text-primary" />
                       )}
+                      {c.kind === "agent" &&
+                        (c.target === "cloud" ? (
+                          <Cloud className="size-3.5 shrink-0 text-primary" />
+                        ) : (
+                          <Laptop className="size-3.5 shrink-0 text-primary" />
+                        ))}
                       <span className="truncate">{c.title}</span>
                     </div>
                     <div className="mt-1 truncate text-[10px] text-muted-foreground">

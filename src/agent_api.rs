@@ -321,6 +321,11 @@ async fn session_events(
                     let data = serde_json::to_string(&v).unwrap_or_else(|_| "{}".into());
                     yield Ok(Event::default().event(name).data(data));
                 }
+                Ok(SessionEvent::ApprovalResolved { request_id }) => {
+                    let data = serde_json::to_string(&json!({ "id": request_id }))
+                        .unwrap_or_else(|_| "{}".into());
+                    yield Ok(Event::default().event("approval_resolved").data(data));
+                }
                 Ok(SessionEvent::Settled) => {
                     yield Ok(Event::default().event("settled").data("{}"));
                 }
