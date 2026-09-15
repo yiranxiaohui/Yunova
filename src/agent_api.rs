@@ -525,6 +525,17 @@ fn gateway_base_url() -> String {
     })
 }
 
+/// Base URL a runtime on the user's own machine should call.
+///
+/// A personal machine is on a different network, so neither loopback nor the
+/// sandbox's container alias resolves there. Defaults to the public origin the
+/// browser already uses.
+fn device_gateway_url() -> String {
+    crate::runtime_env::var("YUNOVA_DEVICE_GATEWAY_URL")
+        .or_else(|_| crate::runtime_env::var("YUNOVA_PUBLIC_URL"))
+        .unwrap_or_else(|_| gateway_base_url())
+}
+
 /// Whether cloud sessions run in a container.
 ///
 /// On by default: a work-mode task has a shell, and running that directly on
@@ -557,18 +568,14 @@ async fn start_session(
     Extension(user): Extension<CurrentUser>,
     Path(sid): Path<i64>,
 ) -> Response {
-    let (target, _device_id) =
+    let (target, session_device_id) =
         match owned_session(&installed.pool, installed.kind, user.id, sid).await {
             Ok(v) => v,
             Err(r) => return r,
         };
-    if Target::parse(&target) != Some(Target::Cloud) {
-        return (
-            StatusCode::BAD_REQUEST,
-            "本地电脑任务由桌面客户端接入，不在服务器上启动",
-        )
-            .into_response();
-    }
+    let Some(target) = Target::parse(&target) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "会话目标无法识别").into_response();
+    };
 
     // Reuse a warm runtime instead of starting a second one for the same
     // session, which would fork the transcript.
@@ -602,11 +609,16 @@ async fn start_session(
     };
     // A sandboxed runtime cannot reach a loopback-bound gateway, so the URL
     // baked into its config differs by target.
-    let sandboxed = sandbox_enabled();
-    let base_url = if sandboxed {
-        sandbox_gateway_url()
-    } else {
-        gateway_base_url()
+    // The gateway URL baked into the runtime's config depends on where that
+    // runtime lives: a container reaches us by its network alias, a personal
+    // machine over the public origin, a host process over loopback.
+    let sandboxed = target == Target::Cloud && sandbox_enabled();
+    let base_url = match target {
+        // A device is on someone's home network, so it needs the address the
+        // browser uses, not a loopback or container-internal one.
+        Target::Device => device_gateway_url(),
+        Target::Cloud if sandboxed => sandbox_gateway_url(),
+        Target::Cloud => gateway_base_url(),
     };
     let models = crate::agent_token::runtime_models_json(&prices, &base_url, &token);
     if models["providers"]
@@ -620,6 +632,68 @@ async fn start_session(
             "管理员尚未开放任何对话模型，无法启动 Agent",
         )
             .into_response();
+    }
+
+    // --- device target: the runtime lives on the user's own machine ---
+    //
+    // Nothing is spawned here. The desktop client owns its workspace and
+    // approval policy, so the server only asks it to start a runtime and then
+    // relays frames; it never tells the machine what to execute.
+    if target == Target::Device {
+        let Some(device_id) = session_device_id else {
+            crate::agent_token::revoke_by_plaintext(&installed.pool, installed.kind, &token).await;
+            return (StatusCode::BAD_REQUEST, "该任务没有绑定设备").into_response();
+        };
+        let Some(device) = state.agent_devices.get(device_id).await else {
+            crate::agent_token::revoke_by_plaintext(&installed.pool, installed.kind, &token).await;
+            return (
+                StatusCode::CONFLICT,
+                "该电脑当前不在线，请先打开桌面客户端",
+            )
+                .into_response();
+        };
+        // Defence in depth: the session's owner was already checked, but a
+        // device must never be driven on behalf of another account.
+        if device.user_id != user.id {
+            crate::agent_token::revoke_by_plaintext(&installed.pool, installed.kind, &token).await;
+            return (StatusCode::NOT_FOUND, "设备不存在或无权访问").into_response();
+        }
+
+        // Route the device's frames for this session back into the pump before
+        // asking it to start, so nothing the runtime emits can be lost.
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::channel::<serde_json::Value>(256);
+        if !crate::agent_device::register_session_frames(&state, device_id, sid, frame_tx).await {
+            crate::agent_token::revoke_by_plaintext(&installed.pool, installed.kind, &token).await;
+            return (StatusCode::CONFLICT, "设备连接已断开").into_response();
+        }
+
+        if let Err(e) = device
+            .send(crate::agent_device::ToDevice::StartRuntime {
+                session_id: sid,
+                models_json: models,
+            })
+            .await
+        {
+            crate::agent_token::revoke_by_plaintext(&installed.pool, installed.kind, &token).await;
+            return (StatusCode::BAD_GATEWAY, e).into_response();
+        }
+
+        let transport = std::sync::Arc::new(crate::agent_device::DeviceTransport::new(
+            device, sid,
+        ));
+        state
+            .agent_sessions
+            .attach(
+                installed.pool.clone(),
+                installed.kind,
+                sid,
+                user.id,
+                Target::Device,
+                transport,
+                frame_rx,
+            )
+            .await;
+        return Json(json!({ "ok": true, "reused": false, "sandboxed": false })).into_response();
     }
 
     let root = session_runtime_root(&state.data_dir).join(format!("s{sid}"));

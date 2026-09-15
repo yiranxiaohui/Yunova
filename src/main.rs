@@ -1,5 +1,6 @@
 mod admin;
 mod agent_api;
+mod agent_device;
 mod agent_driver;
 mod agent_rpc;
 mod agent_sandbox;
@@ -86,6 +87,22 @@ pub struct AppState {
     /// socket, neither of which survives a restart; durable state lives in
     /// `agent_sessions` / `agent_entries`.
     pub agent_sessions: crate::agent_session::SessionRegistry,
+    /// Connected desktop clients, keyed by device id.
+    pub agent_devices: crate::agent_device::DeviceRegistry,
+    /// Per-device routing table from session id to that session's frame pump.
+    /// One socket multiplexes every session running on that machine, so
+    /// inbound frames need a way back to the right session.
+    #[allow(clippy::type_complexity)]
+    pub agent_device_frames: std::sync::Arc<
+        RwLock<
+            std::collections::HashMap<
+                i64,
+                std::sync::Arc<
+                    RwLock<std::collections::HashMap<i64, tokio::sync::mpsc::Sender<serde_json::Value>>>,
+                >,
+            >,
+        >,
+    >,
     /// Bounds CPU-heavy FFmpeg trim/merge work across all workflow runs.
     pub media_process_slots: std::sync::Arc<tokio::sync::Semaphore>,
     /// Human-in-the-loop approval map: call_id -> oneshot used by the agent
@@ -1249,6 +1266,7 @@ fn build_router(state: AppState) -> Router {
         .merge(profile::routes())
         .merge(admin::routes())
         .merge(agent_api::routes())
+        .merge(agent_device::routes())
         .merge(agent_token::routes())
         .merge(quota::user_routes())
         .merge(quota::admin_routes())
@@ -1297,6 +1315,7 @@ fn build_router(state: AppState) -> Router {
         .merge(images::public_routes())
         .merge(sharing::public_routes())
         .merge(worker::public_routes())
+        .merge(agent_device::public_routes())
         .merge(videos::public_routes())
         .merge(video_editor::public_routes());
 
@@ -1388,6 +1407,8 @@ async fn main() {
         },
         workers: crate::worker::WorkerRegistry::new(),
         agent_sessions: crate::agent_session::SessionRegistry::new(),
+        agent_devices: crate::agent_device::DeviceRegistry::new(),
+        agent_device_frames: Default::default(),
         media_process_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
             crate::runtime_env::var("YUNOVA_MEDIA_CONCURRENCY")
                 .ok()

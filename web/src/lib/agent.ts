@@ -151,6 +151,50 @@ export const agentApi = {
 }
 
 // ---------------------------------------------------------------------------
+// devices
+// ---------------------------------------------------------------------------
+
+/** A machine the user has paired for local execution. */
+export interface AgentDevice {
+  id: number
+  name: string
+  platform: string | null
+  last_seen_at: string | null
+  revoked: boolean
+  /** Whether the desktop client is connected right now. Liveness comes from
+   *  an open socket, not a stored row, so a task cannot start without it. */
+  online: boolean
+}
+
+export async function listDevices(): Promise<AgentDevice[]> {
+  return jsonOrThrow(
+    await fetch("/api/agent/devices", { credentials: "same-origin" })
+  )
+}
+
+/** Issue a pairing code. The plaintext is returned exactly once. */
+export async function pairDevice(name?: string): Promise<{ code: string; name: string }> {
+  return jsonOrThrow(
+    await fetch("/api/agent/devices/pair", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+      credentials: "same-origin",
+    })
+  )
+}
+
+/** Revoke a machine, disconnecting it immediately. */
+export async function revokeDevice(id: number): Promise<void> {
+  await okOrThrow(
+    await fetch(`/api/agent/devices/${id}`, {
+      method: "DELETE",
+      credentials: "same-origin",
+    })
+  )
+}
+
+// ---------------------------------------------------------------------------
 // live event stream
 // ---------------------------------------------------------------------------
 

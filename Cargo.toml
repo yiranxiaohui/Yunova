@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "worker"]
+members = [".", "worker", "desktop"]
 
 [package]
 name = "yunova"

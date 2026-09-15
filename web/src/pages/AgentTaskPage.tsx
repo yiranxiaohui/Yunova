@@ -1,15 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
-import { Loader2, Menu, Send, Square } from "lucide-react"
+import { Loader2, Menu, Laptop, Send, Square } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { Sidebar } from "@/components/app/Sidebar"
 import { AgentTranscript, ApprovalCard } from "@/components/app/AgentTranscript"
+import { DeviceDialog } from "@/components/app/DeviceDialog"
 import { ModeSelector, TargetBadge, type DeviceOption } from "@/components/app/ModeSelector"
 import {
   agentApi,
   entriesToItems,
+  listDevices,
   subscribeAgentSession,
   type AgentItem,
   type AgentSession,
@@ -47,8 +49,9 @@ export default function AgentTaskPage() {
   const [input, setInput] = useState("")
   const [target, setTarget] = useState<AgentTarget>("cloud")
   const [deviceId, setDeviceId] = useState<number | null>(null)
-  const [devices] = useState<DeviceOption[]>([])
+  const [devices, setDevices] = useState<DeviceOption[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [devicesOpen, setDevicesOpen] = useState(false)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   // Latest mirrored entry id, used as the incremental cursor.
@@ -87,6 +90,35 @@ export default function AgentTaskPage() {
       setItems((prev) => (full ? fresh : [...prev, ...fresh]))
     } catch (e) {
       toast.error(`读取会话记录失败：${(e as Error).message}`)
+    }
+  }, [])
+
+  // Load the user's machines so the picker can offer them.
+  //
+  // Refreshed on a timer because liveness comes from an open socket, not from
+  // a stored row: a laptop that just woke up should become selectable without
+  // the user reloading the page.
+  useEffect(() => {
+    let cancelled = false
+    const load = () => {
+      listDevices()
+        .then((ds) => {
+          if (cancelled) return
+          setDevices(
+            ds
+              .filter((d) => !d.revoked)
+              .map((d) => ({ id: d.id, name: d.name, online: d.online }))
+          )
+        })
+        .catch(() => {
+          /* the picker still works with cloud only */
+        })
+    }
+    load()
+    const timer = setInterval(load, 15000)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
     }
   }, [])
 
@@ -366,18 +398,31 @@ export default function AgentTaskPage() {
           <div className="mx-auto w-full max-w-3xl space-y-2">
             {/* The target cannot change once a session exists: its runtime and
                 transcript already belong to one machine. */}
-            <ModeSelector
-              mode="work"
-              onModeChange={(m) => {
-                if (m === "chat") nav("/")
-              }}
-              target={session?.target ?? target}
-              onTargetChange={setTarget}
-              devices={devices}
-              deviceId={deviceId}
-              onDeviceChange={setDeviceId}
-              disabled={sessionId != null}
-            />
+            <div className="flex items-center justify-between gap-2">
+              <ModeSelector
+                mode="work"
+                onModeChange={(m) => {
+                  if (m === "chat") nav("/")
+                }}
+                target={session?.target ?? target}
+                onTargetChange={setTarget}
+                devices={devices}
+                deviceId={deviceId}
+                onDeviceChange={setDeviceId}
+                disabled={sessionId != null}
+              />
+              {/* Pairing lives next to the picker: "no local computers" is
+                  only actionable if the fix is one click away. */}
+              <Button
+                variant="ghost"
+                size="sm"
+                className="shrink-0 text-xs"
+                onClick={() => setDevicesOpen(true)}
+              >
+                <Laptop className="size-3.5" />
+                本地电脑
+              </Button>
+            </div>
             <form
               className="flex items-end gap-2"
               onSubmit={(e) => {
@@ -414,6 +459,8 @@ export default function AgentTaskPage() {
           </div>
         </div>
       </main>
+
+      <DeviceDialog open={devicesOpen} onOpenChange={setDevicesOpen} />
     </div>
   )
 }
