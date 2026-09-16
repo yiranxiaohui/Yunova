@@ -109,6 +109,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (43, include_str!("../migrations/sqlite/0043_agent_sessions.sql")),
     (44, include_str!("../migrations/sqlite/0044_drop_workers.sql")),
     (45, include_str!("../migrations/sqlite/0045_agent_token_expiry.sql")),
+    (46, include_str!("../migrations/sqlite/0046_device_fingerprint.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -153,6 +154,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (43, include_str!("../migrations/mysql/0043_agent_sessions.sql")),
     (44, include_str!("../migrations/mysql/0044_drop_workers.sql")),
     (45, include_str!("../migrations/mysql/0045_agent_token_expiry.sql")),
+    (46, include_str!("../migrations/mysql/0046_device_fingerprint.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -197,6 +199,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (43, include_str!("../migrations/postgres/0043_agent_sessions.sql")),
     (44, include_str!("../migrations/postgres/0044_drop_workers.sql")),
     (45, include_str!("../migrations/postgres/0045_agent_token_expiry.sql")),
+    (46, include_str!("../migrations/postgres/0046_device_fingerprint.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -735,6 +738,89 @@ mod tests {
         .await
         .unwrap();
         assert_eq!((reasoning.as_str(), ms), ("let me think", 1200));
+
+        pool.close().await;
+    }
+
+    /// Migration 46 replaces pairing with sign-in, so a machine now identifies
+    /// itself by fingerprint. Devices created by the old pairing flow have
+    /// none, and several of them must still coexist: a unique index that
+    /// treated NULL as a value would break every account with two paired
+    /// machines the moment it ran.
+    #[tokio::test]
+    async fn device_fingerprint_migration_keeps_paired_devices_and_scopes_uniqueness() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // Rewind to the pre-fingerprint schema and insert two legacy paired
+        // devices, as an account that paired a laptop and a desktop would have.
+        pool.execute("DELETE FROM _migrations WHERE id = 46").await.unwrap();
+        pool.execute("DROP INDEX idx_agent_devices_fingerprint").await.unwrap();
+        pool.execute("ALTER TABLE agent_devices DROP COLUMN fingerprint").await.unwrap();
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .await
+            .unwrap();
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (2, 'u2', 'x')")
+            .await
+            .unwrap();
+        pool.execute(
+            "INSERT INTO agent_devices (user_id, name, token_hash) VALUES (1, 'laptop', 'h1')",
+        )
+        .await
+        .unwrap();
+        pool.execute(
+            "INSERT INTO agent_devices (user_id, name, token_hash) VALUES (1, 'desktop', 'h2')",
+        )
+        .await
+        .unwrap();
+
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // Both paired devices survive, with no fingerprint to match on.
+        let rows: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT name, fingerprint FROM agent_devices ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("laptop".to_string(), None),
+                ("desktop".to_string(), None)
+            ],
+            "pre-46 paired devices must keep working"
+        );
+
+        // One machine per user: a second sign-in from the same computer has to
+        // collide so the server rebinds instead of duplicating the row.
+        sqlx::query(
+            "INSERT INTO agent_devices (user_id, name, token_hash, fingerprint) \
+             VALUES (1, 'signed-in', 'h3', 'fp-a')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let dup = sqlx::query(
+            "INSERT INTO agent_devices (user_id, name, token_hash, fingerprint) \
+             VALUES (1, 'signed-in-again', 'h4', 'fp-a')",
+        )
+        .execute(&pool)
+        .await;
+        assert!(dup.is_err(), "one fingerprint per user must not duplicate");
+
+        // Two users on one shared computer are two devices, not one.
+        sqlx::query(
+            "INSERT INTO agent_devices (user_id, name, token_hash, fingerprint) \
+             VALUES (2, 'shared-pc', 'h5', 'fp-a')",
+        )
+        .execute(&pool)
+        .await
+        .expect("the same machine under another account is a separate device");
 
         pool.close().await;
     }

@@ -68,7 +68,6 @@ export default function DownloadPage() {
   }, [])
 
   const runSnippet = `YUNOVA_DEVICE_URL=${window.location.origin}
-YUNOVA_DEVICE_TOKEN=<网页生成的配对码>
 YUNOVA_DEVICE_WORKSPACE=/path/to/project
 ./yunova-desktop`
 
@@ -211,12 +210,12 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
             </div>
             <ol className="mt-3 space-y-2.5 text-sm leading-relaxed text-muted-foreground">
               <li>
-                <span className="font-medium text-foreground">1. 生成配对码：</span>
-                打开「新工作任务」，选择本地电脑并生成配对码（只显示一次）。
+                <span className="font-medium text-foreground">1. 运行客户端：</span>
+                解压后指定本站地址与工作目录启动，客户端会主动连回本站。
               </li>
               <li>
-                <span className="font-medium text-foreground">2. 运行客户端：</span>
-                解压后带上配对码与工作目录启动，客户端会主动连回本站。
+                <span className="font-medium text-foreground">2. 登录账号：</span>
+                按提示输入 Yunova 账号和密码，登录成功即自动绑定这台电脑，无需配对码。
               </li>
               <li>
                 <span className="font-medium text-foreground">3. 派发任务：</span>
@@ -252,12 +251,16 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
                 指向的目录可被改动，默认当前目录而非整个用户目录。
               </li>
               <li>
+                <span className="font-medium text-foreground">不保存密码。</span>
+                登录后只在本机保存一枚设备令牌（仅当前用户可读），密码不落盘。
+              </li>
+              <li>
                 <span className="font-medium text-foreground">不下发上游密钥。</span>
                 客户端只拿到指向本站网关的会话级令牌。
               </li>
               <li>
                 <span className="font-medium text-foreground">随时可撤销。</span>
-                在设备列表移除后立即断开，配对码同时失效。
+                在设备列表移除后立即断开，设备令牌同时失效；重新登录可再次绑定。
               </li>
             </ul>
             <p className="mt-4 text-xs text-muted-foreground">

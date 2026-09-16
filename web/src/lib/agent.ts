@@ -169,7 +169,7 @@ export const agentApi = {
 // devices
 // ---------------------------------------------------------------------------
 
-/** A machine the user has paired for local execution. */
+/** A machine bound to this account for local execution. */
 export interface AgentDevice {
   id: number
   name: string
@@ -187,11 +187,14 @@ export async function listDevices(): Promise<AgentDevice[]> {
   )
 }
 
-/** Issue a pairing code. The plaintext is returned exactly once. */
-export async function pairDevice(name?: string): Promise<{ code: string; name: string }> {
-  return jsonOrThrow(
-    await fetch("/api/agent/devices/pair", {
-      method: "POST",
+/** Rename a machine.
+ *
+ *  Devices name themselves from the hostname when they sign in, so this is
+ *  the only way to turn `DESKTOP-4F2K1A` into something readable. */
+export async function renameDevice(id: number, name: string): Promise<void> {
+  await okOrThrow(
+    await fetch(`/api/agent/devices/${id}`, {
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
       credentials: "same-origin",
@@ -199,7 +202,11 @@ export async function pairDevice(name?: string): Promise<{ code: string; name: s
   )
 }
 
-/** Revoke a machine, disconnecting it immediately. */
+/** Revoke a machine, disconnecting it immediately.
+ *
+ *  Signing in again from that computer re-attaches it: the account is the
+ *  authority, so a revoke ends the current credential rather than banning the
+ *  machine forever. */
 export async function revokeDevice(id: number): Promise<void> {
   await okOrThrow(
     await fetch(`/api/agent/devices/${id}`, {
