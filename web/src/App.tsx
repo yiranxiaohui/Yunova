@@ -15,6 +15,9 @@ import SharedConversationPage from "@/pages/SharedConversationPage"
 import { Toaster } from "@/components/ui/sonner"
 
 const VideoEditorPage = lazy(() => import("@/pages/VideoEditorPage"))
+// Downloading the client is a once-per-machine detour, so its page never needs
+// to be in the main bundle.
+const DownloadPage = lazy(() => import("@/pages/DownloadPage"))
 const MediaLibraryPage = lazy(() => import("@/pages/MediaLibraryPage"))
 const AgentTaskPage = lazy(() => import("@/pages/AgentTaskPage"))
 
@@ -220,6 +223,18 @@ export default function App() {
               }
             />
             <Route path="/plaza" element={<Navigate to="/library" replace />} />
+
+            {/* Public on purpose: a user who has not signed in yet should
+                still be able to fetch the client and read what it is allowed
+                to do on their machine. */}
+            <Route
+              path="/download"
+              element={
+                <Suspense fallback={<Loading />}>
+                  <DownloadPage />
+                </Suspense>
+              }
+            />
 
             <Route path="/s/:token" element={<SharedConversationPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />

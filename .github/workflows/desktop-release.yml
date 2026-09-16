@@ -1,0 +1,65 @@
+name: Release desktop client
+
+# 桌面客户端（yunova-desktop）是分发到用户自己电脑上的执行端，不进服务端镜像。
+# 打 vX.Y.Z tag 时构建各平台二进制并作为 GitHub Release 附件；网页的
+# /download 页面直接读这个 Release 的资产列表。
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # 需要写权限才能上传到 Release
+
+jobs:
+  # 先确保该 tag 的 GitHub Release 存在——upload-rust-binary-action 只上传、
+  # 不创建 Release（Release 不存在会反复 "release not found" 直至超时）。
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Create release if missing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" --title "$tag" --generate-notes
+          fi
+
+  build:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # 构建 + strip + 打包（Linux/macOS→tar.gz，Windows→zip，含 .exe）+ 上传到
+      # 对应 tag 的 Release。归档名必须与 web/src/lib/downloads.ts 里的
+      # `yunova-desktop-<target>` 保持一致，否则下载页只能退化成发布页链接。
+      - name: Build & upload desktop binary
+        uses: taiki-e/upload-rust-binary-action@v1
+        with:
+          bin: yunova-desktop
+          # 指到客户端 crate；否则 action 在 workspace 根构建，根包 yunova 的
+          # build.rs 会顺带去编译前端（需要 bun），而且没有这个 bin target。
+          manifest-path: desktop/Cargo.toml
+          target: ${{ matrix.target }}
+          archive: yunova-desktop-$target
+          token: ${{ secrets.GITHUB_TOKEN }}
