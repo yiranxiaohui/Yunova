@@ -1605,6 +1605,11 @@ struct PlatformModel {
     kind: String, // "chat" | "image" | "video"
     protocol: String, // top-priority channel's protocol
     context_limit: Option<i64>,
+    /// Provider key this model would carry inside an agent runtime's generated
+    /// `models.json`, or `None` when work mode cannot run it. Reported rather
+    /// than derived client-side so the picker and the runtime can never
+    /// disagree about what is selectable.
+    agent_provider: Option<String>,
     // Rates already converted to site quota so the picker can show what a
     // model costs without knowing about USD or the markup. All in
     // micro-quota (1 quota = 1 CNY = 1e6 micro-quota).
@@ -1652,6 +1657,12 @@ async fn user_list_platform_models(
             kind: p.kind.clone(),
             protocol: p.protocol.clone(),
             context_limit: p.context_limit,
+            agent_provider: if p.kind == "chat" {
+                crate::agent_token::runtime_provider_for(&p.protocol)
+                    .map(str::to_string)
+            } else {
+                None
+            },
             input_micro_quota_per_1m: rate.micro_quota_for_micro_usd(p.input_price),
             output_micro_quota_per_1m: rate.micro_quota_for_micro_usd(p.output_price),
             cached_input_micro_quota_per_1m: p

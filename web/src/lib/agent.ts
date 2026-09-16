@@ -56,7 +56,7 @@ export const agentApi = {
     device_id?: number
     title?: string
     model?: string
-  }): Promise<{ id: number; target: string; title: string }> {
+  }): Promise<{ id: number; target: string; title: string; model: string | null }> {
     return jsonOrThrow(
       await fetch("/api/agent/sessions", {
         method: "POST",
@@ -124,6 +124,22 @@ export const agentApi = {
     await okOrThrow(
       await fetch(`/api/agent/sessions/${sid}/abort`, {
         method: "POST",
+        credentials: "same-origin",
+      })
+    )
+  },
+
+  /** Pin the session to a model.
+   *
+   *  Takes effect at once when a runtime is attached, and is replayed the next
+   *  time one starts, so the choice survives a session that is stopped and
+   *  resumed later. */
+  async setModel(sid: number, model: string): Promise<void> {
+    await okOrThrow(
+      await fetch(`/api/agent/sessions/${sid}/model`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
         credentials: "same-origin",
       })
     )

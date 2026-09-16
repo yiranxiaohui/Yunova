@@ -60,6 +60,66 @@ async fn owned_session(
 }
 
 // ---------------------------------------------------------------------------
+// model selection
+// ---------------------------------------------------------------------------
+
+/// Resolve a model name to the provider a runtime would address it by.
+///
+/// Goes through the priced whitelist rather than trusting the client: the
+/// stored model is replayed into `set_model` on every start, so an unchecked
+/// value would let a session pin a model the admin has since disabled or never
+/// priced. Returns the provider key used in the generated `models.json`.
+async fn resolve_agent_model(pool: &Pool, kind: DbKind, model: &str) -> Result<String, Response> {
+    let Some(price) = crate::channels::enabled_price(pool, kind, model, "chat").await else {
+        return Err((StatusCode::BAD_REQUEST, "该模型未开放或不可用于对话").into_response());
+    };
+    crate::agent_token::runtime_provider_for(&price.protocol)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            // Gemini is callable in chat mode but has no agent provider, so a
+            // clear message beats an opaque "model not found" from pi.
+            (StatusCode::BAD_REQUEST, "该模型所属协议暂不支持工作模式").into_response()
+        })
+}
+
+/// The model a session is pinned to, if any.
+async fn session_model(pool: &Pool, kind: DbKind, session_id: i64) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(&db::q(
+        kind,
+        "SELECT model FROM agent_sessions WHERE id = ?",
+    ))
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .filter(|m| !m.trim().is_empty())
+}
+
+/// Ask a live runtime to switch models.
+///
+/// Used both when a runtime starts and when the user switches mid-session, so
+/// the two paths fail identically instead of one of them silently leaving the
+/// session on a different model than the UI shows.
+async fn apply_model(
+    live: &Arc<crate::agent_session::LiveSession>,
+    provider: &str,
+    model: &str,
+) -> Result<(), String> {
+    match live
+        .request(agent_rpc::cmd_set_model("", provider, model))
+        .await?
+    {
+        Inbound::Response { success: true, .. } => Ok(()),
+        Inbound::Response { error, .. } => {
+            Err(error.unwrap_or_else(|| "运行时拒绝了该模型".into()))
+        }
+        _ => Err("运行时返回了意外响应".into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // session CRUD
 // ---------------------------------------------------------------------------
 
@@ -84,6 +144,19 @@ async fn create_session(
     let Some(target) = Target::parse(&req.target) else {
         return (StatusCode::BAD_REQUEST, "target 必须是 cloud 或 device").into_response();
     };
+
+    // Validate the model up front rather than at start: a task created with an
+    // unusable model would otherwise look fine until its first prompt.
+    let model = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    if let Some(model) = model
+        && let Err(r) = resolve_agent_model(&installed.pool, installed.kind, model).await
+    {
+        return r;
+    }
 
     // A device session is meaningless without a machine to run on, and the
     // machine must belong to the caller: otherwise a session could be pointed
@@ -129,7 +202,7 @@ async fn create_session(
                 .bind(target.as_str())
                 .bind(req.device_id)
                 .bind(&title)
-                .bind(req.model.as_deref())
+                .bind(model)
                 .fetch_one(&installed.pool)
                 .await
                 .map(|r| r.0)
@@ -143,7 +216,7 @@ async fn create_session(
                     .bind(target.as_str())
                     .bind(req.device_id)
                     .bind(&title)
-                    .bind(req.model.as_deref())
+                    .bind(model)
                     .execute(&mut *tx)
                     .await
                     .map_err(|e| e.to_string())?;
@@ -159,7 +232,13 @@ async fn create_session(
     };
 
     match id {
-        Ok(id) => Json(json!({ "id": id, "target": target.as_str(), "title": title })).into_response(),
+        Ok(id) => Json(json!({
+            "id": id,
+            "target": target.as_str(),
+            "title": title,
+            "model": model,
+        }))
+        .into_response(),
         Err(e) => {
             eprintln!("[agent-api] create session failed: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "创建会话失败").into_response()
@@ -423,6 +502,61 @@ async fn abort(
 }
 
 #[derive(Deserialize)]
+struct SetModelReq {
+    model: String,
+}
+
+/// Pin a session to a model, applying it immediately when a runtime is live.
+///
+/// The choice is stored regardless, because a session outlives its runtime:
+/// the next start replays it, so a task resumed tomorrow runs on the model the
+/// user picked rather than on whatever pi would default to. Persisting only
+/// after the runtime accepts keeps the two in step — a rejected model must not
+/// become the value replayed on every later start.
+async fn set_model(
+    State(state): State<AppState>,
+    Extension(installed): Extension<InstalledState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(sid): Path<i64>,
+    Json(req): Json<SetModelReq>,
+) -> Response {
+    if let Err(r) = owned_session(&installed.pool, installed.kind, user.id, sid).await {
+        return r;
+    }
+    let model = req.model.trim();
+    if model.is_empty() {
+        return (StatusCode::BAD_REQUEST, "模型不能为空").into_response();
+    }
+    let provider = match resolve_agent_model(&installed.pool, installed.kind, model).await {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
+
+    if let Some(live) = state.agent_sessions.get(sid).await
+        && let Err(e) = apply_model(&live, &provider, model).await
+    {
+        return (StatusCode::BAD_GATEWAY, e).into_response();
+    }
+
+    let sql = db::q(
+        installed.kind,
+        "UPDATE agent_sessions SET model = ?, updated_at = ? WHERE id = ?",
+    );
+    if let Err(e) = sqlx::query(&sql)
+        .bind(model)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(sid)
+        .execute(&installed.pool)
+        .await
+    {
+        eprintln!("[agent-api] persisting the session model failed: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "保存模型选择失败").into_response();
+    }
+
+    Json(json!({ "ok": true, "model": model, "provider": provider })).into_response()
+}
+
+#[derive(Deserialize)]
 struct ApproveReq {
     /// The `extension_ui_request` id being answered.
     request_id: String,
@@ -582,6 +716,27 @@ async fn start_session(
         return Json(json!({ "ok": true, "reused": true })).into_response();
     }
 
+    // A session's pinned model, resolved before anything is started: the
+    // runtime is told which model to use, so a value that is no longer priced
+    // must fail here rather than after a container is already running.
+    let pinned = match session_model(&installed.pool, installed.kind, sid).await {
+        Some(model) => {
+            match resolve_agent_model(&installed.pool, installed.kind, &model).await {
+                Ok(provider) => Some((provider, model)),
+                // Do not fail the start. The admin may have retired the model
+                // long after the task was created, and refusing to open an
+                // existing task is worse than running it on pi's default.
+                Err(_) => {
+                    eprintln!(
+                        "[agent-api] session {sid} pinned an unavailable model; using the default"
+                    );
+                    None
+                }
+            }
+        }
+        None => None,
+    };
+
     // Build the runtime's model config from the priced whitelist. This is the
     // security boundary: the runtime receives a gateway URL plus a
     // session-scoped token, never an upstream provider key.
@@ -681,7 +836,7 @@ async fn start_session(
         let transport = std::sync::Arc::new(crate::agent_device::DeviceTransport::new(
             device, sid,
         ));
-        state
+        let live = state
             .agent_sessions
             .attach(
                 installed.pool.clone(),
@@ -697,6 +852,13 @@ async fn start_session(
                 Some(token),
             )
             .await;
+        if let Some((provider, model)) = &pinned
+            && let Err(e) = apply_model(&live, provider, model).await
+        {
+            // Non-fatal: the runtime is up and usable on its default model, and
+            // tearing the session down over a model switch would lose it.
+            eprintln!("[agent-api] session {sid} could not select {model}: {e}");
+        }
         return Json(json!({ "ok": true, "reused": false, "sandboxed": false })).into_response();
     }
 
@@ -748,6 +910,12 @@ async fn start_session(
             Some(token.clone()),
         )
         .await;
+
+    if let Some((provider, model)) = &pinned
+        && let Err(e) = apply_model(&live, provider, model).await
+    {
+        eprintln!("[agent-api] session {sid} could not select {model}: {e}");
+    }
 
     // Bound the sandbox's wall-clock lifetime. A session that is never stopped
     // would otherwise hold its container, and its quota-spending credential,
@@ -823,6 +991,127 @@ pub fn routes() -> Router<AppState> {
         .route("/agent/sessions/{sid}/start", post(start_session))
         .route("/agent/sessions/{sid}/stop", post(stop_session))
         .route("/agent/sessions/{sid}/prompt", post(prompt))
+        .route("/agent/sessions/{sid}/model", post(set_model))
         .route("/agent/sessions/{sid}/abort", post(abort))
         .route("/agent/sessions/{sid}/approve", post(approve))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::install_drivers;
+    use sqlx::any::AnyPoolOptions;
+
+    async fn pool_with(models: &[(&str, &str, bool)]) -> Pool {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool, DbKind::Sqlite).await.unwrap();
+        for (model, protocol, enabled) in models {
+            crate::channels::upsert_price(
+                &pool,
+                DbKind::Sqlite,
+                &crate::channels::PricingInput {
+                    model: (*model).into(),
+                    kind: "chat".into(),
+                    channel_ids: None,
+                    display_name: None,
+                    enabled: *enabled,
+                    protocol: (*protocol).into(),
+                    context_limit: None,
+                    input_price: 0,
+                    output_price: 0,
+                    cached_input_price: None,
+                    per_call_price: 0,
+                    base_price: 0,
+                    per_second_price: 0,
+                    allowed_seconds: None,
+                    size_rules: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        pool
+    }
+
+    /// The stored model is replayed into `set_model` on every start, so an
+    /// unchecked value would let a session keep spending on a model the admin
+    /// has since retired — the whitelist has to be enforced here, not in the
+    /// picker that happens to populate it.
+    #[tokio::test]
+    async fn only_enabled_chat_models_on_an_agent_protocol_can_be_pinned() {
+        let pool = pool_with(&[
+            ("gpt-5", "openai", true),
+            ("claude-opus-4-5", "claude", true),
+            ("gpt-5-retired", "openai", false),
+            ("gemini-3-pro", "gemini", true),
+        ])
+        .await;
+
+        assert_eq!(
+            resolve_agent_model(&pool, DbKind::Sqlite, "gpt-5")
+                .await
+                .ok(),
+            Some("yunova-openai".to_string())
+        );
+        assert_eq!(
+            resolve_agent_model(&pool, DbKind::Sqlite, "claude-opus-4-5")
+                .await
+                .ok(),
+            Some("yunova-claude".to_string())
+        );
+        assert!(
+            resolve_agent_model(&pool, DbKind::Sqlite, "gpt-5-retired")
+                .await
+                .is_err(),
+            "a disabled model must not be selectable"
+        );
+        assert!(
+            resolve_agent_model(&pool, DbKind::Sqlite, "unknown-model")
+                .await
+                .is_err(),
+            "an unpriced model must not be selectable"
+        );
+        assert!(
+            resolve_agent_model(&pool, DbKind::Sqlite, "gemini-3-pro")
+                .await
+                .is_err(),
+            "a protocol with no agent provider must not be selectable"
+        );
+
+        pool.close().await;
+    }
+
+    /// A session with no stored model runs on pi's default, which is what every
+    /// task did before the picker existed; a blank string must not be mistaken
+    /// for a pinned choice and replayed as one.
+    #[tokio::test]
+    async fn a_session_without_a_pinned_model_reports_none() {
+        let pool = pool_with(&[("gpt-5", "openai", true)]).await;
+        sqlx::query("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, user_id, target, title, model) \
+             VALUES (1, 1, 'cloud', 't', NULL), (2, 1, 'cloud', 't', '  '), \
+                    (3, 1, 'cloud', 't', 'gpt-5')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(session_model(&pool, DbKind::Sqlite, 1).await, None);
+        assert_eq!(session_model(&pool, DbKind::Sqlite, 2).await, None);
+        assert_eq!(
+            session_model(&pool, DbKind::Sqlite, 3).await,
+            Some("gpt-5".to_string())
+        );
+
+        pool.close().await;
+    }
 }

@@ -34,17 +34,12 @@ import remarkGfm from "remark-gfm"
 import { CodeBlock } from "@/components/app/Markdown"
 import { ReasoningBlock } from "@/components/app/ReasoningBlock"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 
 import { streamChat, type ChatMessage } from "@/lib/chat-stream"
 import { estimateMessagesTokens, contextLimit } from "@/lib/context-limits"
 import { listModels } from "@/lib/models"
-import {
-  describeModelQuota,
-  listPlatformModels,
-  type PlatformModel,
-} from "@/lib/platform-models"
+import { listPlatformModels } from "@/lib/platform-models"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
 import {
@@ -54,11 +49,11 @@ import {
   settingsApi,
   likelyWebSearchCapable,
   GUEST_SETTINGS_ID,
-  PROTOCOL_META,
   type Protocol,
   type UpstreamSettings,
 } from "@/lib/settings"
 import { SettingsDialog } from "@/components/app/SettingsDialog"
+import { ModelPicker } from "@/components/app/ModelPicker"
 import { RechargeDialog } from "@/components/app/RechargeDialog"
 import { QuotaLedgerDialog } from "@/components/app/QuotaLedgerDialog"
 import { Sidebar } from "@/components/app/Sidebar"
@@ -107,13 +102,15 @@ function toUiMessage(m: StoredMessage): UiMessage {
   }
 }
 
-const PROTOCOL_COLOR: Record<Protocol, string> = {
-  openai: "from-emerald-400 to-emerald-600",
-  claude: "from-amber-400 to-orange-600",
-  gemini: "from-sky-400 to-indigo-600",
-}
-
-function ModelPicker({
+/**
+ * Chat's binding of the shared picker.
+ *
+ * Chat is the one screen that can read either catalogue, so the BYOK branch
+ * lives here rather than inside the component: work mode is always
+ * platform-billed and must not carry a code path for upstream keys it never
+ * sees.
+ */
+function ChatModelPicker({
   protocol,
   model,
   settings,
@@ -124,191 +121,44 @@ function ModelPicker({
   settings: UpstreamSettings
   onChangeModel: (next: string, protocol?: Protocol) => void
 }) {
-  const [open, setOpen] = useState(false)
-  const [models, setModels] = useState<PlatformModel[]>([])
-  const [loading, setLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [query, setQuery] = useState("")
-  const popRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onDown = (e: MouseEvent) => {
-      if (!popRef.current) return
-      if (!popRef.current.contains(e.target as Node)) setOpen(false)
-    }
-    window.addEventListener("mousedown", onDown)
-    return () => window.removeEventListener("mousedown", onDown)
-  }, [open])
-
-  const baseUrl = settings.baseUrl
-  const apiKey = settings.apiKey
-  const useProxy = settings.useProxy
+  const { baseUrl, apiKey, useProxy, chatMode } = settings
   const fetchProtocol = settings.protocol
-  const chatMode = settings.chatMode
-
-  async function fetchList() {
-    setError(null)
-    setLoading(true)
-    try {
-      const list =
-        chatMode === "platform"
-          ? await listPlatformModels("chat")
-          : (
-              await listModels({
-                protocol: fetchProtocol as Protocol,
-                baseUrl,
-                apiKey,
-                useProxy,
-              })
-            ).map((model) => ({
-              model,
-              display_name: null,
-              kind: "chat" as const,
-              protocol: fetchProtocol as Protocol,
-              context_limit: null,
-              // BYOK 模型由用户自己的 Key 付费，站内不计额度。
-              input_micro_quota_per_1m: 0,
-              output_micro_quota_per_1m: 0,
-              cached_input_micro_quota_per_1m: null,
-              per_call_micro_quota: 0,
-            }))
-      setModels(list)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-      setModels([])
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    if (open && models.length === 0 && !loading && !error) void fetchList()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
-
-  // Reset model cache when upstream context changes (protocol/baseUrl).
-  useEffect(() => {
-    setModels([])
-    setError(null)
-  }, [baseUrl, fetchProtocol, chatMode])
-
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
-    if (!q) return models
-    return models.filter((m) => {
-      const display = m.display_name ?? ""
-      return (
-        m.model.toLowerCase().includes(q) ||
-        display.toLowerCase().includes(q) ||
-        m.protocol.toLowerCase().includes(q)
-      )
-    })
-  }, [models, query])
 
   return (
-    <div className="relative min-w-0" ref={popRef}>
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex min-w-0 max-w-[8rem] items-center gap-1.5 rounded-xl border border-border/70 bg-card/70 px-2.5 py-1.5 text-xs shadow-sm backdrop-blur transition-all hover:border-primary/30 hover:bg-card sm:max-w-[11rem] md:max-w-none"
-        title="点击切换模型"
-      >
-        <span
-          className={cn(
-            "inline-block size-2 shrink-0 rounded-full bg-gradient-to-br",
-            PROTOCOL_COLOR[protocol]
-          )}
-        />
-        <span className="hidden font-medium md:inline">
-          {PROTOCOL_META[protocol].label.replace(" 兼容", "")}
-        </span>
-        <span className="hidden text-muted-foreground md:inline">·</span>
-        <span className="truncate text-muted-foreground">{model || "未配置"}</span>
-        <span className="shrink-0 text-muted-foreground">▾</span>
-      </button>
-
-      {open && (
-        <div className="absolute left-0 top-full z-40 mt-2 w-72 rounded-2xl border border-border bg-popover/95 p-2.5 shadow-panel backdrop-blur-xl">
-          <div className="mb-2 flex items-center gap-1">
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="搜索模型…"
-              className="h-8 text-xs"
-              autoFocus
-            />
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              onClick={() => void fetchList()}
-              disabled={loading}
-              title="重新拉取"
-              className="size-8 shrink-0"
-            >
-              <RefreshCcw className={cn("size-3.5", loading && "animate-spin")} />
-            </Button>
-          </div>
-          <div className="nc-scroll max-h-72 overflow-y-auto">
-            {loading && models.length === 0 && (
-              <p className="px-2 py-6 text-center text-xs text-muted-foreground">
-                加载中…
-              </p>
-            )}
-            {!loading && error && (
-              <p className="rounded border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
-                {error}
-              </p>
-            )}
-            {!loading && !error && filtered.length === 0 && (
-              <p className="px-2 py-6 text-center text-xs text-muted-foreground">
-                {models.length === 0
-                  ? "暂无可用模型"
-                  : "没有匹配的模型"}
-              </p>
-            )}
-            <ul className="flex flex-col">
-              {filtered.map((m) => {
-                const active = m.model === model
-                return (
-                  <li key={`${m.protocol}:${m.model}`}>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onChangeModel(m.model, m.protocol)
-                        setOpen(false)
-                      }}
-                      className={cn(
-                        "flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs hover:bg-accent",
-                        active && "bg-accent text-accent-foreground"
-                      )}
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate font-mono">
-                          {m.display_name || m.model}
-                        </span>
-                        {chatMode === "platform" && (
-                          <span className="block truncate text-[10px] text-muted-foreground">
-                            {m.protocol} · {describeModelQuota(m)}
-                          </span>
-                        )}
-                      </span>
-                      {active && <Check className="ml-2 size-3.5 shrink-0 text-primary" />}
-                    </button>
-                  </li>
-                )
-              })}
-            </ul>
-          </div>
-          <div className="mt-2 border-t border-border pt-2 text-[10px] text-muted-foreground">
-            {chatMode === "platform"
-              ? "云端额度 · 从管理员开放的模型获取"
-              : "自带 Key · 从你配置的上游获取"}
-          </div>
-        </div>
-      )}
-    </div>
+    <ModelPicker
+      protocol={protocol}
+      model={model}
+      reloadKey={`${chatMode}:${fetchProtocol}:${baseUrl}`}
+      showQuota={chatMode === "platform"}
+      onChangeModel={onChangeModel}
+      footer={
+        chatMode === "platform"
+          ? "云端额度 · 从管理员开放的模型获取"
+          : "自带 Key · 从你配置的上游获取"
+      }
+      load={async () => {
+        if (chatMode === "platform") return listPlatformModels("chat")
+        const list = await listModels({
+          protocol: fetchProtocol as Protocol,
+          baseUrl,
+          apiKey,
+          useProxy,
+        })
+        return list.map((id) => ({
+          model: id,
+          display_name: null,
+          kind: "chat" as const,
+          protocol: fetchProtocol as Protocol,
+          context_limit: null,
+          agent_provider: null,
+          // BYOK 模型由用户自己的 Key 付费，站内不计额度。
+          input_micro_quota_per_1m: 0,
+          output_micro_quota_per_1m: 0,
+          cached_input_micro_quota_per_1m: null,
+          per_call_micro_quota: 0,
+        }))
+      }}
+    />
   )
 }
 
@@ -1729,7 +1579,7 @@ export default function ChatPage() {
               </h1>
               <p className="mt-0.5 text-[10px] text-muted-foreground">AI 智能对话</p>
             </div>
-            <ModelPicker
+            <ChatModelPicker
               protocol={settings.protocol}
               model={settings.model}
               settings={settings}

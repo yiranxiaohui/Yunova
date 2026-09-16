@@ -388,6 +388,35 @@ struct RuntimeConfigReq {
     token: String,
 }
 
+/// Provider key in the generated `models.json` for a pricing protocol.
+///
+/// The runtime only ever sees Yunova's own gateway providers, so this mapping
+/// is also the whitelist of protocols work mode can run on: a model priced
+/// under any other protocol has no provider to be selected from, which is why
+/// callers treat `None` as "not available to an agent" rather than guessing.
+pub fn runtime_provider_for(protocol: &str) -> Option<&'static str> {
+    RUNTIME_PROVIDERS
+        .iter()
+        .find(|(p, ..)| *p == protocol)
+        .map(|(_, provider, ..)| *provider)
+}
+
+/// `(pricing protocol, generated provider key, pi api, gateway path)`.
+const RUNTIME_PROVIDERS: [(&str, &str, &str, &str); 2] = [
+    (
+        "openai",
+        "yunova-openai",
+        "openai-responses",
+        "/api/proxy/openai",
+    ),
+    (
+        "claude",
+        "yunova-claude",
+        "anthropic-messages",
+        "/api/proxy/claude",
+    ),
+];
+
 /// Pure builder for the runtime `models.json`, kept separate from the handler
 /// so it is directly testable.
 pub fn runtime_models_json(
@@ -397,10 +426,7 @@ pub fn runtime_models_json(
 ) -> serde_json::Value {
     let mut providers = serde_json::Map::new();
 
-    for (protocol, api, path) in [
-        ("openai", "openai-responses", "/api/proxy/openai"),
-        ("claude", "anthropic-messages", "/api/proxy/claude"),
-    ] {
+    for (protocol, provider, api, path) in RUNTIME_PROVIDERS {
         let models: Vec<serde_json::Value> = prices
             .iter()
             .filter(|p| p.enabled && p.kind == "chat" && p.protocol == protocol)
@@ -418,7 +444,7 @@ pub fn runtime_models_json(
             continue;
         }
         providers.insert(
-            format!("yunova-{protocol}"),
+            provider.to_string(),
             json!({
                 "name": format!("Yunova ({protocol})"),
                 // The runtime's SDK appends the vendor's canonical path to
@@ -650,5 +676,24 @@ mod tests {
             !providers.contains_key("yunova-claude"),
             "an empty provider would surface as a broken entry in pi's model list"
         );
+    }
+
+    #[test]
+    fn provider_keys_match_the_generated_config() {
+        // The picker sends `provider` straight to pi's `set_model`, so a
+        // mismatch between this mapping and the generated config would make
+        // every switch fail with "model not found".
+        let prices = vec![
+            price("gpt-5", "openai", "chat", true),
+            price("claude-opus-4-5", "claude", "chat", true),
+        ];
+        let cfg = runtime_models_json(&prices, "https://yunnet.top", "yna_t");
+        for protocol in ["openai", "claude"] {
+            let key = runtime_provider_for(protocol).expect("a chat protocol must map");
+            assert!(cfg["providers"].get(key).is_some(), "{key} must exist");
+        }
+        // Gemini is priced and callable in chat mode but has no agent
+        // provider, so work mode must not offer it.
+        assert_eq!(runtime_provider_for("gemini"), None);
     }
 }

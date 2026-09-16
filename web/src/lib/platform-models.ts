@@ -12,6 +12,10 @@ export type PlatformModel = {
   kind: "chat" | "image"
   protocol: "openai" | "claude" | "gemini"
   context_limit: number | null
+  /** Provider key inside an agent runtime's generated config, or null when
+   *  work mode cannot run this model. Decided by the server so the picker and
+   *  the runtime cannot disagree about what is selectable. */
+  agent_provider: string | null
   // 价格，后端已按站点汇率与倍率换算完毕，单位为微额度（1 额度 = 1 元 = 1e6）
   input_micro_quota_per_1m: number
   output_micro_quota_per_1m: number

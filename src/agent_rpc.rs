@@ -80,6 +80,16 @@ pub fn cmd_abort(id: &str) -> Value {
     json!({ "id": id, "type": "abort" })
 }
 
+/// Select the model a session runs on.
+///
+/// `provider` is a key of the generated `models.json` (`yunova-openai` /
+/// `yunova-claude`), not an upstream vendor: the runtime only ever knows
+/// Yunova's own gateway providers, so switching a model cannot switch billing
+/// or routing away from the whitelist.
+pub fn cmd_set_model(id: &str, provider: &str, model_id: &str) -> Value {
+    json!({ "id": id, "type": "set_model", "provider": provider, "modelId": model_id })
+}
+
 /// Incremental history fetch. `since` is an entry id already mirrored; pi
 /// returns only entries strictly after it. Entry ids are stable, so this works
 /// as a durable cursor even across a client or server restart.
@@ -306,6 +316,16 @@ mod tests {
     fn get_entries_omits_the_cursor_on_a_first_sync() {
         assert!(cmd_get_entries("r1", None).get("since").is_none());
         assert_eq!(cmd_get_entries("r1", Some("abc"))["since"], "abc");
+    }
+
+    #[test]
+    fn set_model_uses_pis_camel_cased_field_name() {
+        // pi rejects `model_id`; a snake_cased field would surface as an
+        // opaque "Model not found" rather than as a protocol error.
+        let v = cmd_set_model("r1", "yunova-claude", "claude-opus-4-5");
+        assert_eq!(v["type"], "set_model");
+        assert_eq!(v["provider"], "yunova-claude");
+        assert_eq!(v["modelId"], "claude-opus-4-5");
     }
 
     #[test]

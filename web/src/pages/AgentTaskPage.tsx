@@ -14,6 +14,9 @@ import {
   type DeviceOption,
 } from "@/components/app/ModeSelector"
 import { readModeDraft, useModeSwitch } from "@/lib/mode"
+import { ModelPicker } from "@/components/app/ModelPicker"
+import { listPlatformModels } from "@/lib/platform-models"
+import type { Protocol } from "@/lib/settings"
 import {
   agentApi,
   entriesToItems,
@@ -31,6 +34,34 @@ import {
 } from "@/lib/platform"
 import { approvalTitle } from "@/lib/agent"
 import { toast } from "sonner"
+
+/**
+ * Protocol of a stored model.
+ *
+ * A session records only the model name, so a task reopened later would show
+ * the wrong protocol badge until the user touched the picker. Resolving it
+ * from the catalogue is one request, shared across calls, and only made when a
+ * task actually has a pinned model.
+ */
+let agentModelProtocols: Promise<Map<string, Protocol>> | null = null
+function protocolOf(model: string): Promise<Protocol | undefined> {
+  agentModelProtocols ??= listPlatformModels("chat")
+    .then(
+      (list) =>
+        new Map(
+          list
+            .filter((m) => m.agent_provider != null)
+            .map((m) => [m.model, m.protocol as Protocol])
+        )
+    )
+    .catch(() => {
+      // Never cache a failure: the badge is cosmetic, but a poisoned cache
+      // would keep it wrong for the rest of the session.
+      agentModelProtocols = null
+      return new Map<string, Protocol>()
+    })
+  return agentModelProtocols.then((m) => m.get(model))
+}
 
 /**
  * Work-mode task workspace.
@@ -68,6 +99,11 @@ export default function AgentTaskPage() {
   )
   const [target, setTarget] = useState<AgentTarget>("cloud")
   const [deviceId, setDeviceId] = useState<number | null>(null)
+  // The model the task runs on. Empty means "whatever the runtime defaults
+  // to", which is what every task did before this control existed; the label
+  // says so rather than naming a model the server never actually pinned.
+  const [model, setModel] = useState("")
+  const [modelProtocol, setModelProtocol] = useState<Protocol>("claude")
   const [devices, setDevices] = useState<DeviceOption[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [devicesOpen, setDevicesOpen] = useState(false)
@@ -160,6 +196,9 @@ export default function AgentTaskPage() {
       setStreamingText("")
       setApprovals([])
       setSession(s)
+      // Adopt the stored model so the picker reflects what this task actually
+      // runs on, not what was selected on the previous screen.
+      setModel(s?.model ?? "")
       setRunning(s?.status === "running")
       await syncEntries(sessionId, true)
     })()
@@ -238,6 +277,18 @@ export default function AgentTaskPage() {
     bottomRef.current?.scrollIntoView({ block: "end" })
   }, [items.length, streamingText])
 
+  // Colour the picker's badge for a model restored from the server.
+  useEffect(() => {
+    if (!model) return
+    let cancelled = false
+    void protocolOf(model).then((p) => {
+      if (!cancelled && p) setModelProtocol(p)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [model])
+
   // Ask for notification permission once, and only where it means something.
   //
   // Requested on entering the task workspace rather than at launch: the prompt
@@ -293,6 +344,7 @@ export default function AgentTaskPage() {
           target,
           device_id: deviceId ?? undefined,
           title: message.slice(0, 40),
+          model: model || undefined,
         })
         // Carry the prompt across the navigation so the user does not retype
         // it after the route changes.
@@ -301,7 +353,30 @@ export default function AgentTaskPage() {
         toast.error(`创建任务失败：${(e as Error).message}`)
       }
     },
-    [target, deviceId, nav]
+    [target, deviceId, model, nav]
+  )
+
+  /** Switch the model this task runs on.
+   *
+   *  Before a task exists there is nothing to tell, so the choice is just held
+   *  and passed to `createSession`. Once it does, the server owns it: it
+   *  applies the change to a live runtime and stores it for the next start. */
+  const changeModel = useCallback(
+    async (next: string, protocol?: Protocol) => {
+      const previous = model
+      setModel(next)
+      if (protocol) setModelProtocol(protocol)
+      if (sessionId == null) return
+      try {
+        await agentApi.setModel(sessionId, next)
+      } catch (e) {
+        // Roll back rather than leave the picker claiming a model the agent is
+        // not on; a silent mismatch would misattribute the next answer.
+        setModel(previous)
+        toast.error(`切换模型失败：${(e as Error).message}`)
+      }
+    },
+    [sessionId, model]
   )
 
   const send = useCallback(
@@ -487,16 +562,37 @@ export default function AgentTaskPage() {
         <div className="safe-bottom border-t border-border/40 bg-background/70 px-3 pb-3 pt-2.5 backdrop-blur-xl md:px-6 md:pb-4">
           <div className="mx-auto w-full max-w-4xl space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <ModeSelector
-                onModeChange={(m) => switchMode(m, input)}
-                target={session?.target ?? target}
-                onTargetChange={setTarget}
-                devices={devices}
-                deviceId={deviceId}
-                onDeviceChange={setDeviceId}
-                targetLocked={sessionId != null}
-                hideSwitch={heroSwitch}
-              />
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <ModeSelector
+                  onModeChange={(m) => switchMode(m, input)}
+                  target={session?.target ?? target}
+                  onTargetChange={setTarget}
+                  devices={devices}
+                  deviceId={deviceId}
+                  onDeviceChange={setDeviceId}
+                  targetLocked={sessionId != null}
+                  hideSwitch={heroSwitch}
+                />
+                {/* Work mode is always platform-billed, so only models the
+                    admin priced *and* an agent runtime can address are
+                    offered. Filtering on `agent_provider` keeps a model the
+                    runtime has no provider for — Gemini today — out of a
+                    picker that would otherwise fail on selection. */}
+                <ModelPicker
+                  protocol={modelProtocol}
+                  model={model}
+                  placeholder="默认模型"
+                  title="点击切换工作模型"
+                  showQuota
+                  footer="云端额度 · 仅列出可用于 Agent 的模型"
+                  onChangeModel={(next, protocol) => void changeModel(next, protocol)}
+                  load={async () =>
+                    (await listPlatformModels("chat")).filter(
+                      (m) => m.agent_provider != null
+                    )
+                  }
+                />
+              </div>
               {/* Pairing lives next to the picker: "no local computers" is
                   only actionable if the fix is one click away. */}
               <Button
