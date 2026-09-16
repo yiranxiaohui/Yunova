@@ -113,6 +113,16 @@ export function DeviceDialog({
           <DialogTitle>本地电脑</DialogTitle>
           <DialogDescription>
             在自己的电脑上运行桌面客户端，即可把工作任务派到那台机器执行。
+            还没有客户端？
+            <a
+              href="/download"
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline-offset-2 hover:underline"
+            >
+              前往下载
+            </a>
+            。
           </DialogDescription>
         </DialogHeader>
 

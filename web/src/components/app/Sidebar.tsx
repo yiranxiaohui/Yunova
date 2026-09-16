@@ -1,25 +1,29 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom"
 import {
   BookMarked,
+  ChevronDown,
   Clapperboard,
+  Cloud,
+  Download,
   ImageIcon,
+  Laptop,
   Library,
   LogIn,
   LogOut,
   MessageSquareText,
   MoreHorizontal,
+  PanelLeft,
   Pencil,
-  Plus,
-  Cloud,
-  Laptop,
-  Search,
   Scissors,
+  Search,
   Shield,
+  SquarePen,
   Sparkles,
   Trash2,
   User,
   Workflow,
+  X,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -30,6 +34,7 @@ import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
 import { prefetchWorkMode } from "@/lib/mode"
 import { useConfirm } from "@/lib/confirm-context"
+import { useIsDesktop } from "@/lib/use-media-query"
 import { BrandMark } from "./BrandMark"
 import { ProfileDialog } from "./ProfileDialog"
 
@@ -49,6 +54,17 @@ type SidebarItem =
   | { kind: "chat"; id: number; title: string; updated_at: string }
   | { kind: "agent"; id: number; title: string; updated_at: string; target: AgentTarget }
 
+/** Persisted so the rail does not spring back open on every navigation. */
+const COLLAPSE_KEY = "yunova.sidebar.collapsed"
+
+function readCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(COLLAPSE_KEY) === "1"
+  } catch {
+    return false
+  }
+}
+
 function relativeTime(iso: string): string {
   // Timestamps arrive in two shapes: SQLite's `datetime('now')` ("2026-09-15
   // 09:03:43", implicitly UTC) and RFC 3339 with an explicit offset. Appending
@@ -66,6 +82,71 @@ function relativeTime(iso: string): string {
   const days = Math.floor(h / 24)
   if (days < 7) return `${days} 天前`
   return d.toLocaleDateString()
+}
+
+/** The studios, reachable from the "更多" group rather than the top level. */
+const TOOLS: Array<{ to: string; label: string; icon: typeof ImageIcon; hint: string }> = [
+  { to: "/studio", label: "图像工作室", icon: ImageIcon, hint: "多轮对话式生图（Responses API）" },
+  { to: "/videos", label: "视频工作室", icon: Clapperboard, hint: "文生视频 / 图生视频" },
+  { to: "/workflows", label: "流水线", icon: Workflow, hint: "图片 / 多视频 / 裁剪 / 合并节点画布" },
+  { to: "/editor", label: "在线剪辑", icon: Scissors, hint: "多轨精细剪辑、素材库与服务端导出" },
+  { to: "/library", label: "素材库", icon: Library, hint: "管理并浏览公开分享的图片、视频和音频" },
+]
+
+/**
+ * A single navigation row.
+ *
+ * One component for both widths: in the rail only the icon survives, but the
+ * row keeps its `title`, so a collapsed sidebar is still navigable without
+ * guessing what a bare glyph means.
+ */
+function NavRow({
+  icon: Icon,
+  label,
+  collapsed,
+  active,
+  hint,
+  trailing,
+  ...rest
+}: {
+  icon: typeof ImageIcon
+  label: string
+  collapsed: boolean
+  active?: boolean
+  hint?: string
+  trailing?: ReactNode
+} & (
+  | { to: string; onClick?: () => void; onPointerEnter?: () => void; onFocus?: () => void }
+  | { onClick: () => void; to?: undefined }
+)) {
+  const className = cn(
+    "group/nav flex items-center rounded-lg text-sm transition-colors",
+    collapsed ? "h-9 w-9 justify-center" : "h-9 w-full gap-2.5 px-2.5",
+    active
+      ? "bg-sidebar-accent/80 font-medium text-sidebar-accent-foreground"
+      : "text-sidebar-foreground/85 hover:bg-sidebar-accent/55 hover:text-sidebar-accent-foreground"
+  )
+  const body = (
+    <>
+      <Icon className="size-4 shrink-0" />
+      {!collapsed && <span className="min-w-0 flex-1 truncate text-left">{label}</span>}
+      {!collapsed && trailing}
+    </>
+  )
+  if ("to" in rest && rest.to) {
+    const { to, ...linkProps } = rest
+    return (
+      <Link to={to} title={hint ?? label} className={className} viewTransition {...linkProps}>
+        {body}
+      </Link>
+    )
+  }
+  const { onClick } = rest as { onClick: () => void }
+  return (
+    <button type="button" onClick={onClick} title={hint ?? label} className={className}>
+      {body}
+    </button>
+  )
 }
 
 export function Sidebar({
@@ -89,15 +170,43 @@ export function Sidebar({
   const [error, setError] = useState<string | null>(null)
   const [menuFor, setMenuFor] = useState<string | null>(null)
   const [query, setQuery] = useState("")
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(() =>
+    TOOLS.some((t) => location.pathname.startsWith(t.to))
+  )
   const [profileOpen, setProfileOpen] = useState(false)
   const [avatarBroken, setAvatarBroken] = useState(false)
   const [searchHits, setSearchHits] = useState<SearchHit[] | null>(null)
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
+  const [collapsedPref, setCollapsedPref] = useState(readCollapsed)
+
+  // The rail only exists on desktop: the mobile drawer is already an overlay,
+  // and a 4rem strip of icons inside it would be a worse version of nothing.
+  const isDesktop = useIsDesktop()
+  const collapsed = isDesktop && collapsedPref
+
+  const toggleCollapsed = useCallback(() => {
+    setCollapsedPref((v) => {
+      const next = !v
+      try {
+        window.localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0")
+      } catch {
+        /* private mode: the preference is simply not remembered */
+      }
+      return next
+    })
+  }, [])
 
   useEffect(() => {
     setAvatarBroken(false)
   }, [user?.avatar_url])
+
+  // Collapsing hides the input, so the filter must stop applying with it:
+  // leaving a query attached to an invisible search box makes the recent list
+  // look truncated. Derived rather than cleared in an effect so the rail never
+  // renders one frame of filtered results first.
+  const trimmedQuery = collapsed ? "" : query.trim()
 
   useEffect(() => {
     if (!user) {
@@ -142,7 +251,6 @@ export function Sidebar({
     }
   }, [reloadKey, user])
 
-  const trimmedQuery = query.trim()
   const isApiSearch = trimmedQuery.length >= 2
   const filtered = useMemo(() => {
     if (isApiSearch) return items
@@ -275,119 +383,203 @@ export function Sidebar({
     }
   }
 
+  const onChatRoute = location.pathname === "/" || location.pathname.startsWith("/c/")
+  const onWorkRoute = location.pathname.startsWith("/t")
+
   return (
-    <aside className="flex h-full w-[18rem] shrink-0 flex-col border-r border-sidebar-border bg-sidebar/95 text-sidebar-foreground shadow-[12px_0_40px_-32px_rgba(37,24,70,0.45)] backdrop-blur-xl">
-      <div className="flex items-center justify-between px-4 pb-4 pt-5">
-        <BrandMark subtitle="Agent 工作空间" />
+    // Width is the sidebar's own business — both the drawer and the desktop
+    // column follow it — so collapsing is a single class swap here rather than
+    // a prop every page has to thread through.
+    <aside
+      data-collapsed={collapsed}
+      className={cn(
+        "flex h-full shrink-0 flex-col border-r border-sidebar-border bg-sidebar/95 text-sidebar-foreground backdrop-blur-xl transition-[width] duration-200",
+        collapsed ? "w-[4.25rem] items-center px-2" : "w-[16rem] px-3"
+      )}
+    >
+      <div
+        className={cn(
+          "flex items-center pb-2 pt-3",
+          collapsed ? "justify-center" : "justify-between gap-2"
+        )}
+      >
+        {!collapsed && <BrandMark size="sm" />}
+        {/* Desktop-only: on mobile the drawer's own close affordance applies
+            and a collapse toggle would leave a rail nobody asked for. */}
+        <button
+          type="button"
+          onClick={toggleCollapsed}
+          title={collapsed ? "展开侧栏" : "收起侧栏"}
+          aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
+          aria-expanded={!collapsed}
+          className="hidden size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground md:grid"
+        >
+          <PanelLeft className="size-4" />
+        </button>
       </div>
 
-      <div className="flex flex-col gap-3 px-3 pb-3">
-        <Button
-          onClick={createNew}
-          className="h-11 w-full justify-start gap-2.5 rounded-xl bg-gradient-to-r from-primary to-chart-5 px-3.5 shadow-md shadow-primary/20 hover:shadow-lg hover:shadow-primary/25"
-        >
-          <span className="grid size-6 place-items-center rounded-md bg-white/15">
-            <Plus className="size-4" />
-          </span>
-          <span className="font-semibold">开启新对话</span>
-        </Button>
-
+      <nav className="flex flex-col gap-0.5 pb-1">
+        <NavRow
+          icon={SquarePen}
+          label="新对话"
+          collapsed={collapsed}
+          active={onChatRoute}
+          onClick={() => void createNew()}
+        />
         {/* Work mode is a peer of chat, not a setting inside it: it starts an
             agent that can run commands, so it gets its own entry point. */}
-        <Button
-          asChild
-          variant="outline"
-          className="h-10 w-full justify-start gap-2.5 rounded-xl px-3.5"
-        >
-          <Link
-            to="/t"
-            onClick={() => onNavigate?.()}
-            // Same warming as the in-page switch, so whichever entry point the
-            // user takes, work mode does not open on a loading screen.
-            onPointerEnter={prefetchWorkMode}
-            onFocus={prefetchWorkMode}
-            viewTransition
-            title="启动可执行命令的 Agent 任务"
-          >
-            <span className="grid size-6 place-items-center rounded-md bg-primary/10 text-primary">
-              <Cloud className="size-4" />
-            </span>
-            <span className="font-semibold">新工作任务</span>
-          </Link>
-        </Button>
+        <NavRow
+          icon={Cloud}
+          label="新工作任务"
+          hint="启动可执行命令的 Agent 任务"
+          collapsed={collapsed}
+          active={onWorkRoute}
+          to="/t"
+          onClick={() => onNavigate?.()}
+          // Same warming as the in-page switch, so whichever entry point the
+          // user takes, work mode does not open on a loading screen.
+          onPointerEnter={prefetchWorkMode}
+          onFocus={prefetchWorkMode}
+        />
 
-        <div className="grid grid-cols-2 gap-2">
-          <Link
-            to="/studio"
-            onClick={() => onNavigate?.()}
-            title="多轮对话式生图（Responses API）"
-            className="group flex min-h-20 flex-col justify-between rounded-xl border border-sidebar-border bg-background/45 p-3 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:bg-background/80 hover:shadow-md"
-          >
-            <span className="grid size-8 place-items-center rounded-lg bg-violet-500/10 text-violet-600 transition-colors group-hover:bg-violet-500/15 dark:text-violet-300">
-              <ImageIcon className="size-4" />
-            </span>
-            <span className="text-xs font-medium">图像工作室</span>
-          </Link>
-          <Link
-            to="/videos"
-            onClick={() => onNavigate?.()}
-            title="文生视频 / 图生视频"
-            className="group flex min-h-20 flex-col justify-between rounded-xl border border-sidebar-border bg-background/45 p-3 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:bg-background/80 hover:shadow-md"
-          >
-            <span className="grid size-8 place-items-center rounded-lg bg-sky-500/10 text-sky-600 transition-colors group-hover:bg-sky-500/15 dark:text-sky-300">
-              <Clapperboard className="size-4" />
-            </span>
-            <span className="text-xs font-medium">视频工作室</span>
-          </Link>
-          <Link
-            to="/workflows"
-            onClick={() => onNavigate?.()}
-            title="图片 / 多视频 / 裁剪 / 合并节点画布"
-            className="group flex min-h-20 flex-col justify-between rounded-xl border border-sidebar-border bg-background/45 p-3 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:bg-background/80 hover:shadow-md"
-          >
-            <span className="grid size-8 place-items-center rounded-lg bg-emerald-500/10 text-emerald-600 transition-colors group-hover:bg-emerald-500/15 dark:text-emerald-300">
-              <Workflow className="size-4" />
-            </span>
-            <span className="text-xs font-medium">流水线</span>
-          </Link>
-          <Link
-            to="/editor"
-            onClick={() => onNavigate?.()}
-            title="多轨精细剪辑、素材库与服务端导出"
-            className="group flex min-h-20 flex-col justify-between rounded-xl border border-sidebar-border bg-background/45 p-3 shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:bg-background/80 hover:shadow-md"
-          >
-            <span className="grid size-8 place-items-center rounded-lg bg-amber-500/10 text-amber-600 transition-colors group-hover:bg-amber-500/15 dark:text-amber-300">
-              <Scissors className="size-4" />
-            </span>
-            <span className="text-xs font-medium">在线剪辑</span>
-          </Link>
-        </div>
-
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={user ? "搜索会话…" : "登录后查看历史会话"}
-            disabled={!user}
-            className="h-9 rounded-xl border-sidebar-border bg-background/45 pl-9 text-sm shadow-none"
-          />
-        </div>
-      </div>
-
-      <div className="flex items-center justify-between px-4 pb-1 pt-1">
-        <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
-          最近对话
-        </span>
-        {items.length > 0 && !trimmedQuery && (
-          <span className="rounded-full bg-sidebar-accent/60 px-2 py-0.5 text-[10px] tabular-nums text-muted-foreground">
-            {items.length}
-          </span>
+        {collapsed ? (
+          // In the rail the group cannot expand (there is nowhere to put the
+          // labels), so each tool keeps its own icon row.
+          TOOLS.map((t) => (
+            <NavRow
+              key={t.to}
+              icon={t.icon}
+              label={t.label}
+              hint={t.hint}
+              collapsed
+              active={location.pathname.startsWith(t.to)}
+              to={t.to}
+              onClick={() => onNavigate?.()}
+            />
+          ))
+        ) : (
+          <>
+            <NavRow
+              icon={Sparkles}
+              label="更多"
+              hint="图像、视频、流水线、剪辑与素材库"
+              collapsed={false}
+              onClick={() => setToolsOpen((v) => !v)}
+              trailing={
+                <ChevronDown
+                  className={cn(
+                    "size-3.5 shrink-0 text-muted-foreground transition-transform",
+                    toolsOpen && "rotate-180"
+                  )}
+                />
+              }
+            />
+            {toolsOpen && (
+              <div className="ml-3 flex flex-col gap-0.5 border-l border-sidebar-border/70 pl-2">
+                {TOOLS.map((t) => (
+                  <NavRow
+                    key={t.to}
+                    icon={t.icon}
+                    label={t.label}
+                    hint={t.hint}
+                    collapsed={false}
+                    active={location.pathname.startsWith(t.to)}
+                    to={t.to}
+                    onClick={() => onNavigate?.()}
+                  />
+                ))}
+                {user && onOpenLibrary && (
+                  <NavRow
+                    icon={BookMarked}
+                    label="提示词库"
+                    collapsed={false}
+                    onClick={() => {
+                      onOpenLibrary()
+                      onNavigate?.()
+                    }}
+                  />
+                )}
+                {user?.is_admin && (
+                  <NavRow
+                    icon={Shield}
+                    label="管理控制台"
+                    collapsed={false}
+                    active={location.pathname.startsWith("/admin")}
+                    to="/admin"
+                    onClick={() => onNavigate?.()}
+                  />
+                )}
+              </div>
+            )}
+          </>
         )}
-      </div>
+      </nav>
 
-      <div className="nc-scroll flex-1 overflow-y-auto px-2.5 pb-2">
-        {isApiSearch ? (
+      {collapsed ? (
+        // No input fits in the rail, so the icon expands the sidebar and hands
+        // focus straight to the search field — one click, not two.
+        <NavRow
+          icon={Search}
+          label="搜索会话"
+          collapsed
+          onClick={() => {
+            setSearchOpen(true)
+            toggleCollapsed()
+          }}
+        />
+      ) : (
+        <div className="flex items-center justify-between gap-2 px-1 pb-1 pt-2">
+          {searchOpen ? (
+            <div className="relative w-full">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                autoFocus
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={user ? "搜索会话…" : "登录后查看历史会话"}
+                disabled={!user}
+                className="h-8 rounded-lg border-sidebar-border bg-background/45 pl-8 pr-7 text-xs shadow-none"
+              />
+              <button
+                type="button"
+                onClick={() => {
+                  setSearchOpen(false)
+                  setQuery("")
+                }}
+                aria-label="关闭搜索"
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+              >
+                <X className="size-3.5" />
+              </button>
+            </div>
+          ) : (
+            <>
+              <span className="text-[11px] font-medium tracking-wide text-muted-foreground">
+                最近
+              </span>
+              <button
+                type="button"
+                onClick={() => setSearchOpen(true)}
+                title="搜索会话"
+                aria-label="搜索会话"
+                className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+              >
+                <Search className="size-3.5" />
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* The recent list is what the sidebar is for, so it owns the leftover
+          height; everything above it is fixed. */}
+      <div
+        className={cn(
+          "nc-scroll flex-1 overflow-y-auto pb-2",
+          collapsed && "w-full"
+        )}
+      >
+        {collapsed ? null : isApiSearch ? (
           <SearchResultsView
             query={trimmedQuery}
             hits={searchHits}
@@ -400,197 +592,182 @@ export function Sidebar({
           />
         ) : (
           <>
-        {loading && (
-          <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>
-        )}
-        {!loading && filtered.length === 0 && (
-          <p className="px-2 py-6 text-center text-xs text-muted-foreground">
-            {!user
-              ? "游客对话仅保留在当前页面"
-              : items.length === 0
-                ? "还没有会话"
-                : "没有匹配结果"}
-          </p>
-        )}
-        {error && (
-          <p className="mx-2 my-1 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive">
-            {error}
-          </p>
-        )}
-        <ul className="flex flex-col gap-1">
-          {filtered.map((c) => {
-            const active =
-              activeAgent
-                ? c.kind === "agent" && activeId === c.id
-                : c.kind === "chat" && activeId === c.id
-            const itemKey = `${c.kind}-${c.id}`
-            return (
-              <li key={itemKey} className="relative">
-                <div
-                  className={cn(
-                    "group relative flex items-center rounded-xl border border-transparent transition-all",
-                    active
-                      ? "border-primary/10 bg-sidebar-accent/80 text-sidebar-accent-foreground shadow-sm"
-                      : "hover:border-sidebar-border hover:bg-background/45"
-                  )}
-                >
-                  {active && (
-                    <span className="absolute left-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-full bg-sidebar-primary" />
-                  )}
-                  <Link
-                    to={c.kind === "agent" ? `/t/${c.id}` : `/c/${c.id}`}
-                    className="min-w-0 flex-1 px-3 py-2.5"
-                    title={c.title}
-                    onClick={() => {
-                      setMenuFor(null)
-                      onNavigate?.()
-                    }}
-                  >
-                    <div className="flex items-center gap-1.5 truncate text-[13px] font-medium">
-                      {c.kind === "agent" &&
-                        (c.target === "cloud" ? (
-                          <Cloud className="size-3.5 shrink-0 text-primary" />
-                        ) : (
-                          <Laptop className="size-3.5 shrink-0 text-primary" />
-                        ))}
-                      <span className="truncate">{c.title}</span>
-                    </div>
-                    <div className="mt-1 truncate text-[10px] text-muted-foreground">
-                      {relativeTime(c.updated_at)}
-                    </div>
-                  </Link>
-                  <button
-                    type="button"
-                    className="mr-1 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-background/60 hover:text-foreground group-hover:opacity-100 data-[open=true]:opacity-100"
-                    data-open={menuFor === itemKey}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      setMenuFor(menuFor === itemKey ? null : itemKey)
-                    }}
-                    aria-label="菜单"
-                  >
-                    <MoreHorizontal className="size-4" />
-                  </button>
-                </div>
-                {menuFor === itemKey && (
-                  <div
-                    className="absolute right-1 top-full z-10 mt-0.5 flex min-w-36 flex-col rounded-md border border-border bg-popover p-1 text-sm shadow-panel"
-                    onMouseLeave={() => setMenuFor(null)}
-                  >
-                    <button
-                      className="flex items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent"
-                      onClick={() => {
-                        setMenuFor(null)
-                        void rename(c)
-                      }}
+            {loading && (
+              <p className="px-2 py-1 text-xs text-muted-foreground">加载中…</p>
+            )}
+            {!loading && filtered.length === 0 && (
+              <p className="px-2 py-6 text-center text-xs text-muted-foreground">
+                {!user
+                  ? "游客对话仅保留在当前页面"
+                  : items.length === 0
+                    ? "还没有会话"
+                    : "没有匹配结果"}
+              </p>
+            )}
+            {error && (
+              <p className="mx-1 my-1 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-xs text-destructive">
+                {error}
+              </p>
+            )}
+            <ul className="flex flex-col gap-0.5">
+              {filtered.map((c) => {
+                const active = activeAgent
+                  ? c.kind === "agent" && activeId === c.id
+                  : c.kind === "chat" && activeId === c.id
+                const itemKey = `${c.kind}-${c.id}`
+                return (
+                  <li key={itemKey} className="relative">
+                    <div
+                      className={cn(
+                        "group relative flex items-center rounded-lg transition-colors",
+                        active
+                          ? "bg-sidebar-accent/80 text-sidebar-accent-foreground"
+                          : "hover:bg-sidebar-accent/55"
+                      )}
                     >
-                      <Pencil className="size-3.5" /> 重命名
-                    </button>
-                    <button
-                      className="flex items-center gap-2 rounded px-2 py-1 text-left text-destructive hover:bg-destructive/10"
-                      onClick={() => {
-                        setMenuFor(null)
-                        void remove(c)
-                      }}
-                    >
-                      <Trash2 className="size-3.5" /> 删除
-                    </button>
-                  </div>
-                )}
-              </li>
-            )
-          })}
-        </ul>
-        {!loading && items.some((x) => x.kind === "chat") && !trimmedQuery && (
-          <button
-            type="button"
-            onClick={() => void removeAll()}
-            className="mx-2 mt-2 flex w-[calc(100%-1rem)] items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
-            title="删除全部会话"
-          >
-            <Trash2 className="size-3.5" /> 清空全部会话
-          </button>
-        )}
+                      <Link
+                        to={c.kind === "agent" ? `/t/${c.id}` : `/c/${c.id}`}
+                        className="min-w-0 flex-1 px-2.5 py-2"
+                        title={`${c.title}　·　${relativeTime(c.updated_at)}`}
+                        onClick={() => {
+                          setMenuFor(null)
+                          onNavigate?.()
+                        }}
+                      >
+                        {/* One line per session, Doubao-style: the timestamp
+                            moved into the tooltip so twice as many titles fit
+                            without scrolling. */}
+                        <div className="flex items-center gap-1.5 truncate text-[13px]">
+                          {c.kind === "agent" &&
+                            (c.target === "cloud" ? (
+                              <Cloud className="size-3.5 shrink-0 text-primary" />
+                            ) : (
+                              <Laptop className="size-3.5 shrink-0 text-primary" />
+                            ))}
+                          <span className="truncate">{c.title}</span>
+                        </div>
+                      </Link>
+                      <button
+                        type="button"
+                        className="mr-1 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-background/60 hover:text-foreground group-hover:opacity-100 data-[open=true]:opacity-100"
+                        data-open={menuFor === itemKey}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          setMenuFor(menuFor === itemKey ? null : itemKey)
+                        }}
+                        aria-label="菜单"
+                      >
+                        <MoreHorizontal className="size-4" />
+                      </button>
+                    </div>
+                    {menuFor === itemKey && (
+                      <div
+                        className="absolute right-1 top-full z-10 mt-0.5 flex min-w-36 flex-col rounded-md border border-border bg-popover p-1 text-sm shadow-panel"
+                        onMouseLeave={() => setMenuFor(null)}
+                      >
+                        <button
+                          className="flex items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent"
+                          onClick={() => {
+                            setMenuFor(null)
+                            void rename(c)
+                          }}
+                        >
+                          <Pencil className="size-3.5" /> 重命名
+                        </button>
+                        <button
+                          className="flex items-center gap-2 rounded px-2 py-1 text-left text-destructive hover:bg-destructive/10"
+                          onClick={() => {
+                            setMenuFor(null)
+                            void remove(c)
+                          }}
+                        >
+                          <Trash2 className="size-3.5" /> 删除
+                        </button>
+                      </div>
+                    )}
+                  </li>
+                )
+              })}
+            </ul>
+            {!loading && items.some((x) => x.kind === "chat") && !trimmedQuery && (
+              <button
+                type="button"
+                onClick={() => void removeAll()}
+                className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive"
+                title="删除全部会话"
+              >
+                <Trash2 className="size-3.5" /> 清空全部会话
+              </button>
+            )}
           </>
         )}
       </div>
 
-      <div className="flex flex-col gap-1 border-t border-sidebar-border bg-background/20 px-2.5 py-2.5">
-        <Link
-          to="/library"
+      <div
+        className={cn(
+          "flex flex-col gap-1 border-t border-sidebar-border py-2",
+          collapsed && "w-full items-center"
+        )}
+      >
+        {/* Downloads live at the bottom of the sidebar, the way Doubao keeps
+            "下载电脑版" out of the working area: it is a one-time action, not
+            something the user returns to mid-task. */}
+        <NavRow
+          icon={Download}
+          label="下载客户端"
+          hint="下载桌面客户端，把任务跑在自己的电脑上"
+          collapsed={collapsed}
+          active={location.pathname.startsWith("/download")}
+          to="/download"
           onClick={() => onNavigate?.()}
-          className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
-          title="管理并浏览公开分享的图片、视频和音频"
-        >
-          <Library className="size-4" /> 素材库
-        </Link>
-        {user?.is_admin && (
-          <Link
-            to="/admin"
-            onClick={() => onNavigate?.()}
-            className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
-            title="进入管理控制台"
-          >
-            <Shield className="size-4" /> 管理控制台
-          </Link>
-        )}
-        {user && onOpenLibrary && (
-          <button
-            type="button"
-            onClick={() => {
-              onOpenLibrary()
-              onNavigate?.()
-            }}
-            className="flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
-          >
-            <BookMarked className="size-4" /> 提示词库
-          </button>
-        )}
+        />
         {user ? (
-          <div className="mt-1 flex items-center justify-between gap-2 rounded-xl border border-sidebar-border bg-background/45 p-1.5 shadow-sm">
+          collapsed ? (
             <button
               type="button"
               onClick={() => setProfileOpen(true)}
-              className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-1 py-0.5 text-left transition-colors hover:bg-sidebar-accent/70"
-              title="个人资料"
+              title={user.display_name?.trim() || user.username}
+              className="grid size-9 place-items-center rounded-lg transition-colors hover:bg-sidebar-accent/60"
             >
-              {user.avatar_url && !avatarBroken ? (
-                <img
-                  src={user.avatar_url}
-                  alt=""
-                  className="size-7 shrink-0 rounded-full border border-border object-cover"
-                  onError={() => setAvatarBroken(true)}
-                />
-              ) : (
-                <div className="grid size-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-primary to-chart-5 text-[11px] font-semibold text-primary-foreground">
-                  {((user.display_name?.trim() || user.username)
-                    .slice(0, 1)).toUpperCase()}
-                </div>
-              )}
-              <span className="truncate text-xs">
-                {user.display_name?.trim() || user.username}
-              </span>
+              <Avatar user={user} broken={avatarBroken} onBroken={() => setAvatarBroken(true)} />
             </button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                void auth.logout().then(() => {
-                  nav("/")
-                  onNavigate?.()
-                })
-              }}
-              title="退出登录"
-            >
-              <LogOut className="size-4" />
-            </Button>
-          </div>
+          ) : (
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setProfileOpen(true)}
+                className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-sidebar-accent/60"
+                title="个人资料"
+              >
+                <Avatar user={user} broken={avatarBroken} onBroken={() => setAvatarBroken(true)} />
+                <span className="truncate text-xs">
+                  {user.display_name?.trim() || user.username}
+                </span>
+              </button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => {
+                  void auth.logout().then(() => {
+                    nav("/")
+                    onNavigate?.()
+                  })
+                }}
+                title="退出登录"
+              >
+                <LogOut className="size-4" />
+              </Button>
+            </div>
+          )
         ) : (
-          <Button asChild className="mt-1 w-full justify-start gap-2.5">
-            <Link to="/login?next=/" onClick={() => onNavigate?.()}>
-              <LogIn className="size-4" /> 登录使用云端模型
-            </Link>
-          </Button>
+          <NavRow
+            icon={LogIn}
+            label="登录"
+            hint="登录使用云端模型"
+            collapsed={collapsed}
+            to="/login?next=/"
+            onClick={() => onNavigate?.()}
+          />
         )}
       </div>
 
@@ -598,6 +775,32 @@ export function Sidebar({
         <ProfileDialog open={profileOpen} onClose={() => setProfileOpen(false)} />
       )}
     </aside>
+  )
+}
+
+function Avatar({
+  user,
+  broken,
+  onBroken,
+}: {
+  user: { avatar_url?: string | null; display_name?: string | null; username: string }
+  broken: boolean
+  onBroken: () => void
+}) {
+  if (user.avatar_url && !broken) {
+    return (
+      <img
+        src={user.avatar_url}
+        alt=""
+        className="size-7 shrink-0 rounded-full border border-border object-cover"
+        onError={onBroken}
+      />
+    )
+  }
+  return (
+    <div className="grid size-7 shrink-0 place-items-center rounded-full bg-gradient-to-br from-primary to-chart-5 text-[11px] font-semibold text-primary-foreground">
+      {(user.display_name?.trim() || user.username).slice(0, 1).toUpperCase()}
+    </div>
   )
 }
 
@@ -635,7 +838,7 @@ function SearchResultsView({
 }) {
   if (error) {
     return (
-      <p className="mx-2 my-2 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
+      <p className="mx-1 my-2 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
         搜索失败：{error}
       </p>
     )
@@ -677,7 +880,7 @@ function SearchResultsView({
               <Link
                 to={target}
                 onClick={onNavigate}
-                className="flex flex-col gap-1 rounded-lg px-3 py-2 transition-colors hover:bg-sidebar-accent/60"
+                className="flex flex-col gap-1 rounded-lg px-2.5 py-2 transition-colors hover:bg-sidebar-accent/60"
                 title={h.conversation_title}
               >
                 <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">

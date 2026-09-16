@@ -125,7 +125,7 @@ cargo run                # 后端 :3001
 cd web && bun run dev    # 前端 :5173 → /api 走 vite proxy
 ```
 
-测试在本地跑：`cargo test` + `cd web && npx tsc -b`。CI 只负责构建镜像、不跑测试。
+测试在本地跑：`cargo test` + `cd web && npx tsc -b && bun test`。CI 只负责构建镜像、不跑测试。
 
 ## 创作流水线
 
@@ -287,6 +287,11 @@ Anthropic 拼 `/v1/messages`），因此网关额外暴露了
 而不是同一页面的开关：工作模式会启动一个能执行命令的 Agent，选择它等于决定
 「代码在哪里跑」，必须是一个显式决定。
 
+侧边栏本身按「常用在上、工具收起、下载在底」排布：新对话与新工作任务常驻顶部，
+图像/视频/流水线/剪辑/素材库收进可折叠的「更多」，桌面端还可以收成只剩图标的窄栏
+（偏好存在 `localStorage`，刷新后保持）。这样会话列表拿到绝大部分竖向空间，
+而不是被一堆入口卡片挤到屏幕下半截。
+
 工作模式下再选执行位置：**云电脑**（隔离容器）或**本地电脑**（桌面客户端）。
 未安装桌面客户端时不会把本地电脑列成可选项，而是直接说明原因；离线设备也不可选，
 避免把一个前置条件变成发送时才报的错。会话创建后执行位置不再可改——它的运行时和
@@ -359,6 +364,13 @@ YUNOVA_DEVICE_TOKEN=ynd_... \
 YUNOVA_DEVICE_WORKSPACE=/path/to/project \
 ./yunova-desktop
 ```
+
+二进制从 `/download` 页面下载。它不由本服务分发：镜像没有理由塞进五个平台的构建，
+自托管实例也不该为了让用户装客户端而去镜像这些文件。页面在浏览时读 GitHub Release
+的资产列表，读不到（无出网、限流、内网部署）就退化成「最新发布页」链接，
+而不是渲染出死链。资产名由 `.github/workflows/desktop-release.yml` 产生，
+必须与 `web/src/lib/downloads.ts` 里的 `yunova-desktop-<target>` 对齐，
+`web/tests/downloads.test.ts` 盯着这条约定。
 
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |

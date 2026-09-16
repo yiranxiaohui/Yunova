@@ -384,7 +384,7 @@ export default function AgentTaskPage() {
               <Menu />
             </Button>
           </SheetTrigger>
-          <SheetContent side="left" className="w-[18rem] p-0">
+          <SheetContent side="left" className="w-[16rem] p-0">
             <SheetTitle className="sr-only">导航</SheetTitle>
             <Sidebar onNavigate={() => setSidebarOpen(false)} />
           </SheetContent>
@@ -416,8 +416,8 @@ export default function AgentTaskPage() {
     // growing page would push it past the viewport instead of scrolling the
     // transcript. Matches chat, which is why the two screens line up.
     <div className="app-shell flex h-svh bg-background text-foreground">
-      {/* Sidebar sets its own 18rem width; the wrapper must match or the
-          main column starts underneath it. */}
+      {/* The sidebar owns its own width (and collapses to a rail), so the
+          wrapper must not pin one or the two disagree while collapsing. */}
       <aside className="hidden shrink-0 md:block">
         <Sidebar />
       </aside>
