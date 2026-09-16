@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
+import { useEffect, useMemo, useState, type ReactNode } from "react"
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom"
 import {
   BookMarked,
@@ -13,7 +13,6 @@ import {
   LogOut,
   MessageSquareText,
   MoreHorizontal,
-  PanelLeft,
   Pencil,
   Scissors,
   Search,
@@ -35,6 +34,7 @@ import { useAuth } from "@/lib/auth-context"
 import { prefetchWorkMode } from "@/lib/mode"
 import { useConfirm } from "@/lib/confirm-context"
 import { useIsDesktop } from "@/lib/use-media-query"
+import { useSidebarCollapsed } from "@/lib/sidebar-collapse"
 import { BrandMark } from "./BrandMark"
 import { ProfileDialog } from "./ProfileDialog"
 
@@ -53,17 +53,6 @@ type Props = {
 type SidebarItem =
   | { kind: "chat"; id: number; title: string; updated_at: string }
   | { kind: "agent"; id: number; title: string; updated_at: string; target: AgentTarget }
-
-/** Persisted so the rail does not spring back open on every navigation. */
-const COLLAPSE_KEY = "yunova.sidebar.collapsed"
-
-function readCollapsed(): boolean {
-  try {
-    return window.localStorage.getItem(COLLAPSE_KEY) === "1"
-  } catch {
-    return false
-  }
-}
 
 function relativeTime(iso: string): string {
   // Timestamps arrive in two shapes: SQLite's `datetime('now')` ("2026-09-15
@@ -179,24 +168,14 @@ export function Sidebar({
   const [searchHits, setSearchHits] = useState<SearchHit[] | null>(null)
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
-  const [collapsedPref, setCollapsedPref] = useState(readCollapsed)
+  // Collapsing is driven from the page header, the way Doubao keeps the panel
+  // toggle in the working area rather than inside the panel it hides.
+  const [collapsedPref, toggleCollapsed] = useSidebarCollapsed()
 
   // The rail only exists on desktop: the mobile drawer is already an overlay,
   // and a 4rem strip of icons inside it would be a worse version of nothing.
   const isDesktop = useIsDesktop()
   const collapsed = isDesktop && collapsedPref
-
-  const toggleCollapsed = useCallback(() => {
-    setCollapsedPref((v) => {
-      const next = !v
-      try {
-        window.localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0")
-      } catch {
-        /* private mode: the preference is simply not remembered */
-      }
-      return next
-    })
-  }, [])
 
   useEffect(() => {
     setAvatarBroken(false)
@@ -397,25 +376,25 @@ export function Sidebar({
         collapsed ? "w-[4.25rem] items-center px-2" : "w-[16rem] px-3"
       )}
     >
+      {/* Brand only. The collapse control lives in the page header, so the
+          sidebar's own top row is free to be what Doubao's is: the product
+          name and nothing else. */}
       <div
         className={cn(
-          "flex items-center pb-2 pt-3",
-          collapsed ? "justify-center" : "justify-between gap-2"
+          "flex min-h-14 items-center",
+          collapsed ? "justify-center" : "px-1"
         )}
       >
-        {!collapsed && <BrandMark size="sm" />}
-        {/* Desktop-only: on mobile the drawer's own close affordance applies
-            and a collapse toggle would leave a rail nobody asked for. */}
-        <button
-          type="button"
-          onClick={toggleCollapsed}
-          title={collapsed ? "展开侧栏" : "收起侧栏"}
-          aria-label={collapsed ? "展开侧栏" : "收起侧栏"}
-          aria-expanded={!collapsed}
-          className="hidden size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground md:grid"
-        >
-          <PanelLeft className="size-4" />
-        </button>
+        {collapsed ? (
+          <img
+            src="/logo.png"
+            alt="Yunova"
+            title="Yunova"
+            className="size-7 rounded-lg ring-1 ring-white/15"
+          />
+        ) : (
+          <BrandMark size="sm" />
+        )}
       </div>
 
       <nav className="flex flex-col gap-0.5 pb-1">
