@@ -693,8 +693,8 @@ export function Sidebar({
             something the user returns to mid-task. */}
         <NavRow
           icon={Download}
-          label="下载客户端"
-          hint="下载桌面客户端，把任务跑在自己的电脑上"
+          label="下载电脑版"
+          hint="安装桌面应用，并把任务跑在自己的电脑上"
           collapsed={collapsed}
           active={location.pathname.startsWith("/download")}
           to="/download"

@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Yunova 本机设置</title>
+    <!--
+      The local control panel.
+
+      Hand-written, dependency-free HTML rather than part of the React bundle,
+      and that is deliberate: this is the one surface allowed to change what an
+      agent may do to this computer, so it must not be served by — or share an
+      origin with — the remote site. It ships inside the binary and works
+      before any server is reachable, which is also when the user needs it most
+      (the first run, when nothing is configured yet).
+    -->
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <span class="dot" id="dot"></span>
+        <div>
+          <div class="title">本机执行端</div>
+          <div class="sub" id="statusText">正在读取状态…</div>
+        </div>
+      </div>
+      <button class="ghost" id="openSite">打开 Yunova</button>
+    </header>
+
+    <main>
+      <section class="card" id="loginCard" hidden>
+        <h2>登录以绑定这台电脑</h2>
+        <p class="hint">
+          登录即绑定，没有配对码。密码不会保存，本机只留一枚可单独吊销的设备令牌。
+        </p>
+        <label>账号<input id="username" autocomplete="username" /></label>
+        <label>密码<input id="password" type="password" autocomplete="current-password" /></label>
+        <button class="primary" id="signIn">登录并绑定</button>
+        <p class="error" id="loginError" hidden></p>
+      </section>
+
+      <section class="card">
+        <h2>连接</h2>
+        <label>
+          站点地址
+          <input id="siteUrl" placeholder="https://yunnet.top" spellcheck="false" />
+        </label>
+        <label>设备名<input id="name" spellcheck="false" /></label>
+        <div class="row">
+          <button class="primary" id="connect">连接</button>
+          <button class="ghost" id="disconnect">断开</button>
+          <button class="ghost danger" id="signOut">解除绑定</button>
+        </div>
+        <p class="hint" id="boundAs"></p>
+      </section>
+
+      <section class="card">
+        <h2>Agent 可操作的范围</h2>
+        <p class="hint">
+          指令可能来自手机，也可能受 Agent 读到的网页内容影响，所以这里的范围就是
+          这台电脑的风险边界。
+        </p>
+        <label>
+          工作目录
+          <span class="pick">
+            <input id="workspace" spellcheck="false" />
+            <button class="ghost" id="pickWorkspace">选择…</button>
+          </span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="autoApprove" />
+          <span>
+            放开审批（Agent 可直接在本机执行命令）
+            <em>关闭时逐条确认，可在本窗口、网页或手机上处理。</em>
+          </span>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="connectOnLaunch" />
+          <span>启动时自动连接</span>
+        </label>
+        <label>运行时可执行文件<input id="program" spellcheck="false" /></label>
+        <div class="row">
+          <button class="primary" id="save">保存</button>
+          <span class="saved" id="saved" hidden>已保存</span>
+        </div>
+        <p class="warn" id="autoWarn" hidden>
+          ⚠ 自动批准下 Agent 可在本机任意执行命令，只在信任的环境中使用。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>运行日志 <span class="count" id="sessions"></span></h2>
+        <pre id="log" class="log"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>
