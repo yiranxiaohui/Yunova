@@ -12,9 +12,16 @@
 //! a phone run here without the phone or the server being trusted with the
 //! machine.
 //!
+//! Attaching is a sign-in, not a pairing step: the user gives their account
+//! credentials once and the server binds this machine on the spot. What stays
+//! on disk afterwards is a device-scoped token, so the credential this client
+//! holds can be revoked to one computer instead of standing in for the
+//! account.
+//!
 //! This is the headless core. A GUI shell can embed it unchanged; the
 //! connector, policy and supervision do not depend on having a window.
 
+mod identity;
 mod proto;
 mod runtime;
 #[path = "../../src/runtime_env.rs"]
@@ -24,6 +31,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use identity::{
+    Credential, credential_path, fingerprint, forget_credential, load_credential, prompt_login,
+    save_credential,
+};
 use proto::{FromServer, ToServer};
 use runtime::{Config, RuntimeManager};
 use tokio::sync::mpsc;
@@ -40,7 +51,8 @@ async fn main() {
         Err(_) => {
             eprintln!(
                 "需要环境变量 YUNOVA_DEVICE_URL（站点地址，如 https://yunnet.top）\n\
-                 需要环境变量 YUNOVA_DEVICE_TOKEN（网页「本地电脑」页生成的配对码）\n\
+                 首次运行会提示登录 Yunova 账号，登录后自动绑定本机\n\
+                 可选 YUNOVA_USERNAME、YUNOVA_PASSWORD（无人值守启动，免交互登录）\n\
                  可选 YUNOVA_DEVICE_WORKSPACE（Agent 可操作的目录，默认当前目录）\n\
                  可选 YUNOVA_DEVICE_NAME、YUNOVA_PI_BIN\n\
                  可选 YUNOVA_DEVICE_AUTO_APPROVE=1（放开审批，谨慎使用）"
@@ -49,13 +61,6 @@ async fn main() {
         }
     };
     let url = normalize_url(&raw);
-    let token = match runtime_env::var("YUNOVA_DEVICE_TOKEN") {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("需要环境变量 YUNOVA_DEVICE_TOKEN（配对码）");
-            std::process::exit(2);
-        }
-    };
     let name = runtime_env::var("YUNOVA_DEVICE_NAME").unwrap_or_else(|_| hostname());
 
     // The workspace bounds what the agent can reach. Defaulting to the current
@@ -80,6 +85,17 @@ async fn main() {
         program: runtime_env::var("YUNOVA_PI_BIN").unwrap_or_else(|_| "pi".into()),
         auto_approve,
     });
+
+    // The credential lives outside the workspace: the workspace is precisely
+    // what the agent may rewrite, and a token the agent can edit is a token it
+    // can replace or leak. An explicit override exists for packaging.
+    let cred_path = credential_path(
+        runtime_env::var("YUNOVA_DEVICE_CONFIG_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .as_deref(),
+        &url,
+    );
 
     println!("Yunova 桌面客户端");
     println!("  服务器:   {url}");
@@ -106,14 +122,71 @@ async fn main() {
         std::process::exit(0);
     });
 
+    let mut credential = load_credential(&cred_path);
+    match &credential {
+        Some(c) if !c.username.is_empty() => {
+            println!("  账号:     {}（设备 {}）", c.username, c.device_id)
+        }
+        Some(_) => println!("  账号:     已保存设备凭证"),
+        None => println!("  账号:     未登录，马上要求登录"),
+    }
+
     let mut backoff = 1u64;
     loop {
-        match run_once(&url, &token, &name, &manager).await {
-            Ok(()) => {
+        // No stored token means this is a first attach, or the server rejected
+        // the old one. Ask for the account, then let the connection mint a
+        // device token.
+        let attach = match &credential {
+            Some(c) => Attach::Token(c.token.clone()),
+            None => match prompt_login(
+                runtime_env::var("YUNOVA_USERNAME").ok(),
+                runtime_env::var("YUNOVA_PASSWORD").ok(),
+            ) {
+                Ok(login) => Attach::Login(login),
+                Err(e) => {
+                    eprintln!("[device] {e}");
+                    std::process::exit(2);
+                }
+            },
+        };
+
+        match run_once(&url, attach, &name, &manager, &cred_path).await {
+            Ok(Outcome::Closed) => {
                 eprintln!("[device] 连接已关闭，准备重连");
                 backoff = 1;
             }
-            Err(e) => eprintln!("[device] 连接错误: {e}，{backoff} 秒后重连"),
+            Ok(Outcome::Attached(fresh)) => {
+                credential = Some(fresh);
+                backoff = 1;
+            }
+            Err(Failure::Misconfigured(message)) => {
+                // Nothing about retrying changes a wrong URL, and looping on
+                // it buries the one line the user actually needs to read.
+                eprintln!("[device] {message}");
+                manager.stop_all().await;
+                std::process::exit(2);
+            }
+            Err(Failure::Rejected(message)) => {
+                // The server refused this credential. Dropping it is what
+                // makes recovery possible: the next iteration asks the user to
+                // sign in instead of retrying a token that will never be
+                // accepted.
+                eprintln!("[device] 服务器拒绝: {message}");
+                if credential.is_some() {
+                    forget_credential(&cred_path);
+                    credential = None;
+                    eprintln!("[device] 已清除本地凭证，将重新登录");
+                } else {
+                    // A wrong password would otherwise spin as fast as the user
+                    // can be re-prompted.
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                manager.stop_all().await;
+                continue;
+            }
+            Err(Failure::Transport(e)) => {
+                eprintln!("[device] 连接错误: {e}，{backoff} 秒后重连")
+            }
         }
         // A dropped socket leaves local runtimes unreachable, so retire them
         // instead of leaving processes nobody can talk to.
@@ -123,26 +196,73 @@ async fn main() {
     }
 }
 
+/// How this connection intends to authenticate.
+enum Attach {
+    Token(String),
+    Login(identity::Login),
+}
+
+/// Why a connection ended.
+enum Outcome {
+    /// The socket closed normally; reconnect with what we already have.
+    Closed,
+    /// A sign-in succeeded and returned a credential worth persisting.
+    Attached(Credential),
+}
+
+enum Failure {
+    /// The server declined the credential. Retrying it unchanged is pointless.
+    Rejected(String),
+    /// The client itself refuses to proceed — a wrong URL, not a wrong
+    /// credential. No amount of retrying fixes it, so it must not be retried.
+    Misconfigured(String),
+    /// Network-level problem; the same credential will work once it clears.
+    Transport(String),
+}
+
 async fn run_once(
     url: &str,
-    token: &str,
+    attach: Attach,
     name: &str,
     manager: &RuntimeManager,
-) -> Result<(), String> {
+    cred_path: &std::path::Path,
+) -> Result<Outcome, Failure> {
+    // Credentials cross this socket, so refuse to send a password in the
+    // clear. Plain HTTP stays usable for local development and for an
+    // already-issued token, but a password is not worth the same latitude.
+    if matches!(attach, Attach::Login(_)) && !url.starts_with("wss://") && !is_loopback(url) {
+        return Err(Failure::Misconfigured(
+            "拒绝在非加密连接上发送密码，请将 YUNOVA_DEVICE_URL 改为 https://".into(),
+        ));
+    }
+
     let (ws, _) = tokio_tungstenite::connect_async(url)
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Failure::Transport(e.to_string()))?;
     let (mut sink, mut stream) = ws.split();
 
-    let hello = serde_json::to_string(&ToServer::Hello {
-        token: token.to_string(),
-        name: name.to_string(),
-        platform: Some(platform().to_string()),
-    })
-    .map_err(|e| e.to_string())?;
+    let mut signed_in_as = String::new();
+    let hello = match attach {
+        Attach::Token(token) => ToServer::Hello {
+            token,
+            name: name.to_string(),
+            platform: Some(platform().to_string()),
+        },
+        Attach::Login(login) => {
+            signed_in_as = login.username.clone();
+            ToServer::Login {
+                username: login.username,
+                password: login.password,
+                name: name.to_string(),
+                platform: Some(platform().to_string()),
+                fingerprint: Some(fingerprint(name)),
+            }
+        }
+    };
+    let hello = serde_json::to_string(&hello).map_err(|e| Failure::Transport(e.to_string()))?;
     sink.send(Message::Text(hello))
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Failure::Transport(e.to_string()))?;
 
     // Outbound queue: runtime output, heartbeats and lifecycle notices all
     // funnel through one writer so the socket has a single owner.
@@ -169,8 +289,18 @@ async fn run_once(
         }
     });
 
+    let mut outcome = Outcome::Closed;
+    let mut rejection: Option<String> = None;
+
     while let Some(msg) = stream.next().await {
-        let msg = msg.map_err(|e| e.to_string())?;
+        let msg = match msg {
+            Ok(m) => m,
+            Err(e) => {
+                heartbeat.abort();
+                writer.abort();
+                return Err(Failure::Transport(e.to_string()));
+            }
+        };
         let Message::Text(text) = msg else {
             continue;
         };
@@ -178,11 +308,32 @@ async fn run_once(
             continue;
         };
         match parsed {
-            FromServer::HelloOk { device_id } => {
+            FromServer::HelloOk { device_id, token } => {
                 println!("已连接，设备 ID {device_id}");
+                // A token arrives only right after a sign-in, and it is stored
+                // immediately rather than when the socket closes: a client
+                // killed while connected would otherwise lose the credential
+                // it just obtained and ask for the password again.
+                if let Some(token) = token {
+                    let cred = Credential {
+                        token,
+                        username: signed_in_as.clone(),
+                        device_id,
+                    };
+                    match save_credential(cred_path, &cred) {
+                        Ok(()) => println!(
+                            "[device] 已绑定本机，凭证保存于 {}",
+                            cred_path.display()
+                        ),
+                        Err(e) => eprintln!(
+                            "[device] 无法保存设备凭证（下次启动仍需登录）: {e}"
+                        ),
+                    }
+                    outcome = Outcome::Attached(cred);
+                }
             }
             FromServer::Error { message } => {
-                eprintln!("[device] 服务器拒绝: {message}");
+                rejection = Some(message);
                 break;
             }
             FromServer::StartRuntime {
@@ -222,7 +373,38 @@ async fn run_once(
 
     heartbeat.abort();
     writer.abort();
-    Ok(())
+    match rejection {
+        // A rejection *after* a successful sign-in is about the device being
+        // removed, not about the token just stored, so the fresh credential is
+        // still reported: discarding it would force a needless re-login.
+        Some(message) => match outcome {
+            Outcome::Attached(cred) => {
+                eprintln!("[device] 服务器拒绝: {message}");
+                Ok(Outcome::Attached(cred))
+            }
+            Outcome::Closed => Err(Failure::Rejected(message)),
+        },
+        None => Ok(outcome),
+    }
+}
+
+/// Whether the endpoint is this machine, where plain HTTP is a development
+/// setup rather than an exposed password.
+fn is_loopback(url: &str) -> bool {
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(url)
+        .split(['/', '?'])
+        .next()
+        .unwrap_or("");
+    let host = match host.strip_prefix('[') {
+        // Bracketed IPv6: the colons inside belong to the address, not to a
+        // port, so the generic split would truncate it.
+        Some(rest) => rest.split_once(']').map(|(h, _)| h).unwrap_or(rest),
+        None => host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host),
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Accept a site address and derive the device WebSocket endpoint.
@@ -310,7 +492,7 @@ mod tests {
     #[test]
     fn an_unknown_scheme_is_treated_as_encrypted() {
         // Guessing wrong in the safe direction fails loudly; guessing wrong in
-        // the unsafe direction would send a pairing code in the clear.
+        // the unsafe direction would send a password in the clear.
         assert!(normalize_url("gopher://example.com").starts_with("wss://"));
     }
 
@@ -335,6 +517,62 @@ mod tests {
         assert_eq!(v["token"], "ynd_x");
         assert_eq!(v["name"], "laptop");
         assert_eq!(v["platform"], "linux");
+    }
+
+    #[test]
+    fn the_login_frame_carries_the_account_and_the_machine() {
+        let text = serde_json::to_string(&ToServer::Login {
+            username: "orca".into(),
+            password: "secret".into(),
+            name: "laptop".into(),
+            platform: Some("linux".into()),
+            fingerprint: Some("fp123".into()),
+        })
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["type"], "login");
+        assert_eq!(v["username"], "orca");
+        assert_eq!(v["password"], "secret");
+        // The fingerprint is what makes a re-login rebind this machine instead
+        // of adding a second entry to the user's device list.
+        assert_eq!(v["fingerprint"], "fp123");
+    }
+
+    #[test]
+    fn a_hello_ok_without_a_token_is_a_plain_reconnect() {
+        // Only a sign-in mints a token, so the field must be optional or an
+        // ordinary reconnect would fail to parse.
+        let ok: FromServer =
+            serde_json::from_str(r#"{"type":"hello_ok","device_id":3}"#).unwrap();
+        match ok {
+            FromServer::HelloOk { device_id, token } => {
+                assert_eq!(device_id, 3);
+                assert!(token.is_none());
+            }
+            other => panic!("expected hello_ok, got {other:?}"),
+        }
+
+        let fresh: FromServer =
+            serde_json::from_str(r#"{"type":"hello_ok","device_id":3,"token":"ynd_new"}"#)
+                .unwrap();
+        match fresh {
+            FromServer::HelloOk { token, .. } => assert_eq!(token.as_deref(), Some("ynd_new")),
+            other => panic!("expected hello_ok, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_this_machine_counts_as_loopback() {
+        // The password is allowed over plain HTTP exactly where the traffic
+        // never leaves the machine.
+        assert!(is_loopback("ws://127.0.0.1:3000/api/agent/devices/connect"));
+        assert!(is_loopback("ws://localhost:3000/api/agent/devices/connect"));
+        assert!(is_loopback("ws://[::1]:3000/api/agent/devices/connect"));
+        assert!(!is_loopback("ws://10.1.51.1:4300/api/agent/devices/connect"));
+        assert!(!is_loopback("ws://yunnet.top/api/agent/devices/connect"));
+        // A hostname that merely starts with a loopback label is not loopback.
+        assert!(!is_loopback("ws://localhost.evil.com/api"));
+        assert!(!is_loopback("ws://127.0.0.1.evil.com/api"));
     }
 
     #[test]

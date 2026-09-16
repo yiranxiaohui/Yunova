@@ -16,15 +16,22 @@
 //! not. So the desktop client, not the server, owns the workspace allowlist
 //! and the approval policy. The server never tells a device what to execute —
 //! it forwards prompts and the local runtime decides.
+//!
+//! A machine attaches by signing in with the user's own account, and the
+//! server binds it on the spot. Pairing codes are gone: they only existed to
+//! name a machine the server had never seen, and the account already answers
+//! "whose computer is this". What the client stores afterwards is a
+//! device-scoped token, not the password, so a stolen config file attaches one
+//! machine rather than taking over the account.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get};
 use axum::{Extension, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -35,10 +42,10 @@ use crate::agent_session::AgentTransport;
 use crate::db::{self, DbKind, Pool};
 use crate::{AppState, CurrentUser, InstalledState};
 
-/// Namespaces a device pairing code so it cannot be confused with a gateway
-/// agent token: the two authenticate different things and must never be
+/// Namespaces a device token so it cannot be confused with a gateway agent
+/// token: the two authenticate different things and must never be
 /// interchangeable.
-const PAIR_PREFIX: &str = "ynd_";
+const DEVICE_PREFIX: &str = "ynd_";
 
 const MAX_DEVICES_PER_USER: i64 = 20;
 
@@ -46,12 +53,30 @@ const MAX_DEVICES_PER_USER: i64 = 20;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum FromDevice {
-    /// First frame. Authenticates the socket and names the machine.
+    /// First frame when the client already holds a device token.
     Hello {
         token: String,
         name: String,
         #[serde(default)]
         platform: Option<String>,
+    },
+    /// First frame when the client has no token yet: the user's account
+    /// credentials, which bind this machine and mint one.
+    ///
+    /// Carried on this socket rather than a separate HTTP endpoint so there is
+    /// exactly one place a device authenticates, and so the client needs no
+    /// second protocol stack just to sign in.
+    Login {
+        username: String,
+        password: String,
+        name: String,
+        #[serde(default)]
+        platform: Option<String>,
+        /// Stable machine identifier. Decides *which* of the user's computers
+        /// this is, so re-running the client rebinds instead of registering a
+        /// duplicate; it never decides whether the connection is allowed.
+        #[serde(default)]
+        fingerprint: Option<String>,
     },
     /// Keeps the connection warm and refreshes `last_seen_at`.
     Heartbeat,
@@ -71,18 +96,35 @@ pub enum FromDevice {
 #[derive(Debug, serde::Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ToDevice {
-    HelloOk { device_id: i64 },
-    Error { message: String },
+    HelloOk {
+        device_id: i64,
+        /// Present only right after a password login: the device token the
+        /// client should store so it never has to hold the password. Rotated
+        /// on every login, so whatever was on that disk before stops working.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        token: Option<String>,
+    },
+    Error {
+        message: String,
+    },
     /// Start a local runtime for this session.
     ///
     /// Carries the generated `models.json` so the device never holds an
     /// upstream provider key: it points at this server's gateway with a
     /// session-scoped token, exactly as the sandbox does.
-    StartRuntime { session_id: i64, models_json: Value },
+    StartRuntime {
+        session_id: i64,
+        models_json: Value,
+    },
     /// One JSONL record for the local runtime's stdin, verbatim.
-    Frame { session_id: i64, frame: Value },
+    Frame {
+        session_id: i64,
+        frame: Value,
+    },
     /// Stop the local runtime for this session.
-    StopRuntime { session_id: i64 },
+    StopRuntime {
+        session_id: i64,
+    },
 }
 
 /// A connected desktop client.
@@ -177,30 +219,34 @@ impl AgentTransport for DeviceTransport {
 }
 
 // ---------------------------------------------------------------------------
-// pairing and management
+// sign-in binding and management
 // ---------------------------------------------------------------------------
 
-fn new_pair_code() -> String {
-    format!("{PAIR_PREFIX}{}", crate::auth::generate_token())
+fn new_device_token() -> String {
+    format!("{DEVICE_PREFIX}{}", crate::auth::generate_token())
 }
 
-#[derive(Deserialize)]
-struct PairReq {
-    #[serde(default)]
-    name: Option<String>,
+/// Trim a user-supplied machine name to something a list can render.
+fn clean_name(raw: Option<&str>) -> String {
+    raw.map(str::trim)
+        .filter(|n| !n.is_empty())
+        .unwrap_or("我的电脑")
+        .chars()
+        .take(60)
+        .collect()
 }
 
-/// Issue a pairing code for a new machine.
-///
-/// Only the hash is stored, so a leaked database cannot be used to attach a
-/// device. The plaintext is returned exactly once, for the user to paste into
-/// the desktop client.
-async fn pair(
-    Extension(installed): Extension<InstalledState>,
-    Extension(user): Extension<CurrentUser>,
-    Json(req): Json<PairReq>,
-) -> Response {
-    let live_sql = db::q(
+/// A fingerprint identifies *which* of the user's machines this is, so it is
+/// only ever used to pick a row to reuse. Length-capped because it arrives
+/// from the client and is stored.
+fn clean_fingerprint(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|f| !f.is_empty())
+        .map(|f| f.chars().take(128).collect())
+}
+
+async fn live_device_count(installed: &InstalledState, user_id: i64) -> i64 {
+    let sql = db::q(
         installed.kind,
         &format!(
             "SELECT COUNT(*) FROM agent_devices WHERE user_id = ? AND revoked = {}",
@@ -210,47 +256,183 @@ async fn pair(
             }
         ),
     );
-    let live: i64 = sqlx::query_scalar(&live_sql)
-        .bind(user.id)
+    sqlx::query_scalar(&sql)
+        .bind(user_id)
         .fetch_one(&installed.pool)
         .await
-        .unwrap_or(0);
-    if live >= MAX_DEVICES_PER_USER {
-        return (
-            StatusCode::BAD_REQUEST,
-            format!("最多只能绑定 {MAX_DEVICES_PER_USER} 台电脑，请先移除不用的"),
-        )
-            .into_response();
+        .unwrap_or(0)
+}
+
+/// Attach this machine to `user_id`, returning its id and a fresh token.
+///
+/// Re-running the client on a machine it already bound must not pile up
+/// duplicate rows, so a fingerprint match rebinds the existing device. The
+/// token is rotated on every bind: the client is about to store the new one,
+/// and a login is exactly the moment where invalidating whatever was on that
+/// disk before is the safe choice.
+async fn bind_device(
+    installed: &InstalledState,
+    user_id: i64,
+    name: &str,
+    platform: Option<&str>,
+    fingerprint: Option<&str>,
+) -> Result<(i64, String, bool), String> {
+    let token = new_device_token();
+    let hash = crate::auth::token_hash(&token);
+
+    let existing: Option<i64> = match fingerprint {
+        Some(fp) => {
+            let sql = db::q(
+                installed.kind,
+                "SELECT id FROM agent_devices WHERE user_id = ? AND fingerprint = ?",
+            );
+            sqlx::query_scalar(&sql)
+                .bind(user_id)
+                .bind(fp)
+                .fetch_optional(&installed.pool)
+                .await
+                .ok()
+                .flatten()
+        }
+        None => None,
+    };
+
+    if let Some(id) = existing {
+        // Re-attaching a known machine also un-revokes it: the user just
+        // proved account ownership from that computer, which is a stronger
+        // signal than the earlier "remove" click.
+        let sql = db::q(
+            installed.kind,
+            &format!(
+                "UPDATE agent_devices SET token_hash = ?, name = ?, platform = ?, \
+                 revoked = {}, last_seen_at = {} WHERE id = ? AND user_id = ?",
+                match installed.kind {
+                    DbKind::Postgres => "FALSE",
+                    _ => "0",
+                },
+                db::now_expr(installed.kind)
+            ),
+        );
+        sqlx::query(&sql)
+            .bind(&hash)
+            .bind(name)
+            .bind(platform)
+            .bind(id)
+            .bind(user_id)
+            .execute(&installed.pool)
+            .await
+            .map_err(|e| {
+                eprintln!("[agent-device] rebind failed: {e}");
+                "绑定设备失败".to_string()
+            })?;
+        return Ok((id, token, false));
     }
 
-    let name = req
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .unwrap_or("我的电脑")
-        .chars()
-        .take(60)
-        .collect::<String>();
+    // Only a *new* machine consumes quota; rebinding one the user already has
+    // must keep working even at the cap.
+    if live_device_count(installed, user_id).await >= MAX_DEVICES_PER_USER {
+        return Err(format!(
+            "最多只能绑定 {MAX_DEVICES_PER_USER} 台电脑，请先在网页移除不用的"
+        ));
+    }
 
-    let code = new_pair_code();
-    let hash = crate::auth::token_hash(&code);
     let sql = db::q(
         installed.kind,
-        "INSERT INTO agent_devices (user_id, kind, name, token_hash) VALUES (?, 'device', ?, ?)",
+        &format!(
+            "INSERT INTO agent_devices (user_id, kind, name, token_hash, platform, fingerprint, last_seen_at) \
+             VALUES (?, 'device', ?, ?, ?, ?, {})",
+            db::now_expr(installed.kind)
+        ),
     );
-    if let Err(e) = sqlx::query(&sql)
-        .bind(user.id)
-        .bind(&name)
+    sqlx::query(&sql)
+        .bind(user_id)
+        .bind(name)
         .bind(&hash)
+        .bind(platform)
+        .bind(fingerprint)
+        .execute(&installed.pool)
+        .await
+        .map_err(|e| {
+            eprintln!("[agent-device] bind insert failed: {e}");
+            "绑定设备失败".to_string()
+        })?;
+
+    let id_sql = db::q(
+        installed.kind,
+        "SELECT id FROM agent_devices WHERE token_hash = ?",
+    );
+    let id: i64 = sqlx::query_scalar(&id_sql)
+        .bind(&hash)
+        .fetch_one(&installed.pool)
+        .await
+        .map_err(|e| {
+            eprintln!("[agent-device] bind lookup failed: {e}");
+            "绑定设备失败".to_string()
+        })?;
+    Ok((id, token, true))
+}
+
+/// Verify account credentials, returning the user id.
+///
+/// Deliberately returns an `Option`: the caller must not be able to tell
+/// "unknown user" from "wrong password" apart, or this becomes an account
+/// enumeration oracle.
+async fn verify_login(
+    installed: &InstalledState,
+    username: &str,
+    password: &str,
+) -> Option<i64> {
+    let sel = db::q(
+        installed.kind,
+        &format!(
+            "SELECT id, password_hash FROM users WHERE {}",
+            db::ci_eq(installed.kind, "username")
+        ),
+    );
+    let row: Option<(i64, String)> = sqlx::query_as(&sel)
+        .bind(username.trim())
+        .fetch_optional(&installed.pool)
+        .await
+        .ok()
+        .flatten();
+    let (id, phc) = row?;
+    crate::auth::verify_password(password, &phc).then_some(id)
+}
+
+#[derive(Deserialize)]
+struct RenameReq {
+    name: String,
+}
+
+/// Rename a device from the web UI.
+///
+/// The name now arrives from the machine itself, so the only way to correct a
+/// hostname like `DESKTOP-4F2K1A` is here.
+async fn rename_device(
+    Extension(installed): Extension<InstalledState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+    Json(req): Json<RenameReq>,
+) -> Response {
+    let name = clean_name(Some(&req.name));
+    let sql = db::q(
+        installed.kind,
+        "UPDATE agent_devices SET name = ? WHERE id = ? AND user_id = ?",
+    );
+    match sqlx::query(&sql)
+        .bind(&name)
+        .bind(id)
+        .bind(user.id)
         .execute(&installed.pool)
         .await
     {
-        eprintln!("[agent-device] pairing insert failed: {e}");
-        return (StatusCode::INTERNAL_SERVER_ERROR, "创建配对码失败").into_response();
+        Ok(r) if r.rows_affected() == 0 => (StatusCode::NOT_FOUND, "设备不存在").into_response(),
+        Ok(_) => Json(json!({ "id": id, "name": name })).into_response(),
+        Err(e) => {
+            eprintln!("[agent-device] rename failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "重命名失败").into_response()
+        }
     }
-
-    Json(json!({ "code": code, "name": name })).into_response()
 }
 
 /// One row of the device list query.
@@ -347,11 +529,12 @@ async fn revoke_device(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/agent/devices", get(list_devices))
-        .route("/agent/devices/pair", post(pair))
-        .route("/agent/devices/{id}", delete(revoke_device))
+        .route("/agent/devices/{id}", delete(revoke_device).patch(rename_device))
 }
 
 pub fn public_routes() -> Router<AppState> {
+    // Sign-in happens on the socket itself (see `FromDevice::Login`), so a
+    // device needs exactly one endpoint and one protocol.
     Router::new().route("/agent/devices/connect", get(ws_connect))
 }
 
@@ -368,17 +551,22 @@ struct ConnectQuery {
 async fn ws_connect(
     State(state): State<AppState>,
     Query(q): Query<ConnectQuery>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(state, socket, q.token))
+    // The peer address is captured before the upgrade because a password may
+    // cross this socket: the login path shares the browser's rate limiter, and
+    // after the upgrade there are no request headers left to read it from.
+    let ip = crate::rate_limit::client_ip(&headers);
+    ws.on_upgrade(move |socket| handle_socket(state, socket, q.token, ip))
 }
 
-/// Resolve a pairing code to its device, refusing revoked ones.
-async fn device_for_code(pool: &Pool, kind: DbKind, code: &str) -> Option<(i64, i64)> {
-    if !code.starts_with(PAIR_PREFIX) {
+/// Resolve a device token to its device, refusing revoked ones.
+async fn device_for_token(pool: &Pool, kind: DbKind, token: &str) -> Option<(i64, i64)> {
+    if !token.starts_with(DEVICE_PREFIX) {
         return None;
     }
-    let hash = crate::auth::token_hash(code);
+    let hash = crate::auth::token_hash(token);
     let revoked_col = db::bool_as_int(kind, "revoked");
     let sql = db::q(
         kind,
@@ -399,7 +587,106 @@ async fn device_for_code(pool: &Pool, kind: DbKind, code: &str) -> Option<(i64, 
     Some((id, user_id))
 }
 
-async fn handle_socket(state: AppState, socket: WebSocket, query_token: Option<String>) {
+/// The outcome of a device handshake.
+struct Attached {
+    device_id: i64,
+    user_id: i64,
+    /// Set when the handshake was a password login, so the client can store a
+    /// token and stop holding the password.
+    issued_token: Option<String>,
+}
+
+/// Authenticate the first frame, binding the machine when it is a login.
+///
+/// Both paths end in the same place — a device row this socket may act as —
+/// so everything after the handshake is identical regardless of how the client
+/// arrived.
+async fn attach(
+    state: &AppState,
+    installed: &InstalledState,
+    hello: FromDevice,
+    query_token: Option<String>,
+    ip: std::net::IpAddr,
+) -> Result<(Attached, String, Option<String>), String> {
+    match hello {
+        FromDevice::Hello {
+            token,
+            name,
+            platform,
+        } => {
+            // A token may also arrive as a query parameter, which some client
+            // HTTP stacks handle more easily than custom headers on an
+            // upgrade request.
+            let token = if token.is_empty() {
+                query_token.unwrap_or_default()
+            } else {
+                token
+            };
+            let (device_id, user_id) =
+                device_for_token(&installed.pool, installed.kind, &token)
+                    .await
+                    .ok_or("设备凭证已失效，请在客户端重新登录")?;
+            Ok((
+                Attached {
+                    device_id,
+                    user_id,
+                    issued_token: None,
+                },
+                name,
+                platform,
+            ))
+        }
+        FromDevice::Login {
+            username,
+            password,
+            name,
+            platform,
+            fingerprint,
+        } => {
+            // Same limiter as the browser's login: this is the same credential
+            // surface, and an unthrottled second door would undo the first
+            // one's protection.
+            if !state.auth_limiter.allow(ip).await {
+                return Err("登录过于频繁，请稍后再试".into());
+            }
+            let user_id = verify_login(installed, &username, &password)
+                .await
+                // One message for "no such user" and "wrong password", so the
+                // socket cannot be used to enumerate accounts.
+                .ok_or("用户名或密码错误")?;
+            let clean = clean_name(Some(&name));
+            let (device_id, token, created) = bind_device(
+                installed,
+                user_id,
+                &clean,
+                platform.as_deref(),
+                clean_fingerprint(fingerprint.as_deref()).as_deref(),
+            )
+            .await?;
+            eprintln!(
+                "[agent-device] {} device {device_id} for user {user_id} via sign-in",
+                if created { "bound new" } else { "rebound" }
+            );
+            Ok((
+                Attached {
+                    device_id,
+                    user_id,
+                    issued_token: Some(token),
+                },
+                clean,
+                platform,
+            ))
+        }
+        _ => Err("首帧必须是 hello 或 login".into()),
+    }
+}
+
+async fn handle_socket(
+    state: AppState,
+    socket: WebSocket,
+    query_token: Option<String>,
+    ip: std::net::IpAddr,
+) {
     let (mut sink, mut stream) = socket.split();
 
     let installed = match state.installed.read().await.clone() {
@@ -407,9 +694,8 @@ async fn handle_socket(state: AppState, socket: WebSocket, query_token: Option<S
         None => return,
     };
 
-    // The first frame must authenticate. A token may also arrive as a query
-    // parameter, which some client HTTP stacks handle more easily than custom
-    // headers on an upgrade request.
+    // The first frame must authenticate: either with a stored device token or
+    // with the user's account, which binds this machine on the spot.
     let first = match stream.next().await {
         Some(Ok(Message::Text(t))) => t.to_string(),
         _ => return,
@@ -417,33 +703,22 @@ async fn handle_socket(state: AppState, socket: WebSocket, query_token: Option<S
     let Ok(hello) = serde_json::from_str::<FromDevice>(&first) else {
         return;
     };
-    let (token, name, platform) = match hello {
-        FromDevice::Hello {
-            token,
-            name,
-            platform,
-        } => (
-            if token.is_empty() {
-                query_token.unwrap_or_default()
-            } else {
-                token
-            },
-            name,
-            platform,
-        ),
-        _ => return,
-    };
 
-    let Some((device_id, user_id)) =
-        device_for_code(&installed.pool, installed.kind, &token).await
-    else {
-        let err = serde_json::to_string(&ToDevice::Error {
-            message: "配对码无效或已被移除".into(),
-        })
-        .unwrap_or_default();
-        let _ = sink.send(Message::Text(err.into())).await;
-        return;
-    };
+    let (attached, name, platform) =
+        match attach(&state, &installed, hello, query_token, ip).await {
+            Ok(v) => v,
+            Err(message) => {
+                let err =
+                    serde_json::to_string(&ToDevice::Error { message }).unwrap_or_default();
+                let _ = sink.send(Message::Text(err.into())).await;
+                return;
+            }
+        };
+    let Attached {
+        device_id,
+        user_id,
+        issued_token,
+    } = attached;
 
     // Record what connected, so the user can tell their machines apart.
     let _ = sqlx::query(&db::q(
@@ -466,7 +741,11 @@ async fn handle_socket(state: AppState, socket: WebSocket, query_token: Option<S
     });
     state.agent_devices.insert(device_id, handle.clone()).await;
 
-    let ok = serde_json::to_string(&ToDevice::HelloOk { device_id }).unwrap_or_default();
+    let ok = serde_json::to_string(&ToDevice::HelloOk {
+        device_id,
+        token: issued_token,
+    })
+    .unwrap_or_default();
     if sink.send(Message::Text(ok.into())).await.is_err() {
         state.agent_devices.remove(device_id).await;
         return;
@@ -543,7 +822,11 @@ async fn handle_socket(state: AppState, socket: WebSocket, query_token: Option<S
                 eprintln!("[agent-device] device {device_id} session {session_id}: {message}");
                 frame_senders.write().await.remove(&session_id);
             }
-            FromDevice::Hello { .. } => { /* already handled */ }
+            FromDevice::Hello { .. } | FromDevice::Login { .. } => {
+                // Already handled during the handshake. Re-authenticating on
+                // a live socket is ignored rather than honoured: rebinding
+                // mid-stream would move sessions under the running runtimes.
+            }
         }
     }
 
@@ -581,14 +864,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pairing_codes_are_namespaced_away_from_gateway_tokens() {
-        // A device pairing code and an agent gateway token authenticate
-        // different things; making them interchangeable would let one stand in
-        // for the other.
-        let code = new_pair_code();
-        assert!(code.starts_with(PAIR_PREFIX));
-        assert!(!code.starts_with("yna_"));
-        assert_ne!(new_pair_code(), new_pair_code());
+    fn device_tokens_are_namespaced_away_from_gateway_tokens() {
+        // A device token and an agent gateway token authenticate different
+        // things; making them interchangeable would let one stand in for the
+        // other.
+        let token = new_device_token();
+        assert!(token.starts_with(DEVICE_PREFIX));
+        assert!(!token.starts_with("yna_"));
+        assert_ne!(new_device_token(), new_device_token());
+    }
+
+    #[test]
+    fn a_machine_name_always_renders_as_something() {
+        // The name now comes from the machine, so blank and oversized values
+        // both have to be survivable rather than reaching the device list.
+        assert_eq!(clean_name(None), "我的电脑");
+        assert_eq!(clean_name(Some("   ")), "我的电脑");
+        assert_eq!(clean_name(Some("  laptop ")), "laptop");
+        assert_eq!(clean_name(Some(&"x".repeat(200))).chars().count(), 60);
+        // Multi-byte names must be truncated by character, not by byte, or the
+        // stored value would be invalid UTF-8 at the boundary.
+        assert_eq!(clean_name(Some(&"电".repeat(80))).chars().count(), 60);
+    }
+
+    #[test]
+    fn a_fingerprint_is_optional_and_bounded() {
+        // Absent means "cannot be matched by machine", which is the old
+        // paired-device behaviour and must stay representable.
+        assert_eq!(clean_fingerprint(None), None);
+        assert_eq!(clean_fingerprint(Some("  ")), None);
+        assert_eq!(clean_fingerprint(Some(" abc ")).as_deref(), Some("abc"));
+        assert_eq!(
+            clean_fingerprint(Some(&"f".repeat(400)))
+                .map(|f| f.chars().count()),
+            Some(128)
+        );
     }
 
     #[test]
@@ -625,6 +935,52 @@ mod tests {
         let minimal: FromDevice =
             serde_json::from_str(r#"{"type":"hello","token":"ynd_x","name":"pc"}"#).unwrap();
         assert!(matches!(minimal, FromDevice::Hello { .. }));
+
+        // The sign-in frame is the replacement for pairing: an account plus
+        // the machine it is being bound to.
+        let login: FromDevice = serde_json::from_str(
+            r#"{"type":"login","username":"orca","password":"s","name":"pc","fingerprint":"fp"}"#,
+        )
+        .unwrap();
+        match login {
+            FromDevice::Login {
+                username,
+                password,
+                name,
+                platform,
+                fingerprint,
+            } => {
+                assert_eq!(username, "orca");
+                assert_eq!(password, "s");
+                assert_eq!(name, "pc");
+                assert!(platform.is_none());
+                assert_eq!(fingerprint.as_deref(), Some("fp"));
+            }
+            other => panic!("expected login, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_token_is_only_announced_when_one_was_just_minted() {
+        // A reconnect must not restate the credential the client already has:
+        // the client would rewrite its config file on every reconnect, and the
+        // token would appear in logs that only needed a device id.
+        let plain = serde_json::to_string(&ToDevice::HelloOk {
+            device_id: 3,
+            token: None,
+        })
+        .unwrap();
+        let v: Value = serde_json::from_str(&plain).unwrap();
+        assert_eq!(v["device_id"], 3);
+        assert!(v.get("token").is_none());
+
+        let fresh = serde_json::to_string(&ToDevice::HelloOk {
+            device_id: 3,
+            token: Some("ynd_new".into()),
+        })
+        .unwrap();
+        let v: Value = serde_json::from_str(&fresh).unwrap();
+        assert_eq!(v["token"], "ynd_new");
     }
 
     #[test]
