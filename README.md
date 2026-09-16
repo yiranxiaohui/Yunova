@@ -345,9 +345,17 @@ bun run mobile:ios       # 并打开 Xcode（需 macOS）
 
 iOS 出包仍需 macOS 与开发者账号，Android 出包需 Android SDK。
 
-### 本地电脑（桌面客户端）
+### 本地电脑（桌面端应用）
 
-`desktop/` 是独立的 `yunova-desktop` 二进制：把用户自己的电脑变成执行目标。
+`desktop/` 是独立的 `yunova-desktop`：一个**真正的桌面应用**，而不是只能在终端里
+盯着的命令行程序。窗口里直接就是本站界面（Tauri + 系统 WebView 加载
+`YUNOVA_DEVICE_URL`），因此聊天、发任务、看执行过程都在这个窗口里完成；同时它把
+这台电脑**变成执行目标**。
+
+为什么是「装网页」而不是重写一遍前端：产品界面只有一份，桌面端跟着服务端一起
+更新，不会落后一个版本。桌面端负责的恰好是浏览器做不到的那部分——保持连接器
+在线、监管本机运行时、Agent 卡在审批时发系统通知、关掉窗口后仍留在托盘里继续跑。
+
 它**主动**连回服务器并保持 WebSocket——个人电脑通常没有可达地址，主动出连是
 唯一不需要端口映射的做法。
 
@@ -355,14 +363,31 @@ iOS 出包仍需 macOS 与开发者账号，Android 出包需 Android SDK。
 stdio 经由这条转发通道与服务器对接。因此 `DeviceTransport` 只是一根管子，
 镜像、广播、审批、计费全部复用已经在沙箱上验证过的代码。
 
-使用流程：在目标机器上运行客户端并登录本站账号，登录成功即自动绑定这台电脑——
-**没有配对码**。配对码原本只用来给服务器没见过的机器起名，而账号已经回答了
-「这是谁的电脑」，所以剩下的只有「哪一台」，由客户端算出的机器指纹回答。
+#### 两个前端，一个连接器
+
+窗口是默认形态（用户双击图标运行的就是它）；`--headless` 保留原来的终端行为，
+给服务器和开发机用——那里没有显示器可以开窗口。两者都驱动
+`desktop/src/connector.rs`，所以协议与本机策略只存在一份实现：
 
 ```bash
+./yunova-desktop              # 桌面应用（默认）
+./yunova-desktop --headless   # 无界面，读环境变量，行为与旧版一致
+```
+
+桌面模式的设置存在 OS 配置目录（与设备令牌同一个目录，卸载时一并清理），
+可在应用内的「本机设置」窗口里改：站点地址、设备名、工作目录（带系统目录选择器）、
+是否放开审批、是否开机自动连接。环境变量若存在则**优先**，这样预置
+`YUNOVA_DEVICE_URL` 的分发包不会被一份过期的设置文件悄悄覆盖。
+
+使用流程：安装并打开应用，填好站点地址，在「本机设置」里登录本站账号，登录成功即
+自动绑定这台电脑——**没有配对码**。配对码原本只用来给服务器没见过的机器起名，而
+账号已经回答了「这是谁的电脑」，所以剩下的只有「哪一台」，由客户端算出的机器指纹回答。
+
+```bash
+# 无界面模式（服务器/容器）：
 YUNOVA_DEVICE_URL=https://yunnet.top \
 YUNOVA_DEVICE_WORKSPACE=/path/to/project \
-./yunova-desktop
+./yunova-desktop --headless
 # 首次运行会提示输入账号和密码；无人值守可用 YUNOVA_USERNAME / YUNOVA_PASSWORD
 ```
 
@@ -371,23 +396,42 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project \
 令牌每次登录都会轮换，服务器只存哈希；密码不落盘。指纹只决定**复用哪一行设备记录**，
 永远不参与鉴权，所以猜中指纹不会拿到任何东西。
 
-二进制从 `/download` 页面下载。它不由本服务分发：镜像没有理由塞进五个平台的构建，
-自托管实例也不该为了让用户装客户端而去镜像这些文件。页面在浏览时读 GitHub Release
-的资产列表，读不到（无出网、限流、内网部署）就退化成「最新发布页」链接，
-而不是渲染出死链。资产名由 `.github/workflows/desktop-release.yml` 产生，
-必须与 `web/src/lib/downloads.ts` 里的 `yunova-desktop-<target>` 对齐，
-`web/tests/downloads.test.ts` 盯着这条约定。
+#### 远程页面拿不到本机控制权
+
+这是整个桌面端设计围绕的边界，也是「显示服务器的页面」与「能改本机策略」这两件事
+能同时成立的唯一原因：
+
+- **站点页面单独一个 webview**，不出现在任何 capability 里，因此它的 IPC 调用会被
+  Tauri 直接拒绝。服务器再怎么被攻破，也无法调用本地命令去放开审批或改工作目录。
+- **本机控制面板是应用自带的本地页面**（`desktop/ui/`，无依赖手写 HTML），
+  只有它出现在 `capabilities/local-panel.json` 的 `windows` 里。面板不由服务端提供，
+  因此在还没配置任何服务器时（首次启动）也能打开——那恰恰是最需要它的时候。
+- 这条边界由 `desktop/tests/capability_boundary.rs` 盯着：任何把站点窗口加进
+  capability、去掉窗口白名单、或改用通配符的改动都会让测试失败。
+
+二进制与安装包从 `/download` 页面下载。它不由本服务分发：镜像没有理由塞进五个平台的
+构建，自托管实例也不该为了让用户装客户端而去镜像这些文件。页面在浏览时读 GitHub
+Release 的资产列表，读不到（无出网、限流、内网部署）就退化成「最新发布页」链接，
+而不是渲染出死链。安装包名由打包器生成并带版本号，因此页面按**扩展名 + 架构**匹配
+而不是拼出一个可能不存在的文件名；独立二进制名仍由
+`.github/workflows/desktop-release.yml` 产生，必须与 `web/src/lib/downloads.ts` 里的
+`yunova-desktop-<target>` 对齐，`web/tests/downloads.test.ts` 盯着这两条约定。
 
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `YUNOVA_DEVICE_URL` | 必填 | 站点地址，自动推导 WebSocket 端点 |
+| `YUNOVA_DEVICE_URL` | 无界面模式必填 | 站点地址，自动推导 WebSocket 端点；桌面模式下作为设置的初值/覆盖值 |
 | `YUNOVA_USERNAME` / `YUNOVA_PASSWORD` | 交互输入 | 无人值守启动用；设置后跳过登录提示 |
-| `YUNOVA_DEVICE_CONFIG_DIR` | OS 配置目录 | 设备令牌的存放位置 |
-| `YUNOVA_DEVICE_WORKSPACE` | 当前目录 | **Agent 可操作的范围**，请指向具体项目 |
+| `YUNOVA_DEVICE_CONFIG_DIR` | OS 配置目录 | 设备令牌与桌面设置的存放位置 |
+| `YUNOVA_DEVICE_WORKSPACE` | 无界面：当前目录；桌面：`~/Yunova` | **Agent 可操作的范围**，请指向具体项目 |
 | `YUNOVA_DEVICE_NAME` | 主机名 | 列表里显示的名字 |
 | `YUNOVA_DEVICE_AUTO_APPROVE` | 关 | 设为 `1` 放开审批，谨慎使用 |
 | `YUNOVA_PI_BIN` | `pi` | 运行时可执行文件 |
 | `YUNOVA_DEVICE_GATEWAY_URL` | 服务端配置 | 设备端运行时回调的网关地址（服务器上设置） |
+
+构建桌面端需要系统 WebView。macOS 与 Windows 自带（WebKit / WebView2）；
+Linux 上需要 `libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`librsvg2-dev`、`patchelf`、
+`libayatana-appindicator3-dev`、`libsoup-3.0-dev`、`libxdo-dev`。
+打包用 `cd desktop && cargo tauri build`。
 
 安全模型与云电脑**有本质区别**，协议设计也因此不同：沙箱是一次性且隔离的，
 个人电脑不是。所以约束 Agent 的策略**由客户端拥有**，而不是交给服务器：
@@ -404,8 +448,10 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project \
 审批请求会广播到所有在线端，因此可以在网页或手机上处理跑在家里电脑上的任务；
 拒绝后 Agent 会收到被阻止的原因，而不是默默卡住。
 
-目前只有无界面的命令行客户端（可直接用于服务器和开发机）；GUI 外壳可以直接
-嵌入这套连接器与策略代码，它不依赖窗口。
+桌面应用还会在本机弹系统通知：任务卡在审批上而没人知道，等同于任务永远不会完成。
+只有会阻塞运行时的对话（`confirm`/`select`/`input`/`editor`）会触发通知；
+`notify` 这类发完就走的 UI 事件不会，否则用户很快就会学会忽略通知，
+连唯一重要的那一条也一起丢掉。
 
 ### 云电脑会话的审批配置
 

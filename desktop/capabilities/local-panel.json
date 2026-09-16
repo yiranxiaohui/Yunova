@@ -1,0 +1,14 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "local-panel",
+  "description": "Local control of this machine, granted only to the app-served panel window. This is the boundary the desktop app is built around: the remote site is rendered in its own webview and appears in no capability, so a page delivered by a server cannot call these commands to widen the workspace or switch the approval gate off. `withGlobalTauri` is on because the panel is plain HTML with no bundler, and that is safe precisely because the global API is inert without a capability naming the window it runs in.",
+  "local": true,
+  "windows": ["panel"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "dialog:allow-open",
+    "notification:default",
+    "opener:allow-open-url"
+  ]
+}

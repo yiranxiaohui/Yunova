@@ -1,8 +1,9 @@
 name: Release desktop client
 
-# 桌面客户端（yunova-desktop）是分发到用户自己电脑上的执行端，不进服务端镜像。
-# 打 vX.Y.Z tag 时构建各平台二进制并作为 GitHub Release 附件；网页的
-# /download 页面直接读这个 Release 的资产列表。
+# 桌面客户端（yunova-desktop）是分发到用户自己电脑上的桌面应用：内置站点界面，
+# 并把这台电脑变成 Agent 的执行目标。它不进服务端镜像。打 vX.Y.Z tag 时构建各
+# 平台安装包，作为 GitHub Release 附件；网页的 /download 页面直接读这个
+# Release 的资产列表。
 on:
   push:
     tags: ['v*.*.*']
@@ -12,15 +13,18 @@ permissions:
   contents: write # 需要写权限才能上传到 Release
 
 jobs:
-  # 先确保该 tag 的 GitHub Release 存在——upload-rust-binary-action 只上传、
-  # 不创建 Release（Release 不存在会反复 "release not found" 直至超时）。
+  # 先确保该 tag 的 GitHub Release 存在——tauri-action 会上传到已存在的 Release，
+  # 由这一步统一创建，避免各平台并发时重复创建。
   create-release:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.ensure.outputs.release_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
       - name: Create release if missing
+        id: ensure
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -28,6 +32,8 @@ jobs:
           if ! gh release view "$tag" >/dev/null 2>&1; then
             gh release create "$tag" --title "$tag" --generate-notes
           fi
+          id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/$tag" --jq .id)
+          echo "release_id=$id" >> "$GITHUB_OUTPUT"
 
   build:
     needs: create-release
@@ -41,25 +47,77 @@ jobs:
             os: macos-latest
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
+          # Ubuntu 22.04 for the widest glibc/webkit compatibility: a .deb or
+          # AppImage linked against a newer webkit2gtk will not install on the
+          # LTS releases most users are on.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      # 构建 + strip + 打包（Linux/macOS→tar.gz，Windows→zip，含 .exe）+ 上传到
-      # 对应 tag 的 Release。归档名必须与 web/src/lib/downloads.ts 里的
-      # `yunova-desktop-<target>` 保持一致，否则下载页只能退化成发布页链接。
-      - name: Build & upload desktop binary
-        uses: taiki-e/upload-rust-binary-action@v1
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
-          bin: yunova-desktop
-          # 指到客户端 crate；否则 action 在 workspace 根构建，根包 yunova 的
-          # build.rs 会顺带去编译前端（需要 bun），而且没有这个 bin target。
-          manifest-path: desktop/Cargo.toml
-          target: ${{ matrix.target }}
-          archive: yunova-desktop-$target
-          token: ${{ secrets.GITHUB_TOKEN }}
+          targets: ${{ matrix.target }}
+
+      # The window shell links against the system webview. On Linux that has
+      # to be installed; macOS and Windows ship theirs (WebKit / WebView2).
+      - name: Install Linux webview dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev patchelf \
+            libayatana-appindicator3-dev libsoup-3.0-dev libxdo-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: desktop-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+
+      # Builds the installers (.dmg/.app, .msi/.exe, .deb/.AppImage) and the
+      # bare binary, then uploads them to the tag's Release. `projectPath`
+      # points at the client crate: the workspace root's build.rs compiles the
+      # web bundle, which this app does not need — it loads the site over the
+      # network — and which would require bun on every runner.
+      - name: Build & upload desktop app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: desktop
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: --target ${{ matrix.target }}
+
+      # The bare executable stays published alongside the installers: it is
+      # what a headless server runs (`yunova-desktop --headless`), where an
+      # installer and a desktop entry are useless. Names must match
+      # `web/src/lib/downloads.ts`, which `web/tests/downloads.test.ts` guards.
+      - name: Package the standalone binary
+        shell: bash
+        run: |
+          bin=target/${{ matrix.target }}/release/yunova-desktop
+          name=yunova-desktop-${{ matrix.target }}
+          if [ -f "$bin.exe" ]; then
+            7z a "$name.zip" "./$bin.exe"
+          else
+            tar -czf "$name.tar.gz" -C "$(dirname "$bin")" yunova-desktop
+          fi
+
+      - name: Upload the standalone binary
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          shopt -s nullglob
+          for f in yunova-desktop-${{ matrix.target }}.tar.gz yunova-desktop-${{ matrix.target }}.zip; do
+            gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
+          done

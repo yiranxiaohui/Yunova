@@ -23,6 +23,7 @@ import {
   downloadUrl,
   fetchLatestRelease,
   guessOs,
+  installerAsset,
   preferredBuild,
   type DesktopBuild,
   type DesktopOs,
@@ -30,12 +31,13 @@ import {
 } from "@/lib/downloads"
 
 /**
- * Desktop client download page.
+ * Desktop app download page.
  *
- * The client is what turns the user's own machine into an execution target for
- * work mode, so this page's job is not just to hand over a file: it must also
- * say what the binary is allowed to do, because that is the question a user
- * asks before running something that can execute commands at home.
+ * The client is a desktop app that embeds this site and turns the user's
+ * machine into an execution target, so the page has two jobs. It hands over
+ * the right file — an installer for a person, the bare binary for a server —
+ * and it states what the app is allowed to do, because that is the question
+ * anyone asks before installing something that can run commands at home.
  *
  * The release listing is fetched from GitHub and may be unavailable; every
  * button therefore falls back to the "latest release" page instead of
@@ -48,6 +50,10 @@ export default function DownloadPage() {
 
   const os = useMemo(() => guessOs(), [])
   const primary = useMemo(() => preferredBuild(os), [os])
+  const primaryInstaller = useMemo(
+    () => (primary ? installerAsset(primary, release) : null),
+    [primary, release]
+  )
 
   useEffect(() => {
     const ctrl = new AbortController()
@@ -69,7 +75,7 @@ export default function DownloadPage() {
 
   const runSnippet = `YUNOVA_DEVICE_URL=${window.location.origin}
 YUNOVA_DEVICE_WORKSPACE=/path/to/project
-./yunova-desktop`
+./yunova-desktop --headless`
 
   const copySnippet = async () => {
     try {
@@ -94,9 +100,9 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
             <Download className="size-4" />
           </span>
           <div className="min-w-0">
-            <h1 className="truncate text-sm font-semibold">下载客户端</h1>
+            <h1 className="truncate text-sm font-semibold">下载电脑版</h1>
             <p className="hidden text-[11px] text-muted-foreground sm:block">
-              把工作任务跑在自己的电脑上
+              桌面应用，并把任务跑在自己的电脑上
             </p>
           </div>
           <span className="ml-auto text-xs text-muted-foreground">
@@ -123,22 +129,43 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
           </div>
           <div>
             <h2 className="text-2xl font-semibold tracking-[-0.03em] md:text-3xl">
-              Yunova 桌面客户端
+              Yunova 桌面端
             </h2>
             <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">
-              在自己的电脑上运行客户端，工作模式就能把任务派到这台机器执行：读写你指定的项目目录、
-              运行命令，结果实时同步回网页和手机。
+              完整的桌面应用：在自己的窗口里开对话、跑任务，同时把这台电脑变成执行目标——
+              工作模式的任务可以直接读写你指定的项目目录、运行命令，结果实时同步回网页和手机。
+              关窗不断连，任务在后台继续跑，需要审批时会系统通知你。
             </p>
           </div>
 
           <div className="flex flex-col items-center gap-2">
             {primary ? (
-              <Button asChild size="lg" className="gap-2">
-                <a href={downloadUrl(primary, release)} rel="noreferrer">
-                  <Download className="size-4" />
-                  下载 {OS_LABEL[primary.os]} 版（{primary.arch}）
-                </a>
-              </Button>
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <Button asChild size="lg" className="gap-2">
+                  <a
+                    href={primaryInstaller?.url ?? downloadUrl(primary, release)}
+                    rel="noreferrer"
+                    title={primaryInstaller?.name ?? assetName(primary)}
+                  >
+                    <Download className="size-4" />
+                    下载 {OS_LABEL[primary.os]} 版（{primary.arch}）
+                  </a>
+                </Button>
+                {/* The bare binary stays one click away rather than hidden:
+                    it is what a server needs, and someone looking for it
+                    should not have to read the release page to find it. */}
+                {primaryInstaller && (
+                  <Button asChild size="lg" variant="outline" className="gap-2">
+                    <a
+                      href={downloadUrl(primary, release)}
+                      rel="noreferrer"
+                      title={assetName(primary)}
+                    >
+                      <Terminal className="size-4" /> 仅命令行版
+                    </a>
+                  </Button>
+                )}
+              </div>
             ) : (
               <Button asChild size="lg" className="gap-2">
                 <a href={RELEASES_URL} target="_blank" rel="noreferrer">
@@ -149,6 +176,11 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
             {!loading && !release && (
               <p className="text-xs text-muted-foreground">
                 无法读取版本信息，按钮将跳转到 GitHub 最新发布页。
+              </p>
+            )}
+            {!loading && release && !primaryInstaller && primary && (
+              <p className="text-xs text-muted-foreground">
+                这个版本未提供 {OS_LABEL[primary.os]} 安装包，下载的是可直接运行的二进制。
               </p>
             )}
           </div>
@@ -174,28 +206,51 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
               </div>
               <div className="flex flex-col gap-2">
                 {builds.map((b) => {
-                  const url = downloadUrl(b, release)
-                  const known = url !== RELEASES_URL
+                  const inst = installerAsset(b, release)
+                  const binary = downloadUrl(b, release)
+                  const known = inst != null || binary !== RELEASES_URL
+                  const href = inst?.url ?? binary
                   return (
-                    <a
+                    <div
                       key={b.target}
-                      href={url}
-                      rel="noreferrer"
-                      target={known ? undefined : "_blank"}
                       className={cn(
-                        "flex items-center justify-between gap-2 rounded-xl border border-border/70 px-3 py-2 text-sm transition-colors hover:border-primary/40 hover:bg-primary/5",
+                        "rounded-xl border border-border/70 px-3 py-2 text-sm transition-colors hover:border-primary/40",
                         primary?.target === b.target && "border-primary/45 bg-primary/5"
                       )}
-                      title={known ? assetName(b) : "该架构暂未发布，前往发布页查看"}
                     >
-                      <span className="min-w-0">
-                        <span className="block truncate font-medium">{b.arch}</span>
-                        <span className="block truncate text-[11px] text-muted-foreground">
-                          {b.target}
+                      <a
+                        href={href}
+                        rel="noreferrer"
+                        target={known ? undefined : "_blank"}
+                        className="flex items-center justify-between gap-2"
+                        title={
+                          inst?.name ??
+                          (binary !== RELEASES_URL
+                            ? assetName(b)
+                            : "该架构暂未发布，前往发布页查看")
+                        }
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate font-medium">{b.arch}</span>
+                          <span className="block truncate text-[11px] text-muted-foreground">
+                            {inst ? `安装包 · ${inst.ext}` : b.target}
+                          </span>
                         </span>
-                      </span>
-                      <Download className="size-4 shrink-0 text-muted-foreground" />
-                    </a>
+                        <Download className="size-4 shrink-0 text-muted-foreground" />
+                      </a>
+                      {/* Shown only when an installer exists, so a row never
+                          offers the same file twice. */}
+                      {inst && binary !== RELEASES_URL && (
+                        <a
+                          href={binary}
+                          rel="noreferrer"
+                          title={assetName(b)}
+                          className="mt-1 inline-flex items-center gap-1 text-[11px] text-muted-foreground underline-offset-2 hover:text-primary hover:underline"
+                        >
+                          <Terminal className="size-3" /> 命令行版（服务器）
+                        </a>
+                      )}
+                    </div>
                   )
                 })}
               </div>
@@ -210,21 +265,23 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
             </div>
             <ol className="mt-3 space-y-2.5 text-sm leading-relaxed text-muted-foreground">
               <li>
-                <span className="font-medium text-foreground">1. 运行客户端：</span>
-                解压后指定本站地址与工作目录启动，客户端会主动连回本站。
+                <span className="font-medium text-foreground">1. 安装并打开：</span>
+                首次启动会该问本站地址，填好后窗口里直接就是 Yunova。
               </li>
               <li>
                 <span className="font-medium text-foreground">2. 登录账号：</span>
-                按提示输入 Yunova 账号和密码，登录成功即自动绑定这台电脑，无需配对码。
+                在「本机设置」里登录，登录成功即自动绑定这台电脑，无需配对码。
               </li>
               <li>
                 <span className="font-medium text-foreground">3. 派发任务：</span>
-                回到网页或手机，把任务的执行位置选成这台电脑即可。
+                把任务的执行位置选成这台电脑即可；网页和手机上看到的是同一份记录。
               </li>
             </ol>
             <div className="mt-4 rounded-xl bg-muted/70 p-3">
               <div className="flex items-center justify-between gap-2">
-                <span className="text-[11px] text-muted-foreground">启动命令</span>
+                <span className="text-[11px] text-muted-foreground">
+                  服务器上无界面运行
+                </span>
                 <Button size="sm" variant="ghost" onClick={() => void copySnippet()}>
                   {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
                   {copied ? "已复制" : "复制"}
@@ -247,8 +304,12 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
               </li>
               <li>
                 <span className="font-medium text-foreground">工作目录限定范围。</span>
-                只有 <code className="rounded bg-muted px-1">YUNOVA_DEVICE_WORKSPACE</code>{" "}
-                指向的目录可被改动，默认当前目录而非整个用户目录。
+                只有「本机设置」里选定的目录可被改动，默认不是整个用户目录。
+              </li>
+              <li>
+                <span className="font-medium text-foreground">网页无法改本机设置。</span>
+                站点界面跑在单独的窗口里，拿不到本地控制权限，因此服务器不能悄悄放宽
+                审批或改工作目录。
               </li>
               <li>
                 <span className="font-medium text-foreground">不保存密码。</span>

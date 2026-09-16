@@ -7,6 +7,11 @@ edition = "2024"
 name = "yunova-desktop"
 path = "src/main.rs"
 
+[build-dependencies]
+# Generates the bundle metadata (icons, manifest, ACL) the app reads at build
+# time. Only used by the GUI shell; the connector itself needs nothing.
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "io-util", "time", "net", "signal", "sync"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
@@ -21,3 +26,13 @@ hex = "0.4"
 # rustls 0.23 requires an explicit crypto backend; ring is musl-friendly and is
 # installed as the process default in main, otherwise connecting to wss:// panics.
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+# The window shell. `tray-icon`/`image-png` keep the app reachable after the
+# window is closed, which is what makes it a background execution target
+# rather than a program the user must keep in the foreground.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+# A second instance would open a second connector for the same machine and
+# fight over the same session ids, so the existing window is focused instead.
+tauri-plugin-single-instance = "2"
+tauri-plugin-opener = "2"

@@ -1,0 +1,263 @@
+/*
+ * Panel styling.
+ *
+ * Deliberately small and self-contained: the panel must render before any
+ * server is reachable, so it cannot depend on the site's stylesheet, and it
+ * follows the OS colour scheme rather than the brand because it is a system
+ * settings surface, not a page.
+ */
+:root {
+  --bg: #f6f6f8;
+  --card: #ffffff;
+  --text: #17171b;
+  --muted: #6b6b76;
+  --line: #e3e3e9;
+  --brand: #6d3bd1;
+  --ok: #1a9d54;
+  --warn: #b7791f;
+  --err: #c92a2a;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17171b;
+    --card: #1f1f25;
+    --text: #f2f2f5;
+    --muted: #9a9aa6;
+    --line: #2e2e36;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/*
+ * The layout rules below set `display`, which would otherwise beat the user
+ * agent's `[hidden] { display: none }` and leave the sign-in form and the
+ * warnings permanently on screen. Stated once here so no later rule has to
+ * remember it.
+ */
+[hidden] {
+  display: none !important;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--card);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.title {
+  font-weight: 600;
+}
+
+.sub {
+  color: var(--muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 320px;
+}
+
+/* The status light carries the one fact the user opens this window for, so it
+   is readable at a glance instead of buried in the log. */
+.dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+
+.dot[data-state="online"] {
+  background: var(--ok);
+}
+
+.dot[data-state="connecting"] {
+  background: var(--warn);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.dot[data-state="error"],
+.dot[data-state="needs_login"] {
+  background: var(--err);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+main {
+  padding: 16px;
+  display: grid;
+  gap: 14px;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: grid;
+  gap: 10px;
+}
+
+h2 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: none;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+input[type="text"],
+input[type="password"],
+input:not([type]) {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+input:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.pick {
+  display: flex;
+  gap: 8px;
+}
+
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.check input {
+  margin-top: 3px;
+}
+
+.check em {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+button {
+  font: inherit;
+  padding: 8px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--text);
+  cursor: pointer;
+}
+
+button:hover {
+  border-color: var(--brand);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: #fff;
+}
+
+.ghost.danger {
+  color: var(--err);
+}
+
+.hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.warn {
+  margin: 0;
+  color: var(--warn);
+  font-size: 12px;
+}
+
+.error {
+  margin: 0;
+  color: var(--err);
+  font-size: 12px;
+}
+
+.saved {
+  color: var(--ok);
+  font-size: 12px;
+}
+
+.count {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.log {
+  margin: 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

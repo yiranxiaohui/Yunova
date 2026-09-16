@@ -74,8 +74,13 @@ impl RuntimeManager {
         }
     }
 
-    pub fn workspace(&self) -> &Path {
-        &self.config.workspace
+    /// How many runtimes are live.
+    ///
+    /// The window shows this because closing it does not stop them: a user who
+    /// cannot see that work is still running on their machine cannot make an
+    /// informed decision about quitting.
+    pub async fn active(&self) -> usize {
+        self.inner.lock().await.len()
     }
 
     /// Start a runtime for `session_id`.
@@ -147,7 +152,11 @@ impl RuntimeManager {
                         }
                         match serde_json::from_str::<Value>(trimmed) {
                             Ok(frame) => {
-                                if tx.send(ToServer::Frame { session_id, frame }).await.is_err() {
+                                if tx
+                                    .send(ToServer::Frame { session_id, frame })
+                                    .await
+                                    .is_err()
+                                {
                                     return;
                                 }
                             }
@@ -274,8 +283,7 @@ pub async fn write_runtime_config(
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ =
-            tokio::fs::set_permissions(agent_dir, std::fs::Permissions::from_mode(0o700)).await;
+        let _ = tokio::fs::set_permissions(agent_dir, std::fs::Permissions::from_mode(0o700)).await;
     }
 
     let models_path = agent_dir.join("models.json");

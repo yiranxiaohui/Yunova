@@ -38,9 +38,18 @@ pub struct Credential {
 pub fn credential_path(state_dir: Option<&Path>, url: &str) -> PathBuf {
     let base = match state_dir {
         Some(dir) => dir.to_path_buf(),
-        None => config_dir().join("yunova"),
+        None => config_root(),
     };
     base.join(format!("device-{}.json", server_key(url)))
+}
+
+/// The directory this client owns under the OS config location.
+///
+/// Shared with the window shell's settings file so one uninstall cleans up
+/// everything, and so a user looking for "where does this keep its state"
+/// finds one directory instead of two.
+pub fn config_root() -> PathBuf {
+    config_dir().join("yunova")
 }
 
 /// Stable short key for a server URL.
@@ -64,26 +73,26 @@ fn config_dir() -> PathBuf {
     // three env lookups with a documented fallback is the whole requirement,
     // and the client is distributed as a single static binary.
     if cfg!(target_os = "windows") {
-        if let Ok(v) = std::env::var("APPDATA") {
-            if !v.is_empty() {
-                return PathBuf::from(v);
-            }
-        }
-    } else if cfg!(target_os = "macos") {
-        if let Ok(v) = std::env::var("HOME") {
-            if !v.is_empty() {
-                return PathBuf::from(v).join("Library/Application Support");
-            }
-        }
-    } else if let Ok(v) = std::env::var("XDG_CONFIG_HOME") {
-        if !v.is_empty() {
+        if let Ok(v) = std::env::var("APPDATA")
+            && !v.is_empty()
+        {
             return PathBuf::from(v);
         }
-    }
-    if let Ok(v) = std::env::var("HOME") {
-        if !v.is_empty() {
-            return PathBuf::from(v).join(".config");
+    } else if cfg!(target_os = "macos") {
+        if let Ok(v) = std::env::var("HOME")
+            && !v.is_empty()
+        {
+            return PathBuf::from(v).join("Library/Application Support");
         }
+    } else if let Ok(v) = std::env::var("XDG_CONFIG_HOME")
+        && !v.is_empty()
+    {
+        return PathBuf::from(v);
+    }
+    if let Ok(v) = std::env::var("HOME")
+        && !v.is_empty()
+    {
+        return PathBuf::from(v).join(".config");
     }
     PathBuf::from(".")
 }

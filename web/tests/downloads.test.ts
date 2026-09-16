@@ -5,6 +5,7 @@ import {
   assetName,
   downloadUrl,
   guessOs,
+  installerAsset,
   preferredBuild,
 } from "../src/lib/downloads"
 
@@ -54,5 +55,69 @@ describe("desktop client downloads", () => {
       expect(b?.os).toBe(os)
     }
     expect(preferredBuild(null)).toBeNull()
+  })
+
+  test("finds the installer a person actually wants", () => {
+    // Installer names are bundler-generated and carry the version, so they are
+    // matched rather than constructed; the preferred extension wins.
+    const mac = DESKTOP_BUILDS.find((b) => b.target === "aarch64-apple-darwin")!
+    const found = installerAsset(mac, {
+      tag: "v1.2.3",
+      assets: {
+        "Yunova_1.2.3_aarch64.dmg": "https://example.test/a.dmg",
+        "Yunova_aarch64.app.tar.gz": "https://example.test/a.app.tar.gz",
+      },
+      publishedAt: null,
+    })
+    expect(found?.ext).toBe("dmg")
+    expect(found?.url).toBe("https://example.test/a.dmg")
+  })
+
+  test("never offers an installer built for the other CPU family", () => {
+    // The two macOS builds differ only in architecture, so a loose match would
+    // hand an Intel .dmg to an Apple silicon Mac — it installs and then will
+    // not run.
+    const arm = DESKTOP_BUILDS.find((b) => b.target === "aarch64-apple-darwin")!
+    const release = {
+      tag: "v1.2.3",
+      assets: { "Yunova_1.2.3_x64.dmg": "https://example.test/intel.dmg" },
+      publishedAt: null,
+    }
+    expect(installerAsset(arm, release)).toBeNull()
+
+    const intel = DESKTOP_BUILDS.find((b) => b.target === "x86_64-apple-darwin")!
+    expect(installerAsset(intel, release)?.url).toBe("https://example.test/intel.dmg")
+  })
+
+  test("ignores updater signatures, which are not downloads", () => {
+    const linux = DESKTOP_BUILDS.find((b) => b.target === "x86_64-unknown-linux-gnu")!
+    const found = installerAsset(linux, {
+      tag: "v1.2.3",
+      assets: {
+        "yunova_1.2.3_amd64.AppImage.sig": "https://example.test/sig",
+        "yunova_1.2.3_amd64.AppImage": "https://example.test/app",
+      },
+      publishedAt: null,
+    })
+    expect(found?.url).toBe("https://example.test/app")
+  })
+
+  test("reports no installer rather than a dead link", () => {
+    // A release that published only the bare binaries must degrade to the
+    // binary download, not render a button that 404s.
+    const build = DESKTOP_BUILDS[0]
+    expect(installerAsset(build, null)).toBeNull()
+    expect(
+      installerAsset(build, { tag: "v1.0.0", assets: {}, publishedAt: null })
+    ).toBeNull()
+  })
+
+  test("every build names its standalone archive and its installers", () => {
+    // The headless binary is what a server runs; a build that names no
+    // installer would leave that platform with no way to install the app.
+    for (const b of DESKTOP_BUILDS) {
+      expect(assetName(b)).toContain(b.target)
+      expect(b.installers.length).toBeGreaterThan(0)
+    }
   })
 })
