@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useParams } from "react-router-dom"
-import { Cloud, Loader2, Menu, Laptop, Send, Square } from "lucide-react"
+import { Loader2, Menu, Laptop, Send, Square } from "lucide-react"
+import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet"
 import { Sidebar } from "@/components/app/Sidebar"
+import { SidebarToggle } from "@/components/app/SidebarToggle"
 import { AgentTranscript, ApprovalCard } from "@/components/app/AgentTranscript"
 import { DeviceDialog } from "@/components/app/DeviceDialog"
 import {
@@ -452,7 +454,7 @@ export default function AgentTaskPage() {
       // Same height and treatment as chat's header (`min-h-16`), so the
       // content below — including the mode switch — starts at the same y on
       // both screens and the switch does not jump when modes change.
-      <div className="safe-top relative z-30 flex min-h-16 flex-wrap items-center gap-2 border-b border-border/60 bg-background/65 px-2.5 py-2.5 backdrop-blur-xl md:px-6">
+      <div className="safe-top relative z-30 flex min-h-14 flex-wrap items-center gap-2 bg-background/65 px-2.5 py-2 backdrop-blur-xl md:px-4">
         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
           <SheetTrigger asChild>
             <Button variant="ghost" size="icon-sm" className="tap-target md:hidden">
@@ -464,6 +466,9 @@ export default function AgentTaskPage() {
             <Sidebar onNavigate={() => setSidebarOpen(false)} />
           </SheetContent>
         </Sheet>
+        {/* Same thin header as chat, same panel toggle in the same pixel, so
+            switching modes does not move the chrome under the pointer. */}
+        <SidebarToggle />
         <span className="truncate text-sm font-medium">
           {session?.title ?? "新工作任务"}
         </span>
@@ -500,10 +505,18 @@ export default function AgentTaskPage() {
       <main className="flex min-w-0 flex-1 flex-col">
         {header}
 
-        <div className="nc-scroll flex-1 overflow-y-auto px-3 py-5 md:px-6 md:py-8">
-          <div className="mx-auto w-full max-w-4xl space-y-3">
+        <div className="nc-scroll flex-1 overflow-y-auto px-3 py-4 md:px-6 md:py-6">
+          <div
+            className={cn(
+              "mx-auto w-full max-w-4xl",
+              // Centred while empty, top-aligned once there is a transcript —
+              // the same rule chat uses, so the greeting sits at the same
+              // height in both modes.
+              heroSwitch ? "flex min-h-full flex-col justify-center" : "space-y-3"
+            )}
+          >
             {sessionId == null && items.length === 0 && (
-              <div className="fade-up mx-auto mt-8 flex w-full max-w-2xl flex-col items-center gap-7 text-center md:mt-14">
+              <div className="fade-up mx-auto flex w-full max-w-2xl flex-col items-center gap-6 text-center">
                 {/* Same hero skeleton as chat's empty state — mark, heading,
                     switch — so the switch lands in the same place on screen
                     before and after the route change. Shifting it by a hundred
@@ -513,14 +526,11 @@ export default function AgentTaskPage() {
                   <img
                     src="/logo.png"
                     alt=""
-                    className="relative size-16 rounded-[1.35rem] ring-1 ring-white/15 shadow-panel md:size-[4.5rem]"
+                    className="relative size-14 rounded-[1.15rem] ring-1 ring-white/15 shadow-panel md:size-16"
                   />
                 </div>
                 <div>
-                  <div className="mb-3 inline-flex items-center gap-1.5 rounded-full border border-primary/15 bg-primary/5 px-3 py-1 text-[11px] font-medium text-primary">
-                    <Cloud className="size-3" /> Yunova 工作 Agent
-                  </div>
-                  <p className="text-2xl font-semibold tracking-[-0.035em] md:text-3xl">
+                  <p className="text-[1.6rem] font-semibold tracking-[-0.035em] md:text-[2rem]">
                     今天有什么工作要处理？
                   </p>
                   <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">
@@ -559,10 +569,34 @@ export default function AgentTaskPage() {
         {/* `safe-bottom` keeps the composer clear of the home indicator; a
             bottom-anchored control would otherwise be partly untappable in
             the packaged app. */}
-        <div className="safe-bottom border-t border-border/40 bg-background/70 px-3 pb-3 pt-2.5 backdrop-blur-xl md:px-6 md:pb-4">
-          <div className="mx-auto w-full max-w-4xl space-y-2">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex min-w-0 flex-wrap items-center gap-2">
+        <div className="safe-bottom bg-background/70 px-3 pb-3 pt-1.5 backdrop-blur-xl md:px-6 md:pb-4">
+          <div className="mx-auto w-full max-w-4xl">
+            {/* One rounded box, text above and controls below, matching chat's
+                composer: work mode carries more controls than chat, and beside
+                the textarea they left it a narrow slot in a very wide box. */}
+            <form
+              className="glass-surface flex flex-col gap-1 rounded-[1.35rem] px-2.5 py-2 transition-all focus-within:border-primary/35 focus-within:ring-2 focus-within:ring-ring"
+              onSubmit={(e) => {
+                e.preventDefault()
+                void send(input)
+              }}
+            >
+              <Textarea
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault()
+                    void send(input)
+                  }
+                }}
+                rows={1}
+                placeholder={
+                  running ? "Agent 正在运行，发送的消息会插入当前轮次…" : "描述要完成的工作…"
+                }
+                className="max-h-60 min-h-[40px] w-full resize-none border-0 bg-transparent px-1.5 py-2 shadow-none focus-visible:ring-0"
+              />
+              <div className="flex flex-wrap items-center gap-1.5">
                 <ModeSelector
                   onModeChange={(m) => switchMode(m, input)}
                   target={session?.target ?? target}
@@ -592,47 +626,31 @@ export default function AgentTaskPage() {
                     )
                   }
                 />
+                {/* Pairing lives next to the picker: "no local computers" is
+                    only actionable if the fix is one click away. */}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="tap-target-sm shrink-0 rounded-full px-2.5 text-xs"
+                  onClick={() => setDevicesOpen(true)}
+                >
+                  <Laptop className="size-3.5" />
+                  本地电脑
+                </Button>
+                <span className="ml-auto" />
+                <Button
+                  type="submit"
+                  size="icon"
+                  className="size-9 shrink-0 rounded-full shadow-md shadow-primary/20"
+                  disabled={!input.trim() || starting}
+                >
+                  <Send />
+                </Button>
               </div>
-              {/* Pairing lives next to the picker: "no local computers" is
-                  only actionable if the fix is one click away. */}
-              <Button
-                variant="ghost"
-                size="sm"
-                className="tap-target-sm shrink-0 text-xs"
-                onClick={() => setDevicesOpen(true)}
-              >
-                <Laptop className="size-3.5" />
-                本地电脑
-              </Button>
-            </div>
-            <form
-              className="flex items-end gap-2"
-              onSubmit={(e) => {
-                e.preventDefault()
-                void send(input)
-              }}
-            >
-              <Textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault()
-                    void send(input)
-                  }
-                }}
-                rows={2}
-                placeholder={
-                  running ? "Agent 正在运行，发送的消息会插入当前轮次…" : "描述要完成的工作…"
-                }
-                className="min-h-[3.25rem] resize-none"
-              />
-              <Button type="submit" size="icon" disabled={!input.trim() || starting}>
-                <Send />
-              </Button>
             </form>
             {sessionId == null && (
-              <p className="text-xs text-muted-foreground">
+              <p className="mt-1.5 text-center text-[10px] tracking-wide text-muted-foreground/80">
                 {target === "cloud"
                   ? "云电脑在隔离容器中运行，仅按 token 计费，不额外收取机时。"
                   : "本地电脑任务在你自己的机器上执行，需要桌面客户端保持在线。"}

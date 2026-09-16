@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { useNavigate, useParams, useSearchParams } from "react-router-dom"
 import {
   ArrowUp,
-  ArrowUpRight,
   ArrowDown,
   BookMarked,
   Check,
@@ -57,6 +56,7 @@ import { ModelPicker } from "@/components/app/ModelPicker"
 import { RechargeDialog } from "@/components/app/RechargeDialog"
 import { QuotaLedgerDialog } from "@/components/app/QuotaLedgerDialog"
 import { Sidebar } from "@/components/app/Sidebar"
+import { SidebarToggle } from "@/components/app/SidebarToggle"
 import { ModeSwitch } from "@/components/app/ModeSelector"
 import {
   prefetchWorkModeWhenIdle,
@@ -1520,11 +1520,11 @@ export default function ChatPage() {
   }
 
   const lastIdx = messages.length - 1
-  // The large centred switch belongs to the empty state; the composer keeps a
-  // compact one for every other moment. Exactly one is mounted at a time, so
-  // the control never appears twice on the same screen.
-  const heroSwitch =
-    Boolean(user) && !loadingMessages && messages.length === 0 && configured
+  // The empty state: no transcript yet, so the greeting, the suggestions and
+  // the composer are the whole screen. It also owns the large mode switch,
+  // while the composer strip keeps the compact one for every other moment, so
+  // the control is never mounted twice on the same screen.
+  const heroEmpty = !loadingMessages && messages.length === 0 && configured
 
   return (
     <div className="app-shell flex h-svh bg-background text-foreground">
@@ -1562,8 +1562,11 @@ export default function ChatPage() {
       </div>
 
       <div className="flex min-w-0 flex-1 flex-col bg-background/25">
-        <header className="relative z-30 flex min-h-16 items-center justify-between gap-2 border-b border-border/60 bg-background/65 px-2.5 py-2.5 backdrop-blur-xl md:gap-3 md:px-6">
-          <div className="flex min-w-0 flex-1 items-center gap-1.5 md:gap-3">
+        {/* No bottom border: Doubao lets the column read as one surface. The
+            translucent background stays, though, or scrolled messages would
+            slide visibly under the model picker. */}
+        <header className="relative z-30 flex min-h-14 items-center justify-between gap-2 bg-background/65 px-2.5 py-2 backdrop-blur-xl md:gap-3 md:px-4">
+          <div className="flex min-w-0 flex-1 items-center gap-1.5 md:gap-2">
             <Button
               variant="ghost"
               size="icon"
@@ -1573,12 +1576,11 @@ export default function ChatPage() {
             >
               <Menu />
             </Button>
-            <div className="hidden min-w-0 md:block">
-              <h1 className="truncate text-sm font-semibold tracking-tight">
-                {conversationId ? `会话 #${conversationId}` : "新对话"}
-              </h1>
-              <p className="mt-0.5 text-[10px] text-muted-foreground">AI 智能对话</p>
-            </div>
+            {/* Doubao's header is a thin strip: the panel toggle, the model,
+                and nothing else on the left. The conversation already names
+                itself in the sidebar and in the transcript, so a second title
+                here only cost vertical space. */}
+            <SidebarToggle />
             <ChatModelPicker
               protocol={settings.protocol}
               model={settings.model}
@@ -1701,32 +1703,41 @@ export default function ChatPage() {
           onScroll={handleScroll}
           className="nc-scroll relative flex-1 overflow-y-auto"
         >
-          <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 px-3 py-5 md:px-6 md:py-8">
+          <div
+            className={cn(
+              "mx-auto flex w-full max-w-4xl flex-col px-3 md:px-6",
+              // Doubao's empty state hangs from the composer rather than from
+              // the header: the greeting, the switch and the suggestions form
+              // one block that ends just above the input, so the eye travels
+              // straight from "what shall we do" into the place to type it.
+              // Once a transcript exists the column flows from the top again.
+              heroEmpty
+                ? "min-h-full justify-end gap-5 pb-1 pt-6"
+                : "gap-5 py-5 md:py-8"
+            )}
+          >
             {banner}
             {loadingMessages && (
               <p className="text-center text-sm text-muted-foreground">加载中…</p>
             )}
-            {!loadingMessages && messages.length === 0 && configured && (
-              <div className="fade-up mx-auto mt-8 flex w-full max-w-2xl flex-col items-center gap-7 text-center md:mt-14">
+            {heroEmpty && (
+              <div className="fade-up mx-auto flex w-full max-w-2xl flex-col items-center gap-6 text-center">
                 <div className="relative">
                   <div className="absolute inset-2 rounded-3xl bg-primary/30 blur-2xl" />
                   <img
                     src="/logo.png"
                     alt=""
-                    className="relative size-16 rounded-[1.35rem] ring-1 ring-white/15 shadow-panel md:size-[4.5rem]"
+                    className="relative size-14 rounded-[1.15rem] ring-1 ring-white/15 shadow-panel md:size-16"
                   />
                 </div>
                 <div>
-                  <div className="mb-3 inline-flex items-center gap-1.5 rounded-full border border-primary/15 bg-primary/5 px-3 py-1 text-[11px] font-medium text-primary">
-                    <Sparkles className="size-3" /> Yunova AI 助手
-                  </div>
-                  <p className="text-2xl font-semibold tracking-[-0.035em] md:text-3xl">
+                  <p className="text-[1.6rem] font-semibold tracking-[-0.035em] md:text-[2rem]">
                     {user?.display_name?.trim() || user?.username
                       ? `你好，${user?.display_name?.trim() || user?.username}`
-                      : "开始一段对话"}
+                      : "今天想聊些什么？"}
                   </p>
                   <p className="mx-auto mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">
-                    今天想一起完成什么？你可以直接提问、上传文件，或从下面的灵感开始。
+                    直接提问、上传文件，或从下方的推荐开始。
                     {settings.protocol === "openai"
                       ? " 当前模型还支持直接用文字描述生成图片。"
                       : ""}
@@ -1747,7 +1758,16 @@ export default function ChatPage() {
                     onModeChange={(m) => switchMode(m, input)}
                   />
                 )}
-                <div className="grid w-full grid-cols-1 gap-2.5 sm:grid-cols-2">
+              </div>
+            )}
+            {/* Suggestions are aligned to the composer's own column, not to
+                the narrower greeting block: they are candidate inputs, so
+                they read as belonging to the input below rather than to the
+                heading above. */}
+            {heroEmpty && (
+              <div className="fade-up">
+                <p className="mb-1.5 px-1 text-[11px] text-muted-foreground">为你推荐</p>
+                <div className="flex flex-col items-start gap-1.5">
                   {SAMPLE_PROMPTS.map((p) => {
                     const Icon = p.icon
                     return (
@@ -1755,20 +1775,12 @@ export default function ChatPage() {
                         key={p.title}
                         type="button"
                         onClick={() => fillSample(p.body)}
-                        className="group glass-surface flex min-h-24 items-start gap-3 rounded-2xl p-4 text-left transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:shadow-lg"
+                        title={p.body}
+                        className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-border/70 bg-card/70 px-3 py-1.5 text-xs shadow-sm backdrop-blur transition-colors hover:border-primary/30 hover:bg-card"
                       >
-                        <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-primary/8 text-primary transition-colors group-hover:bg-primary/12">
-                          <Icon className="size-4" />
-                        </span>
-                        <span className="min-w-0 flex-1">
-                          <span className="flex items-center justify-between text-xs font-semibold text-foreground">
-                            {p.title}
-                            <ArrowUpRight className="size-3.5 text-muted-foreground transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-primary" />
-                          </span>
-                          <span className="mt-1.5 line-clamp-2 text-sm leading-relaxed text-muted-foreground">
-                            {p.body}
-                          </span>
-                        </span>
+                        <Icon className="size-3.5 shrink-0 text-primary" />
+                        <span className="font-medium text-primary">{p.title}</span>
+                        <span className="truncate text-foreground/85">{p.body}</span>
                       </button>
                     )
                   })}
@@ -1849,36 +1861,42 @@ export default function ChatPage() {
           )}
         </div>
 
-        <div className="border-t border-border/40 bg-background/70 px-3 pb-3 pt-2.5 backdrop-blur-xl md:px-6 md:pb-4">
+        <div className="bg-background/70 px-3 pb-3 pt-1.5 backdrop-blur-xl md:px-6 md:pb-4">
           <div className="mx-auto max-w-4xl">
-            <div className="mb-2 flex flex-wrap items-center gap-2.5 px-1 text-sm">
-              {user && !heroSwitch && (
-                <ModeSwitch mode="chat" onModeChange={(m) => switchMode(m, input)} />
-              )}
-              {(() => {
-                const limit =
-                  (settings.chatMode === "platform"
-                    ? platformContextMap.get(settings.model)
-                    : undefined) ?? contextLimit(settings.model)
-                const pct = Math.min(
-                  100,
-                  Math.round((displayContextTokens / limit) * 100)
-                )
-                const cls =
-                  pct >= 95
-                    ? "text-red-500"
-                    : pct >= 80
-                      ? "text-orange-500"
-                      : "text-muted-foreground"
-                return (
-                  <span className={`ml-auto text-xs ${cls}`}>
-                    上下文 {formatTokens(displayContextTokens)} /{" "}
-                    {formatTokens(limit)} ({pct}%)
-                    {pct >= 95 ? "，建议新开会话" : ""}
-                  </span>
-                )
-              })()}
-            </div>
+            {/* The strip carries the compact switch and the context meter,
+                neither of which exists in the empty state, so it is dropped
+                entirely there rather than left as blank padding above the
+                composer. */}
+            {!heroEmpty && (
+              <div className="mb-1.5 flex flex-wrap items-center gap-2.5 px-1 text-sm">
+                {user && (
+                  <ModeSwitch mode="chat" onModeChange={(m) => switchMode(m, input)} />
+                )}
+                {(() => {
+                  const limit =
+                    (settings.chatMode === "platform"
+                      ? platformContextMap.get(settings.model)
+                      : undefined) ?? contextLimit(settings.model)
+                  const pct = Math.min(
+                    100,
+                    Math.round((displayContextTokens / limit) * 100)
+                  )
+                  const cls =
+                    pct >= 95
+                      ? "text-red-500"
+                      : pct >= 80
+                        ? "text-orange-500"
+                        : "text-muted-foreground"
+                  return (
+                    <span className={`ml-auto text-xs ${cls}`}>
+                      上下文 {formatTokens(displayContextTokens)} /{" "}
+                      {formatTokens(limit)} ({pct}%)
+                      {pct >= 95 ? "，建议新开会话" : ""}
+                    </span>
+                  )
+                })()}
+              </div>
+            )}
             {attachments.length > 0 && (
               <div className="mb-2 flex flex-wrap gap-2 rounded-xl border border-border bg-card p-2">
                 {attachments.map((a) =>
@@ -1937,41 +1955,11 @@ export default function ChatPage() {
                 e.target.value = ""
               }}
             />
-            <div className="glass-surface flex items-end gap-1.5 rounded-[1.35rem] p-2.5 transition-all focus-within:border-primary/35 focus-within:shadow-[0_18px_48px_-24px_color-mix(in_oklch,var(--primary)_45%,transparent)] focus-within:ring-2 focus-within:ring-ring">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="shrink-0"
-                aria-label="附加图片或文件"
-                title="附加图片或文件（PDF / 文本，支持多选）"
-                disabled={streaming}
-                onClick={() => attachInputRef.current?.click()}
-              >
-                <Paperclip />
-              </Button>
-              <Button
-                type="button"
-                variant={settings.webSearch ? "default" : "ghost"}
-                size="icon"
-                className="shrink-0"
-                aria-label={
-                  settings.webSearch ? "关闭联网搜索" : "开启联网搜索"
-                }
-                title={
-                  !likelyWebSearchCapable(settings.protocol, settings.model)
-                    ? `当前模型可能不支持联网搜索（${
-                        settings.model || "未选择"
-                      }）；点击仍可切换，请求失败请改选支持的模型`
-                    : settings.webSearch
-                      ? "联网搜索：开启（点击关闭）"
-                      : "联网搜索：关闭（点击开启）"
-                }
-                disabled={streaming}
-                onClick={toggleWebSearch}
-              >
-                <Globe />
-              </Button>
+            {/* Doubao's composer is two stacked rows inside one rounded box:
+                the text first, the tools underneath. Putting the buttons
+                beside the text is what squeezed the input into the middle
+                third of a very wide box. */}
+            <div className="glass-surface flex flex-col gap-1 rounded-[1.35rem] px-2.5 py-2 transition-all focus-within:border-primary/35 focus-within:shadow-[0_18px_48px_-24px_color-mix(in_oklch,var(--primary)_45%,transparent)] focus-within:ring-2 focus-within:ring-ring">
               <Textarea
                 ref={textareaRef}
                 value={input}
@@ -2011,35 +1999,73 @@ export default function ChatPage() {
                   }
                 }}
                 placeholder={
-                  !configured ? "先在设置中配置 API…" : "输入消息，或粘贴图片…"
+                  !configured ? "先在设置中配置 API…" : "发消息或提问，可直接粘贴图片…"
                 }
                 rows={1}
-                className="max-h-60 min-h-[42px] flex-1 resize-none border-0 bg-transparent px-2.5 py-2.5 shadow-none focus-visible:ring-0"
+                className="max-h-60 min-h-[40px] w-full resize-none border-0 bg-transparent px-1.5 py-2 shadow-none focus-visible:ring-0"
               />
-              {streaming ? (
+              <div className="flex items-center gap-1">
                 <Button
-                  onClick={stop}
-                  variant="secondary"
-                  size="icon"
-                  className="size-10 shrink-0 rounded-xl"
-                  aria-label="停止"
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="shrink-0 rounded-full"
+                  aria-label="附加图片或文件"
+                  title="附加图片或文件（PDF / 文本，支持多选）"
+                  disabled={streaming}
+                  onClick={() => attachInputRef.current?.click()}
                 >
-                  <Square />
+                  <Paperclip />
                 </Button>
-              ) : (
                 <Button
-                  onClick={() => void send()}
-                  disabled={!canSend}
-                  size="icon"
-                  className="size-10 shrink-0 rounded-xl shadow-md shadow-primary/20"
-                  aria-label="发送"
-                  title="发送"
+                  type="button"
+                  variant={settings.webSearch ? "default" : "ghost"}
+                  size="sm"
+                  className="shrink-0 rounded-full px-2.5 text-xs"
+                  aria-label={
+                    settings.webSearch ? "关闭联网搜索" : "开启联网搜索"
+                  }
+                  title={
+                    !likelyWebSearchCapable(settings.protocol, settings.model)
+                      ? `当前模型可能不支持联网搜索（${
+                          settings.model || "未选择"
+                        }）；点击仍可切换，请求失败请改选支持的模型`
+                      : settings.webSearch
+                        ? "联网搜索：开启（点击关闭）"
+                        : "联网搜索：关闭（点击开启）"
+                  }
+                  disabled={streaming}
+                  onClick={toggleWebSearch}
                 >
-                  <ArrowUp />
+                  <Globe className="size-3.5" />
+                  联网
                 </Button>
-              )}
+                <span className="ml-auto" />
+                {streaming ? (
+                  <Button
+                    onClick={stop}
+                    variant="secondary"
+                    size="icon"
+                    className="size-9 shrink-0 rounded-full"
+                    aria-label="停止"
+                  >
+                    <Square />
+                  </Button>
+                ) : (
+                  <Button
+                    onClick={() => void send()}
+                    disabled={!canSend}
+                    size="icon"
+                    className="size-9 shrink-0 rounded-full shadow-md shadow-primary/20"
+                    aria-label="发送"
+                    title="发送"
+                  >
+                    <ArrowUp />
+                  </Button>
+                )}
+              </div>
             </div>
-            <p className="mt-2 text-center text-[10px] tracking-wide text-muted-foreground/80">
+            <p className="mt-1.5 text-center text-[10px] tracking-wide text-muted-foreground/80">
               Yunova 可能会生成不准确的信息，请核对重要内容
             </p>
           </div>
