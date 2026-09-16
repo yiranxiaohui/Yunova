@@ -21,9 +21,20 @@ services:
       - "3000:3000"
     volumes:
       - ${YUNOVA_DATA_PATH:-./yunova_data}:/data
+      # Cloud-computer (work mode) sandboxes are containers this server starts
+      # on the host's daemon. Remove this mount to run without them; work-mode
+      # sessions then fail to start. Note the socket is root-equivalent.
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       YUNOVA_BIND: 0.0.0.0:3000
       YUNOVA_DATA_DIR: /data
+      # Host path backing /data. The daemon resolves bind sources on the host,
+      # so without this a sandbox mounts an empty directory instead of its
+      # credential. Must be absolute; set it when /data is a relative bind.
+      # YUNOVA_HOST_DATA_DIR: /opt/yunova/data
+      # This container's name on the sandbox network. The bridge gateway
+      # reaches the host, where nothing listens on the internal port.
+      YUNOVA_SANDBOX_GATEWAY_CONTAINER: yunova
       # Configure S3-compatible media storage in 管理后台 → 媒体存储.
       # Uncomment for MySQL profile:
       # YUNOVA_DATABASE_URL: mysql://yunova:yunova@mysql:3306/yunova

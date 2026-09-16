@@ -107,6 +107,40 @@ pub fn docker_command() -> Command {
     cmd
 }
 
+/// Translate a path inside this process into the path the Docker daemon sees.
+///
+/// Yunova itself usually runs in a container while driving the *host's* Docker
+/// daemon, so a bind mount argument is resolved by the daemon against the host
+/// filesystem, not against this process's namespace. Passing `/data/...`
+/// unchanged makes the daemon create an empty directory at that host path and
+/// the sandbox then starts without its credential — a silent failure, which is
+/// why the mapping is explicit configuration rather than a guess.
+///
+/// `YUNOVA_HOST_DATA_DIR` names the host path backing `YUNOVA_DATA_DIR`; when
+/// it is unset the path is already host-correct and is returned untouched.
+pub fn host_path(path: &Path) -> String {
+    let host_root = crate::runtime_env::var("YUNOVA_HOST_DATA_DIR").ok();
+    let data_dir = crate::runtime_env::var("YUNOVA_DATA_DIR").unwrap_or_else(|_| "/data".into());
+    host_path_with(path, &data_dir, host_root.as_deref())
+}
+
+/// Pure core of [`host_path`], split out so the mapping is testable without
+/// mutating process-wide environment state from parallel tests.
+fn host_path_with(path: &Path, data_dir: &str, host_root: Option<&str>) -> String {
+    let Some(host_root) = host_root.map(str::trim).filter(|r| !r.is_empty()) else {
+        return path.display().to_string();
+    };
+    match path.strip_prefix(data_dir) {
+        Ok(rest) => Path::new(host_root.trim_end_matches('/'))
+            .join(rest)
+            .display()
+            .to_string(),
+        // Outside the mapped data directory there is nothing to translate;
+        // rewriting it would be a worse guess than leaving it alone.
+        Err(_) => path.display().to_string(),
+    }
+}
+
 /// Dedicated Docker network for sandboxes.
 ///
 /// Created with `--internal`, which drops the default bridge's masquerade
@@ -116,11 +150,22 @@ pub fn docker_command() -> Command {
 /// open proxy.
 pub const NETWORK_NAME: &str = "yunova-sandbox";
 
-/// Ensure the internal sandbox network exists and return its gateway address.
+/// Ensure the internal sandbox network exists and return the address a sandbox
+/// should use to reach Yunova's model gateway.
 ///
-/// An internal network has no route off the host, but the host itself is still
-/// reachable at the bridge gateway, which is how a sandbox reaches Yunova's
-/// metered model gateway while remaining unable to call anything else.
+/// Two deployment shapes have to work here and they resolve the gateway
+/// differently:
+///
+/// * Yunova runs directly on the host — the server listens on the host's
+///   network, so the bridge gateway address is the way in.
+/// * Yunova runs in a container — the server listens inside *its own* network
+///   namespace, and the bridge gateway reaches the host instead, where nothing
+///   is listening on the internal port. The application container must join
+///   this network and be addressed by its own address on it.
+///
+/// `YUNOVA_SANDBOX_GATEWAY_CONTAINER` names that container; when it is set its
+/// address on the sandbox network wins, which also keeps the sandbox on an
+/// `--internal` network with no route off the host.
 pub async fn ensure_network() -> Result<String, String> {
     // Create unconditionally and tolerate "already exists": checking first
     // would race with another starting session.
@@ -135,24 +180,73 @@ pub async fn ensure_network() -> Result<String, String> {
         .stderr(std::process::Stdio::null());
     let _ = create.status().await;
 
-    let mut inspect = docker_command();
-    inspect
-        .arg("network")
-        .arg("inspect")
-        .arg(NETWORK_NAME)
-        .arg("--format")
-        .arg("{{(index .IPAM.Config 0).Gateway}}")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let out = inspect
-        .output()
-        .await
-        .map_err(|e| format!("无法读取沙箱网络信息: {e}"))?;
-    let gateway = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if let Ok(name) = crate::runtime_env::var("YUNOVA_SANDBOX_GATEWAY_CONTAINER") {
+        let name = name.trim().to_string();
+        if !name.is_empty() {
+            return gateway_container_addr(&name).await;
+        }
+    }
+
+    let gateway = docker_output(&[
+        "network",
+        "inspect",
+        NETWORK_NAME,
+        "--format",
+        "{{(index .IPAM.Config 0).Gateway}}",
+    ])
+    .await
+    .map_err(|e| format!("无法读取沙箱网络信息: {e}"))?;
     if gateway.is_empty() {
         return Err("沙箱网络缺少网关地址，无法访问模型网关".into());
     }
     Ok(gateway)
+}
+
+/// Address of the application container on the sandbox network.
+///
+/// Attaching is done unconditionally and its "already connected" error is
+/// ignored, because the alternative — inspecting first — would race with
+/// another session starting at the same time. A missing address afterwards is
+/// fatal rather than silently fixable: without it the sandbox would start with
+/// a gateway URL that resolves nowhere.
+async fn gateway_container_addr(name: &str) -> Result<String, String> {
+    let mut connect = docker_command();
+    connect
+        .arg("network")
+        .arg("connect")
+        .arg(NETWORK_NAME)
+        .arg(name)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let _ = connect.status().await;
+
+    let addr = docker_output(&[
+        "inspect",
+        name,
+        "--format",
+        &format!("{{{{(index .NetworkSettings.Networks \"{NETWORK_NAME}\").IPAddress}}}}"),
+    ])
+    .await
+    .map_err(|e| format!("无法读取沙箱网络信息: {e}"))?;
+    if addr.is_empty() {
+        return Err(format!(
+            "容器 {name} 未接入 {NETWORK_NAME} 网络，沙箱无法访问模型网关"
+        ));
+    }
+    Ok(addr)
+}
+
+/// Run a docker query and return its trimmed stdout.
+async fn docker_output(args: &[&str]) -> Result<String, String> {
+    let mut cmd = docker_command();
+    for arg in args {
+        cmd.arg(arg);
+    }
+    cmd.stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let out = cmd.output().await.map_err(|e| e.to_string())?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Build the argument list for a sandbox container.
@@ -228,7 +322,7 @@ pub fn build_run_args(
     args.push("-v".into());
     args.push(format!(
         "{}:/run/yunova/models.json:ro",
-        agent_dir.join("models.json").display()
+        host_path(&agent_dir.join("models.json"))
     ));
     // Copied into place by the wrapper below, because the mount target itself
     // lives inside a tmpfs that is created after mounts are resolved.
@@ -243,7 +337,7 @@ pub fn build_run_args(
     let ext_dir = agent_dir.join("extensions");
     if ext_dir.is_dir() {
         args.push("-v".into());
-        args.push(format!("{}:/run/yunova/extensions:ro", ext_dir.display()));
+        args.push(format!("{}:/run/yunova/extensions:ro", host_path(&ext_dir)));
         args.push("-e".into());
         args.push("YUNOVA_EXT_SRC=/run/yunova/extensions".into());
     }
@@ -458,6 +552,47 @@ mod tests {
         assert!(
             joined.contains("/data/agent-runtimes/s42/agent/models.json:/run/yunova/models.json:ro"),
             "expected a read-only bind, got: {joined}"
+        );
+    }
+
+    /// Yunova normally runs in a container while driving the host's daemon, so
+    /// a bind source is resolved against the *host* filesystem. Leaving the
+    /// in-container path in place makes the daemon helpfully create an empty
+    /// directory there, and the sandbox then starts without its credential —
+    /// which looks like a broken agent, not a broken mount.
+    #[test]
+    fn bind_sources_are_translated_to_the_paths_the_daemon_resolves() {
+        assert_eq!(
+            host_path_with(
+                Path::new("/data/agent-runtimes/s42/agent/models.json"),
+                "/data",
+                Some("/opt/yunova/data"),
+            ),
+            "/opt/yunova/data/agent-runtimes/s42/agent/models.json"
+        );
+        // A trailing slash in configuration must not produce a doubled one.
+        assert_eq!(
+            host_path_with(Path::new("/data/x"), "/data", Some("/opt/yunova/data/")),
+            "/opt/yunova/data/x"
+        );
+    }
+
+    #[test]
+    fn paths_are_left_alone_when_no_host_mapping_applies() {
+        // Running directly on the host: the path is already correct, and
+        // rewriting it would break a working deployment.
+        assert_eq!(
+            host_path_with(Path::new("/data/x"), "/data", None),
+            "/data/x"
+        );
+        assert_eq!(
+            host_path_with(Path::new("/data/x"), "/data", Some("  ")),
+            "/data/x"
+        );
+        // Outside the mapped data directory the mapping does not apply.
+        assert_eq!(
+            host_path_with(Path::new("/etc/passwd"), "/data", Some("/opt/yunova/data")),
+            "/etc/passwd"
         );
     }
 

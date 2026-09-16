@@ -51,6 +51,15 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && ln -s /usr/sbin/gosu /usr/local/bin/su-exec
 
+# Docker CLI for the cloud-computer sandbox driver.
+#
+# Work-mode sessions run in per-session containers that this server starts on
+# the host's Docker daemon, and the driver shells out to `docker`. Without the
+# binary every cloud session fails at start with ENOENT rather than with a
+# usable message. Only the client is copied: the daemon stays on the host, and
+# the socket is mounted by the deployment only when sandboxing is wanted.
+COPY --from=docker:29-cli /usr/local/bin/docker /usr/local/bin/docker
+
 RUN useradd --system --uid 10001 --home /data yunova \
     && mkdir -p /data \
     && chown -R yunova:yunova /data

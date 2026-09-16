@@ -511,9 +511,38 @@ docker build -f docker/sandbox.Dockerfile -t yunova-sandbox:latest .
 | `YUNOVA_SANDBOX_WORKSPACE_SIZE` | `1g` | 工作目录 tmpfs 大小 |
 | `YUNOVA_SANDBOX_MAX_LIFETIME` | `3600` | 沙箱最长存活秒数 |
 | `YUNOVA_SANDBOX_GATEWAY_URL` | `http://yunova-gateway:<port>` | 容器内看到的网关地址 |
+| `YUNOVA_SANDBOX_GATEWAY_CONTAINER` | 空 | Yunova 自身所在容器名；容器化部署必填 |
+| `YUNOVA_HOST_DATA_DIR` | 空 | `YUNOVA_DATA_DIR` 对应的宿主路径；容器化部署必填 |
 
-部署注意：Docker socket 等于 root 权限。要么把服务进程的用户加入 `docker` 组，
-要么用 `YUNOVA_DOCKER_BIN="sudo -n docker"`；两者都等于信任该进程。生产环境建议把沙箱
+### 容器化部署要补的三件事
+
+Yunova 自己跑在容器里、却要驱动**宿主**的 Docker daemon，因此有两处会静默出错：
+
+- **挂载路径**：`-v` 的源路径由 daemon 在宿主文件系统上解析。直接传容器内的
+  `/data/...`，daemon 会在宿主同名路径下建一个空目录，沙箱于是读不到凭据。
+  用 `YUNOVA_HOST_DATA_DIR` 声明宿主路径即可自动换算。
+- **网关地址**：桥网关指向宿主，但服务监听在自己的网络命名空间里，宿主那个端口
+  上没人listen。设 `YUNOVA_SANDBOX_GATEWAY_CONTAINER=<自身容器名>`，启动时会把
+  该容器接入 `yunova-sandbox` 网络并改用它在该网络上的地址。
+- **socket 权限**：挂载 `/var/run/docker.sock` 后，entrypoint 会按 socket 的属组
+  把 `yunova` 用户加进去（不改 socket 属主，避免影响宿主其他客户端）。
+
+对应的 Compose 片段：
+
+```yaml
+services:
+  yunova:
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      YUNOVA_HOST_DATA_DIR: /opt/yunova/data   # ./data 的宿主绝对路径
+      YUNOVA_SANDBOX_GATEWAY_CONTAINER: yunova
+```
+
+部署注意：Docker socket 等于 root 权限。挂载它就等于把宿主 root 等价权限交给本服务
+进程；不挂载则云电脑不可用，工作模式会在启动时报错。要么挂 socket，要么用
+`YUNOVA_DOCKER_BIN="sudo -n docker"`；两者都等于信任该进程。生产环境建议把沙箱
 宿主与主服务分开，并在宿主防火墙上叠加出网限制。
 
 ## 部署
