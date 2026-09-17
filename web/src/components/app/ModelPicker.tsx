@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Check, RefreshCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -58,6 +58,31 @@ export function ModelPicker({
   const [loading, setLoading] = useState(false)
   const [query, setQuery] = useState("")
   const popRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  // Where the panel may actually be drawn. The composer sits at the bottom of
+  // the viewport, so a list that always hangs downwards gets clipped by the
+  // window instead of scrolling; measuring the trigger lets it flip upwards
+  // and cap its own height to the space that exists.
+  const [placement, setPlacement] = useState<{ up: boolean; maxHeight: number }>({
+    up: false,
+    maxHeight: DESIRED_HEIGHT,
+  })
+
+  const measure = useCallback(() => {
+    const rect = triggerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const below = window.innerHeight - rect.bottom - PANEL_GAP - VIEWPORT_MARGIN
+    const above = rect.top - PANEL_GAP - VIEWPORT_MARGIN
+    // Flip only when the other side is genuinely roomier: near-equal space
+    // should keep the familiar downward panel rather than jump on a few pixels
+    // of scroll.
+    const up = below < Math.min(DESIRED_HEIGHT, above)
+    const room = up ? above : below
+    setPlacement({
+      up,
+      maxHeight: Math.max(MIN_HEIGHT, Math.min(DESIRED_HEIGHT, room)),
+    })
+  }, [])
 
   const fresh = cache?.key === reloadKey ? cache : null
   const models = fresh?.models ?? []
@@ -70,8 +95,17 @@ export function ModelPicker({
       if (!popRef.current.contains(e.target as Node)) setOpen(false)
     }
     window.addEventListener("mousedown", onDown)
-    return () => window.removeEventListener("mousedown", onDown)
-  }, [open])
+    // Re-measured while open because the composer moves: the transcript grows,
+    // the textarea auto-sizes, and the mobile keyboard resizes the viewport,
+    // any of which can turn a valid placement into a clipped one.
+    window.addEventListener("resize", measure)
+    window.addEventListener("scroll", measure, true)
+    return () => {
+      window.removeEventListener("mousedown", onDown)
+      window.removeEventListener("resize", measure)
+      window.removeEventListener("scroll", measure, true)
+    }
+  }, [open, measure])
 
   async function fetchList() {
     setLoading(true)
@@ -93,6 +127,9 @@ export function ModelPicker({
   // interaction and not to a render pass.
   function toggle() {
     const next = !open
+    // Measured before the panel exists, so it is positioned correctly on its
+    // first frame instead of being painted downwards and then snapping up.
+    if (next) measure()
     setOpen(next)
     if (next && !fresh && !loading) void fetchList()
   }
@@ -114,6 +151,7 @@ export function ModelPicker({
     <div className={cn("relative min-w-0", className)} ref={popRef}>
       <button
         type="button"
+        ref={triggerRef}
         disabled={disabled}
         onClick={toggle}
         className="inline-flex min-w-0 max-w-[8rem] items-center gap-1.5 rounded-xl border border-border/70 bg-card/70 px-2.5 py-1.5 text-xs shadow-sm backdrop-blur transition-all hover:border-primary/30 hover:bg-card disabled:cursor-not-allowed disabled:opacity-60 sm:max-w-[11rem] md:max-w-none"
@@ -134,8 +172,14 @@ export function ModelPicker({
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-40 mt-2 w-72 rounded-2xl border border-border bg-popover/95 p-2.5 shadow-panel backdrop-blur-xl">
-          <div className="mb-2 flex items-center gap-1">
+        <div
+          className={cn(
+            "absolute left-0 z-40 flex w-72 flex-col rounded-2xl border border-border bg-popover/95 p-2.5 shadow-panel backdrop-blur-xl",
+            placement.up ? "bottom-full mb-2" : "top-full mt-2"
+          )}
+          style={{ maxHeight: placement.maxHeight }}
+        >
+          <div className="mb-2 flex shrink-0 items-center gap-1">
             <Input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -155,7 +199,9 @@ export function ModelPicker({
               <RefreshCcw className={cn("size-3.5", loading && "animate-spin")} />
             </Button>
           </div>
-          <div className="nc-scroll max-h-72 overflow-y-auto">
+          {/* The list, not the panel, absorbs the height limit: the search box
+              and footer must stay reachable when the viewport is short. */}
+          <div className="nc-scroll min-h-0 flex-1 overflow-y-auto">
             {loading && models.length === 0 && (
               <p className="px-2 py-6 text-center text-xs text-muted-foreground">
                 加载中…
@@ -205,7 +251,7 @@ export function ModelPicker({
             </ul>
           </div>
           {footer && (
-            <div className="mt-2 border-t border-border pt-2 text-[10px] text-muted-foreground">
+            <div className="mt-2 shrink-0 border-t border-border pt-2 text-[10px] text-muted-foreground">
               {footer}
             </div>
           )}
@@ -220,3 +266,12 @@ const PROTOCOL_COLOR: Record<Protocol, string> = {
   claude: "from-amber-400 to-orange-600",
   gemini: "from-sky-400 to-indigo-600",
 }
+
+/** Gap between trigger and panel, matching the `mt-2`/`mb-2` offset. */
+const PANEL_GAP = 8
+/** Breathing room kept against the viewport edge. */
+const VIEWPORT_MARGIN = 8
+/** Height the panel takes when there is room for it. */
+const DESIRED_HEIGHT = 384
+/** Below this the panel is useless, so it overflows rather than collapses. */
+const MIN_HEIGHT = 200
