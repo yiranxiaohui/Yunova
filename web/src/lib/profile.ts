@@ -10,7 +10,6 @@ async function jsonOrThrow<T>(res: Response): Promise<T> {
 
 export type ProfileUpdate = {
   display_name?: string
-  avatar_url?: string
 }
 
 export const profileApi = {

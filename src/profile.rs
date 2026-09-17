@@ -12,13 +12,11 @@ use serde::Deserialize;
 use crate::{AppState, CurrentUser, InstalledState, UserDto, auth, db, storage::MediaKind};
 
 pub const MAX_DISPLAY_NAME: usize = 64;
-pub const MAX_AVATAR_URL: usize = 512;
 pub const MAX_AVATAR_BYTES: usize = 2 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub struct UpdateProfile {
     pub display_name: Option<String>,
-    pub avatar_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -42,27 +40,6 @@ fn normalize_display_name(v: &str) -> Result<Option<String>, Response> {
     } else {
         Ok(Some(trimmed.to_string()))
     }
-}
-
-fn normalize_avatar_url(v: &str) -> Result<Option<String>, Response> {
-    let trimmed = v.trim();
-    if trimmed.len() > MAX_AVATAR_URL {
-        return Err(err(StatusCode::BAD_REQUEST, "avatar_url too long"));
-    }
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if !(trimmed.starts_with("http://")
-        || trimmed.starts_with("https://")
-        || trimmed.starts_with("data:image/")
-        || trimmed.starts_with("/api/avatars/"))
-    {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "avatar_url must be an http(s), data:image, or /api/avatars URL",
-        ));
-    }
-    Ok(Some(trimmed.to_string()))
 }
 
 async fn load_user_dto(installed: &InstalledState, user_id: i64) -> Result<UserDto, Response> {
@@ -111,24 +88,6 @@ async fn update_profile(
         let sql = db::q(
             installed.kind,
             "UPDATE users SET display_name = ? WHERE id = ?",
-        );
-        if let Err(e) = sqlx::query(&sql)
-            .bind(value)
-            .bind(user.id)
-            .execute(&installed.pool)
-            .await
-        {
-            return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
-        }
-    }
-    if let Some(raw) = body.avatar_url {
-        let value = match normalize_avatar_url(&raw) {
-            Ok(v) => v,
-            Err(r) => return r,
-        };
-        let sql = db::q(
-            installed.kind,
-            "UPDATE users SET avatar_url = ? WHERE id = ?",
         );
         if let Err(e) = sqlx::query(&sql)
             .bind(value)
