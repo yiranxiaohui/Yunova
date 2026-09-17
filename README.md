@@ -423,6 +423,8 @@ Release 的资产列表，读不到（无出网、限流、内网部署）就退
 而不是拼出一个可能不存在的文件名；独立二进制名仍由
 `.github/workflows/desktop-release.yml` 产生，必须与 `web/src/lib/downloads.ts` 里的
 `yunova-desktop-<target>` 对齐，`web/tests/downloads.test.ts` 盯着这两条约定。
+安装包里的版本号来自根 `Cargo.toml` 的 `[workspace.package] version`（见「部署」），
+所以它与服务端自报的版本总是同一个。
 
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -627,3 +629,14 @@ services:
 - 两个发布工作流成功后，由 Codex 从可信服务器 SSH 部署生产环境
 - migration 在容器启动时自动跑
 - 默认版本策略只递增最后一位：`vX.Y.Z` → `vX.Y.(Z+1)`
+
+版本号只写在一处：根 `Cargo.toml` 的 `[workspace.package] version`。服务端与桌面端
+都用 `version.workspace = true` 继承它，因此 `/api/health`、管理后台的系统信息、
+桌面端 `--version` 以及安装包文件名（含 Windows 文件版本资源和 macOS
+`CFBundleShortVersionString`）全都是同一个数字。`desktop/tauri.conf.json` **故意不写**
+`version`——Tauri 在缺省时回落到 crate 的 Cargo 版本；写上反而会覆盖它，而且不会
+报错，只是把安装包命名成一个没人记得改的旧数字（配置里曾长期停在 `0.1.0`，而项目
+已经在发 `v0.4.x`）。这条约束由 `desktop/tests/version_single_source.rs` 盯着。
+
+打 tag 前先把 `[workspace.package] version` 改成同一个数字并提交，否则镜像和安装包
+的自报版本会落后于 tag。
