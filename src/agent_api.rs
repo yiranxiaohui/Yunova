@@ -637,12 +637,63 @@ fn gateway_base_url() -> String {
 /// Base URL a runtime on the user's own machine should call.
 ///
 /// A personal machine is on a different network, so neither loopback nor the
-/// sandbox's container alias resolves there. Defaults to the public origin the
-/// browser already uses.
-fn device_gateway_url() -> String {
-    crate::runtime_env::var("YUNOVA_DEVICE_GATEWAY_URL")
+/// sandbox's container alias resolves there — and neither does the wildcard
+/// address the server binds. Nothing here can be derived from the server's own
+/// listener, so this refuses instead of falling back: a runtime handed
+/// `http://0.0.0.0:3000` starts happily and then fails every model call with an
+/// opaque "Connection error.", which is far harder to diagnose than a session
+/// that declines to start.
+fn device_gateway_url() -> Result<String, String> {
+    let url = crate::runtime_env::var("YUNOVA_DEVICE_GATEWAY_URL")
         .or_else(|_| crate::runtime_env::var("YUNOVA_PUBLIC_URL"))
-        .unwrap_or_else(|_| gateway_base_url())
+        // An explicitly set agent gateway is a deliberate absolute URL, unlike
+        // the bind-derived default `gateway_base_url` invents.
+        .or_else(|_| crate::runtime_env::var("YUNOVA_AGENT_GATEWAY_URL"))
+        .ok()
+        .map(|u| u.trim().trim_end_matches('/').to_string())
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| {
+            "服务器未配置 YUNOVA_DEVICE_GATEWAY_URL：本机电脑任务需要一个你的电脑能访问到的地址"
+                .to_string()
+        })?;
+    if !reachable_from_another_host(&url) {
+        return Err(format!(
+            "YUNOVA_DEVICE_GATEWAY_URL（{url}）只在服务器本机有效，请改为你的电脑能访问到的地址"
+        ));
+    }
+    Ok(url)
+}
+
+/// Host part of a base URL, without scheme, port, path or IPv6 brackets.
+fn url_host(url: &str) -> String {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+
+    // A bracketed IPv6 literal keeps its colons; anything else loses a
+    // trailing numeric port.
+    let host = if let Some(end) = authority.find(']') {
+        &authority[..=end]
+    } else {
+        match authority.rsplit_once(':') {
+            Some((h, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
+            _ => authority,
+        }
+    };
+    host.trim_matches(['[', ']']).to_ascii_lowercase()
+}
+
+/// Whether a base URL could plausibly be dialled from a different machine.
+///
+/// Only the hosts that are *definitely* wrong are rejected: a wildcard bind
+/// resolves nowhere, and loopback resolves to whoever dials it. Everything else
+/// is the operator's call — a LAN address is perfectly valid for a desktop
+/// client on the same network.
+fn reachable_from_another_host(url: &str) -> bool {
+    let host = url_host(url);
+    !host.is_empty()
+        && !host.starts_with("127.")
+        && !matches!(host.as_str(), "0.0.0.0" | "localhost" | "::" | "::1" | "0")
 }
 
 /// Whether cloud sessions run in a container.
@@ -747,7 +798,15 @@ async fn start_session(
     let base_url = match target {
         // A device is on someone's home network, so it needs the address the
         // browser uses, not a loopback or container-internal one.
-        Target::Device => device_gateway_url(),
+        Target::Device => match device_gateway_url() {
+            Ok(url) => url,
+            Err(e) => {
+                crate::agent_token::revoke_by_plaintext(&installed.pool, installed.kind, &token)
+                    .await;
+                eprintln!("[agent-api] session {sid} has no usable device gateway URL: {e}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+            }
+        },
         Target::Cloud if sandboxed => sandbox_gateway_url(),
         Target::Cloud => gateway_base_url(),
     };
@@ -1089,5 +1148,53 @@ mod tests {
         );
 
         pool.close().await;
+    }
+
+    /// The regression this guards: production ran with no device gateway
+    /// configured, so the URL fell back to the server's own bind address and
+    /// every desktop task was handed `http://0.0.0.0:3000`. The runtime
+    /// started, failed each model call with "Connection error.", and work mode
+    /// looked like it was simply ignoring the user.
+    #[test]
+    fn an_address_only_valid_on_the_server_is_not_a_device_gateway() {
+        for bad in [
+            "http://0.0.0.0:3000",
+            "http://127.0.0.1:3000",
+            "http://127.0.0.53",
+            "http://localhost:3000",
+            "http://[::1]:3000",
+            "http://[::]:3000",
+        ] {
+            assert!(
+                !reachable_from_another_host(bad),
+                "{bad} cannot be dialled from the user's own machine"
+            );
+        }
+    }
+
+    /// A LAN address is the operator's call: a desktop client on the same
+    /// network reaches it, and refusing it would break self-hosted setups.
+    #[test]
+    fn a_routable_address_is_accepted_whatever_its_shape() {
+        for good in [
+            "https://chat.yunnet.top",
+            "http://10.1.51.1:4300",
+            "https://example.com:8443/base",
+            "http://[2001:db8::1]:3000",
+        ] {
+            assert!(reachable_from_another_host(good), "{good} is routable");
+        }
+    }
+
+    /// The host has to survive ports, paths and IPv6 brackets, because a
+    /// mis-parsed host would either reject a valid public URL or let the
+    /// broken loopback one through.
+    #[test]
+    fn the_host_is_extracted_without_scheme_port_or_path() {
+        assert_eq!(url_host("https://chat.yunnet.top/api"), "chat.yunnet.top");
+        assert_eq!(url_host("http://10.1.51.1:4300"), "10.1.51.1");
+        assert_eq!(url_host("http://[2001:db8::1]:3000"), "2001:db8::1");
+        assert_eq!(url_host("HTTP://Example.COM"), "example.com");
+        assert_eq!(url_host("0.0.0.0:3000"), "0.0.0.0");
     }
 }

@@ -271,15 +271,12 @@ fn clean_fingerprint(raw: Option<&str>) -> Option<String> {
 }
 
 async fn live_device_count(installed: &InstalledState, user_id: i64) -> i64 {
+    // `revoked` is an integer flag on both backends, so the literal is shared.
+    // Writing `FALSE` here used to fail on PostgreSQL with a type mismatch,
+    // and because this path swallows errors the cap silently read as zero.
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT COUNT(*) FROM agent_devices WHERE user_id = ? AND revoked = {}",
-            match installed.kind {
-                DbKind::Postgres => "FALSE",
-                _ => "0",
-            }
-        ),
+        "SELECT COUNT(*) FROM agent_devices WHERE user_id = ? AND revoked = 0",
     );
     sqlx::query_scalar(&sql)
         .bind(user_id)
@@ -330,11 +327,7 @@ async fn bind_device(
             installed.kind,
             &format!(
                 "UPDATE agent_devices SET token_hash = ?, name = ?, platform = ?, \
-                 revoked = {}, last_seen_at = {} WHERE id = ? AND user_id = ?",
-                match installed.kind {
-                    DbKind::Postgres => "FALSE",
-                    _ => "0",
-                },
+                 revoked = 0, last_seen_at = {} WHERE id = ? AND user_id = ?",
                 db::now_expr(installed.kind)
             ),
         );
@@ -511,17 +504,7 @@ async fn revoke_device(
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<i64>,
 ) -> Response {
-    let sql = db::q(
-        installed.kind,
-        &format!(
-            "UPDATE agent_devices SET revoked = {} WHERE id = ? AND user_id = ?",
-            match installed.kind {
-                DbKind::Postgres => "TRUE",
-                _ => "1",
-            }
-        ),
-    );
-    match sqlx::query(&sql)
+    match sqlx::query(&revoke_device_sql(installed.kind))
         .bind(id)
         .bind(user.id)
         .execute(&installed.pool)
@@ -546,6 +529,17 @@ async fn revoke_device(
         state.agent_devices.remove(id).await;
     }
     StatusCode::NO_CONTENT.into_response()
+}
+
+/// `revoked` is an integer flag on both backends — see the `agent_devices`
+/// migration — so the literal is `1` everywhere. A `TRUE` here made every
+/// PostgreSQL revoke fail with a type mismatch, which left "remove this
+/// computer" silently broken while still returning success to the browser.
+fn revoke_device_sql(kind: DbKind) -> String {
+    db::q(
+        kind,
+        "UPDATE agent_devices SET revoked = 1 WHERE id = ? AND user_id = ?",
+    )
 }
 
 pub fn routes() -> Router<AppState> {
@@ -1246,5 +1240,51 @@ mod tests {
         assert!(reg.get(5).await.is_some());
         reg.remove(5).await;
         assert!(!reg.is_online(5).await, "a disconnected device must not look available");
+    }
+
+    /// `revoked` is an integer column on both backends, so neither statement
+    /// may compare it against a boolean. PostgreSQL rejects that outright,
+    /// which is how "remove this computer" came to fail in production while
+    /// the SQLite tests stayed green.
+    #[test]
+    fn the_revoked_flag_is_never_compared_against_a_boolean() {
+        for kind in [DbKind::Sqlite, DbKind::Postgres] {
+            let sql = revoke_device_sql(kind);
+            assert!(sql.contains("revoked = 1"), "{kind:?}: {sql}");
+            assert!(
+                !sql.to_ascii_uppercase().contains("TRUE"),
+                "{kind:?} must not bind a boolean: {sql}"
+            );
+        }
+    }
+
+    /// The same integer/boolean mismatch silently broke the device cap: the
+    /// count query swallows its error, so a failing comparison read as zero
+    /// devices and the limit stopped applying.
+    #[tokio::test]
+    async fn the_device_cap_counts_live_machines() {
+        let installed = installed().await;
+        let (user_id, _) = user_with_session(&installed).await;
+
+        assert_eq!(live_device_count(&installed, user_id).await, 0);
+        let (id, ..) = bind_device(&installed, user_id, "pc", Some("windows"), Some("fp1"))
+            .await
+            .unwrap();
+        bind_device(&installed, user_id, "mac", Some("macos"), Some("fp2"))
+            .await
+            .unwrap();
+        assert_eq!(live_device_count(&installed, user_id).await, 2);
+
+        // Revoking through the statement the handler uses must actually take
+        // the machine out of the count.
+        sqlx::query(&revoke_device_sql(installed.kind))
+            .bind(id)
+            .bind(user_id)
+            .execute(&installed.pool)
+            .await
+            .unwrap();
+        assert_eq!(live_device_count(&installed, user_id).await, 1);
+
+        installed.pool.close().await;
     }
 }

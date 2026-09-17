@@ -313,6 +313,7 @@ export type AgentItem =
   | { kind: "thinking"; id: string; text: string }
   | { kind: "tool"; id: string; name: string; args: unknown; output?: string; ok?: boolean }
   | { kind: "notice"; id: string; text: string }
+  | { kind: "error"; id: string; text: string }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function contentText(content: any): string {
@@ -345,6 +346,12 @@ export function entriesToItems(entries: AgentEntry[]): AgentItem[] {
     }
     if (m.role === "assistant") {
       const blocks = Array.isArray(m.content) ? m.content : []
+      // A failed turn carries no content at all, so rendering only the blocks
+      // would drop it and the task would look like it simply ignored the
+      // prompt. Surface the runtime's own reason instead.
+      if (typeof m.errorMessage === "string" && m.errorMessage.trim()) {
+        out.push({ kind: "error", id: `${e.id}-err`, text: m.errorMessage })
+      }
       for (const [i, b] of blocks.entries()) {
         if (b?.type === "text" && typeof b.text === "string") {
           if (b.text.trim()) out.push({ kind: "assistant", id: `${e.id}-${i}`, text: b.text })
