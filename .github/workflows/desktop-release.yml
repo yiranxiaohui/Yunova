@@ -123,6 +123,13 @@ jobs:
           # any other spelling with a *warning* and carries on doing the
           # racing upload, which is exactly how v0.4.23 shipped broken.
           includeUpdaterJson: false
+          # GitHub's asset uploads fail intermittently on the large bundles
+          # here -- v0.4.24 lost three of five platforms to "other side
+          # closed" and "Error creating asset temp dir", on builds that had
+          # compiled and signed perfectly. With no retries a transient network
+          # error is indistinguishable from a real failure, and the whole
+          # release has to be re-cut.
+          retryAttempts: 3
 
       # Fails the job rather than shipping an un-updatable release: a missing
       # or wrong signing secret is silent in the build above, and the symptom
@@ -177,7 +184,19 @@ jobs:
             exit 1
           fi
           for f in "${found[@]}"; do
-            gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
+            # Same transient upload failures as the bundles above, and this is a
+            # plain `gh` call with no retry of its own.
+            for attempt in 1 2 3; do
+              if gh release upload "${GITHUB_REF_NAME}" "$f" --clobber; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                echo "::error::failed to upload $f after 3 attempts" >&2
+                exit 1
+              fi
+              echo "upload of $f failed, retrying ($attempt/3)..." >&2
+              sleep $((attempt * 10))
+            done
           done
 
   # Assemble `latest.json` once, from the assets the matrix actually published.
@@ -291,4 +310,27 @@ jobs:
 
           echo "platforms in the manifest:"
           python3 -c 'import json,sys; print("\n".join(sorted(json.load(open(sys.argv[1]))["platforms"])))' "$work/latest.json"
+
+          # Every platform the matrix builds must be in the manifest. A
+          # partial manifest is the quiet failure this whole job exists to
+          # prevent: it publishes cleanly and only the users of the missing
+          # platform ever notice, months later, by never being offered an
+          # update.
+          python3 - "$work/latest.json" <<'PY'
+          import json, sys
+          expected = {
+              "linux-x86_64",
+              "linux-aarch64",
+              "darwin-x86_64",
+              "darwin-aarch64",
+              "windows-x86_64",
+          }
+          got = set(json.load(open(sys.argv[1]))["platforms"])
+          missing = sorted(expected - got)
+          if missing:
+              print(f"::error::latest.json is missing {missing}; refusing to "
+                    "publish a manifest that silently excludes a platform")
+              raise SystemExit(1)
+          PY
+
           gh release upload "$TAG" "$work/latest.json" --clobber
