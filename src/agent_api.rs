@@ -42,10 +42,10 @@ async fn owned_session(
     kind: DbKind,
     user_id: i64,
     session_id: i64,
-) -> Result<(String, Option<i64>), Response> {
-    let row: Option<(i64, String, Option<i64>)> = sqlx::query_as(&db::q(
+) -> Result<(String, Option<i64>, Option<String>), Response> {
+    let row: Option<(i64, String, Option<i64>, Option<String>)> = sqlx::query_as(&db::q(
         kind,
-        "SELECT user_id, target, device_id FROM agent_sessions WHERE id = ?",
+        "SELECT user_id, target, device_id, workspace FROM agent_sessions WHERE id = ?",
     ))
     .bind(session_id)
     .fetch_optional(pool)
@@ -54,7 +54,9 @@ async fn owned_session(
     .flatten();
 
     match row {
-        Some((uid, target, device_id)) if uid == user_id => Ok((target, device_id)),
+        Some((uid, target, device_id, workspace)) if uid == user_id => {
+            Ok((target, device_id, workspace))
+        }
         _ => Err((StatusCode::NOT_FOUND, "会话不存在").into_response()),
     }
 }
@@ -134,6 +136,14 @@ struct CreateSessionReq {
     title: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// Directory on the device this task should run in.
+    ///
+    /// Only meaningful for `target = "device"`, and only ever a record of what
+    /// the user picked: the machine re-checks it against the directories it
+    /// was told to allow before starting anything there. Omitted means "the
+    /// client's default workspace".
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 async fn create_session(
@@ -161,6 +171,7 @@ async fn create_session(
     // A device session is meaningless without a machine to run on, and the
     // machine must belong to the caller: otherwise a session could be pointed
     // at someone else's computer.
+    let mut workspace = None;
     if target == Target::Device {
         let Some(device_id) = req.device_id else {
             return (StatusCode::BAD_REQUEST, "本地电脑任务需要指定设备").into_response();
@@ -178,6 +189,23 @@ async fn create_session(
         if owns.is_none() {
             return (StatusCode::NOT_FOUND, "设备不存在或无权访问").into_response();
         }
+
+        // Length-capped but otherwise untouched: the server has no view of
+        // that filesystem, so any validation it invented would either reject
+        // legitimate paths or give false assurance. The device is the only
+        // party that can tell whether this directory is one the user allowed,
+        // and it checks before it starts.
+        workspace = req
+            .workspace
+            .as_deref()
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .map(|w| w.chars().take(1024).collect::<String>());
+    } else if req.workspace.is_some() {
+        // A cloud task runs in a disposable sandbox with a fixed working
+        // directory, so accepting one here would store a preference nothing
+        // can honour.
+        return (StatusCode::BAD_REQUEST, "云电脑任务不支持指定工作目录").into_response();
     }
 
     let title = req
@@ -192,8 +220,8 @@ async fn create_session(
 
     let insert = db::q(
         installed.kind,
-        "INSERT INTO agent_sessions (user_id, target, device_id, title, model) \
-         VALUES (?, ?, ?, ?, ?)",
+        "INSERT INTO agent_sessions (user_id, target, device_id, title, model, workspace) \
+         VALUES (?, ?, ?, ?, ?, ?)",
     );
     // Both backends support RETURNING, so the id comes back from the insert.
     let id = sqlx::query_as::<_, (i64,)>(&format!("{insert} RETURNING id"))
@@ -202,6 +230,7 @@ async fn create_session(
         .bind(req.device_id)
         .bind(&title)
         .bind(model)
+        .bind(workspace.as_deref())
         .fetch_one(&installed.pool)
         .await
         .map(|r| r.0)
@@ -213,6 +242,7 @@ async fn create_session(
             "target": target.as_str(),
             "title": title,
             "model": model,
+            "workspace": workspace,
         }))
         .into_response(),
         Err(e) => {
@@ -231,6 +261,7 @@ type SessionRow = (
     Option<String>, // model
     String,         // status
     String,         // updated_at
+    Option<String>, // workspace
 );
 
 async fn list_sessions(
@@ -240,7 +271,7 @@ async fn list_sessions(
 ) -> Response {
     let rows: Vec<SessionRow> = sqlx::query_as(&db::q(
         installed.kind,
-        "SELECT id, target, device_id, title, model, status, updated_at \
+        "SELECT id, target, device_id, title, model, status, updated_at, workspace \
          FROM agent_sessions WHERE user_id = ? ORDER BY updated_at DESC",
     ))
     .bind(user.id)
@@ -249,7 +280,7 @@ async fn list_sessions(
     .unwrap_or_default();
 
     let mut out = Vec::with_capacity(rows.len());
-    for (id, target, device_id, title, model, status, updated_at) in rows {
+    for (id, target, device_id, title, model, status, updated_at, workspace) in rows {
         out.push(json!({
             "id": id,
             "target": target,
@@ -258,6 +289,10 @@ async fn list_sessions(
             "model": model,
             "status": status,
             "updated_at": updated_at,
+            // Where the tools ran. Part of the transcript's meaning, not just
+            // a launch parameter: a task reopened later has to be able to say
+            // which project it was working on.
+            "workspace": workspace,
             // Whether a runtime is attached right now. Distinct from status:
             // an idle session can still hold a warm runtime.
             "live": state.agent_sessions.is_live(id).await,
@@ -728,7 +763,7 @@ async fn start_session(
     Extension(user): Extension<CurrentUser>,
     Path(sid): Path<i64>,
 ) -> Response {
-    let (target, session_device_id) =
+    let (target, session_device_id, session_workspace) =
         match owned_session(&installed.pool, installed.kind, user.id, sid).await {
             Ok(v) => v,
             Err(r) => return r,
@@ -861,6 +896,11 @@ async fn start_session(
             .send(crate::agent_device::ToDevice::StartRuntime {
                 session_id: sid,
                 models_json: models,
+                // The stored choice, forwarded verbatim. The client decides
+                // whether it is still inside a directory the user allows and
+                // refuses the start if not, so this is a request rather than
+                // an order — the machine at risk keeps the last word.
+                workspace: session_workspace,
             })
             .await
         {
@@ -1031,7 +1071,7 @@ async fn stop_session(
     Path(sid): Path<i64>,
 ) -> Response {
     let device_id = match owned_session(&installed.pool, installed.kind, user.id, sid).await {
-        Ok((_, device_id)) => device_id,
+        Ok((_, device_id, _)) => device_id,
         Err(r) => return r,
     };
     if teardown_runtime(&state, &installed, device_id, sid).await {
@@ -1058,7 +1098,7 @@ async fn delete_session(
     Path(sid): Path<i64>,
 ) -> Response {
     let device_id = match owned_session(&installed.pool, installed.kind, user.id, sid).await {
-        Ok((_, device_id)) => device_id,
+        Ok((_, device_id, _)) => device_id,
         Err(r) => return r,
     };
 
@@ -1410,6 +1450,58 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(entries, 1, "and must not touch its transcript either");
+
+        pool.close().await;
+    }
+
+    /// The task's directory has to survive into `start`, because that is where
+    /// it is forwarded to the machine. Storing it and then reading the session
+    /// back without it would silently run every task in the client's default
+    /// directory while the UI claimed otherwise.
+    #[tokio::test]
+    async fn a_device_session_remembers_the_directory_it_was_created_for() {
+        let pool = pool_with(&[]).await;
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x'), (2, 'u2', 'x')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_devices (id, user_id, name, token_hash) \
+             VALUES (7, 1, 'laptop', 'h')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, user_id, target, device_id, title, workspace) \
+             VALUES (1, 1, 'device', 7, 't', '/home/u/code/app'), \
+                    (2, 1, 'device', 7, 't', NULL)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let (target, device_id, workspace) =
+            owned_session(&pool, DbKind::Sqlite, 1, 1).await.unwrap();
+        assert_eq!(target, "device");
+        assert_eq!(device_id, Some(7));
+        assert_eq!(workspace.as_deref(), Some("/home/u/code/app"));
+
+        // A task that named nothing must stay `None` rather than becoming an
+        // empty string: the client reads absent as "use your default", and an
+        // empty path would be a request it has to refuse.
+        let (_, _, none) = owned_session(&pool, DbKind::Sqlite, 1, 2).await.unwrap();
+        assert_eq!(none, None);
+
+        // And the directory is only readable by the session's owner, for the
+        // same reason the rest of the row is: it names a path on someone's
+        // personal machine.
+        assert!(
+            owned_session(&pool, DbKind::Sqlite, 2, 1).await.is_err(),
+            "another account must not learn a path on this user's computer"
+        );
 
         pool.close().await;
     }

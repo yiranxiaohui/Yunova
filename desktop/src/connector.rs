@@ -41,8 +41,14 @@ pub struct ConnectorConfig {
     pub site_url: String,
     /// Name shown in the device list.
     pub name: String,
-    /// Directory the agent may work in.
+    /// Directory a task gets when it names none.
     pub workspace: PathBuf,
+    /// Every directory a task may name, `workspace` included.
+    ///
+    /// Advertised to the server so the web UI can offer a picker, and
+    /// re-checked locally on every start. A server can therefore suggest a
+    /// directory but never add one.
+    pub workspace_roots: Vec<PathBuf>,
     /// Where per-session runtime config is written.
     pub state_dir: PathBuf,
     /// The `pi` executable.
@@ -190,6 +196,7 @@ impl Connector {
 
         let manager = RuntimeManager::new(Config {
             workspace: config.workspace.clone(),
+            workspace_roots: config.workspace_roots.clone(),
             state_dir: config.state_dir.clone(),
             program: config.program.clone(),
             auto_approve: config.auto_approve,
@@ -514,6 +521,11 @@ async fn run_once(
                     username,
                 });
                 host.log(format!("已连接，设备 ID {device_id}"));
+                // Advertise the directories tasks may run in, so the web UI
+                // can offer them. Sent after the handshake rather than with
+                // it: the handshake is about identity, and a rejected attach
+                // must not have leaked a list of local paths.
+                let _ = tx.send(workspaces_frame(config)).await;
             }
             FromServer::Error { message } => {
                 rejection = Some(message);
@@ -522,10 +534,19 @@ async fn run_once(
             FromServer::StartRuntime {
                 session_id,
                 models_json,
+                workspace,
             } => {
-                host.log(format!("任务 {session_id}: 启动本机运行时"));
+                host.log(match workspace.as_deref() {
+                    Some(dir) => format!("任务 {session_id}: 在 {dir} 启动本机运行时"),
+                    None => format!("任务 {session_id}: 启动本机运行时"),
+                });
                 if let Err(e) = manager
-                    .start(session_id, &models_json, watch_tx.clone())
+                    .start(
+                        session_id,
+                        &models_json,
+                        workspace.as_deref(),
+                        watch_tx.clone(),
+                    )
                     .await
                 {
                     host.log(format!("任务 {session_id} 启动失败: {e}"));
@@ -554,6 +575,28 @@ async fn run_once(
                 host.log(format!("任务 {session_id}: 停止本机运行时"));
                 manager.stop(session_id).await;
             }
+            FromServer::ListDir { req_id, path } => {
+                // Answered on a blocking thread: a home directory on a slow
+                // disk can take long enough that reading it inline would
+                // stall the frame loop, and the socket also carries the
+                // transcript of whatever is running.
+                let listing = tokio::task::spawn_blocking({
+                    let default = config.workspace.clone();
+                    let roots = config.workspace_roots.clone();
+                    move || dir_listing(req_id, path, &default, &roots)
+                })
+                .await;
+                let listing = listing.unwrap_or_else(|e| ToServer::DirListing {
+                    req_id,
+                    path: None,
+                    parent: None,
+                    entries: Vec::new(),
+                    error: Some(format!("读取目录失败: {e}")),
+                });
+                if tx.send(listing).await.is_err() {
+                    break;
+                }
+            }
         }
     }
 
@@ -572,6 +615,117 @@ async fn run_once(
             Outcome::Closed => Err(Failure::Rejected(message)),
         },
         None => Ok(outcome),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// workspace advertising and browsing
+// ---------------------------------------------------------------------------
+
+/// The directories this machine will accept, as a frame.
+fn workspaces_frame(config: &ConnectorConfig) -> ToServer {
+    let mut roots = Vec::new();
+    // The default first, so a picker can present it as what a task gets when
+    // it asks for nothing.
+    for path in std::iter::once(&config.workspace).chain(
+        config
+            .workspace_roots
+            .iter()
+            .filter(|p| *p != &config.workspace),
+    ) {
+        roots.push(crate::proto::WorkspaceRoot {
+            path: path.to_string_lossy().into_owned(),
+            label: root_label(path),
+        });
+    }
+    ToServer::Workspaces {
+        default: config.workspace.to_string_lossy().into_owned(),
+        roots,
+    }
+}
+
+/// A short name for a root, since the full path is often too long for a menu.
+fn root_label(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        // A root like `/` or `C:\` has no file name; showing the path itself
+        // is better than an empty entry.
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
+/// Answer one directory listing.
+///
+/// Every path is validated against the authorized roots before it is read, so
+/// this is not a way for a server to enumerate the user's disk: with no path
+/// it returns the roots, and with one it returns children only when that
+/// directory lies inside a root.
+fn dir_listing(req_id: u64, path: Option<String>, default: &Path, roots: &[PathBuf]) -> ToServer {
+    let refuse = |error: String| ToServer::DirListing {
+        req_id,
+        path: None,
+        parent: None,
+        entries: Vec::new(),
+        error: Some(error),
+    };
+
+    // No path: the roots themselves. Listed as entries so the picker's first
+    // screen and its later screens have one shape.
+    let Some(raw) = path.as_deref().map(str::trim).filter(|p| !p.is_empty()) else {
+        let mut entries = Vec::new();
+        for root in std::iter::once(default).chain(roots.iter().map(PathBuf::as_path)) {
+            let as_string = root.to_string_lossy().into_owned();
+            if entries
+                .iter()
+                .any(|e: &crate::proto::DirEntry| e.path == as_string)
+            {
+                continue;
+            }
+            entries.push(crate::proto::DirEntry {
+                path: as_string,
+                name: root_label(root),
+                repo: root.join(".git").exists(),
+            });
+        }
+        return ToServer::DirListing {
+            req_id,
+            path: None,
+            parent: None,
+            entries,
+            error: None,
+        };
+    };
+
+    let dir = match crate::runtime::resolve_workspace(default, roots, Some(raw)) {
+        Ok(dir) => dir,
+        Err(e) => return refuse(e),
+    };
+    let children = match crate::runtime::list_children(&dir) {
+        Ok(children) => children,
+        Err(e) => return refuse(e),
+    };
+    // "Up" is offered only while it stays inside the scope; at a root the
+    // picker goes back to the root list instead, so browsing cannot walk out
+    // of what the user authorized.
+    let parent = dir
+        .parent()
+        .filter(|p| {
+            crate::runtime::resolve_workspace(default, roots, Some(&p.to_string_lossy())).is_ok()
+        })
+        .map(|p| p.to_string_lossy().into_owned());
+
+    ToServer::DirListing {
+        req_id,
+        path: Some(dir.to_string_lossy().into_owned()),
+        parent,
+        entries: children
+            .into_iter()
+            .map(|c| crate::proto::DirEntry {
+                path: c.path,
+                name: c.name,
+                repo: c.repo,
+            })
+            .collect(),
+        error: None,
     }
 }
 
@@ -626,6 +780,7 @@ mod tests {
                     site_url: "https://example.invalid".into(),
                     name: "laptop".into(),
                     workspace: dir.clone(),
+                    workspace_roots: vec![dir.clone()],
                     state_dir: dir.clone(),
                     program: "pi".into(),
                     auto_approve: false,
@@ -690,6 +845,7 @@ mod tests {
                     site_url: "https://example.invalid".into(),
                     name: "laptop".into(),
                     workspace: dir.clone(),
+                    workspace_roots: vec![dir.clone()],
                     state_dir: dir.clone(),
                     program: "pi".into(),
                     auto_approve: false,

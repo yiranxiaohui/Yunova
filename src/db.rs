@@ -108,6 +108,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (46, include_str!("../migrations/sqlite/0046_device_fingerprint.sql")),
     (47, include_str!("../migrations/sqlite/0047_usd_parity_rate.sql")),
     (49, include_str!("../migrations/sqlite/0049_cli_device_codes.sql")),
+    (50, include_str!("../migrations/sqlite/0050_agent_session_workspace.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -158,6 +159,10 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     // `sqlx::Any` can decode. No-op on a fresh install.
     (48, include_str!("../migrations/postgres/0048_any_compatible_domain.sql")),
     (49, include_str!("../migrations/postgres/0049_cli_device_codes.sql")),
+    (
+        50,
+        include_str!("../migrations/postgres/0050_agent_session_workspace.sql"),
+    ),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {

@@ -81,11 +81,21 @@
           这台电脑的风险边界。
         </p>
         <label>
-          工作目录
+          默认工作目录
           <span class="pick">
             <input id="workspace" spellcheck="false" />
             <button class="ghost" id="pickWorkspace">选择…</button>
           </span>
+        </label>
+        <label>
+          任务可选的其他目录
+          <span class="hint">
+            建任务时可以从这些目录（含子目录）里挑一个项目，不在表内的目录本机会拒绕。
+          </span>
+          <span class="pick">
+            <button class="ghost" id="addWorkspace">添加目录…</button>
+          </span>
+          <ul id="workspaceList" class="paths"></ul>
         </label>
         <label class="check">
           <input type="checkbox" id="autoApprove" />

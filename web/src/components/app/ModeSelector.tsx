@@ -1,4 +1,4 @@
-import { Check, Cloud, Laptop, MessageSquare } from "lucide-react"
+import { Check, Cloud, FolderOpen, Laptop, MessageSquare } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
   Select,
@@ -149,6 +149,8 @@ export function ModeSelector({
   deviceId,
   onDeviceChange,
   targetLocked,
+  workspace,
+  onPickWorkspace,
   /** Hidden when the page already shows the large empty-state switch, so the
    *  control never appears twice on one screen. */
   hideSwitch,
@@ -161,6 +163,11 @@ export function ModeSelector({
   deviceId: number | null
   onDeviceChange: (id: number | null) => void
   targetLocked?: boolean
+  /** Directory the task runs in; null means the machine's default. */
+  workspace?: string | null
+  /** Absent for a task that already exists: its runtime and transcript belong
+   *  to one directory, so changing it mid-task would silently move the work. */
+  onPickWorkspace?: () => void
   hideSwitch?: boolean
   className?: string
 }) {
@@ -175,8 +182,67 @@ export function ModeSelector({
         onDeviceChange={onDeviceChange}
         disabled={targetLocked}
       />
+      {/* Only for a local machine: a cloud task runs in a disposable sandbox
+          whose directory nothing can usefully choose. */}
+      {target === "device" && (
+        <WorkspaceChip workspace={workspace} onPick={onPickWorkspace} />
+      )}
     </div>
   )
+}
+
+/**
+ * Which directory a local task runs in.
+ *
+ * Shown as a chip rather than folded into the target dropdown: the machine and
+ * the directory are two decisions, and a task aimed at the wrong directory is
+ * the more expensive mistake of the two. Reads "默认目录" when nothing was
+ * picked, which is what the client falls back to.
+ */
+function WorkspaceChip({
+  workspace,
+  onPick,
+}: {
+  workspace?: string | null
+  onPick?: () => void
+}) {
+  const label = workspace ? leafOf(workspace) : "默认目录"
+  const shared =
+    "inline-flex h-8 max-w-[12rem] items-center gap-1.5 rounded-full border px-2.5 text-xs"
+
+  // A started task keeps its directory, so the chip becomes a label. Still
+  // rendered, because "where did this run" is part of reading a transcript.
+  if (!onPick) {
+    return (
+      <span className={cn(shared, "text-muted-foreground")} title={workspace ?? undefined}>
+        <FolderOpen className="size-3.5 shrink-0" />
+        <span className="truncate">{label}</span>
+      </span>
+    )
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      // The full path in the tooltip: the chip shows the leaf so the strip
+      // stays usable, but the leaf alone is ambiguous across projects.
+      title={workspace ? `工作目录：${workspace}` : "选择工作目录"}
+      className={cn(shared, "tap-target-sm hover:border-primary/40")}
+    >
+      <FolderOpen className="size-3.5 shrink-0" />
+      <span className="truncate">{label}</span>
+    </button>
+  )
+}
+
+/** Last path segment, for a chip that cannot fit a whole path. */
+function leafOf(path: string): string {
+  // Both separators, because the machine may be Windows while the browser is
+  // not: splitting on the browser's idea of a separator would show the whole
+  // path for exactly the users who need the short form most.
+  const parts = path.split(/[/\\]/).filter(Boolean)
+  return parts[parts.length - 1] ?? path
 }
 
 /**

@@ -110,7 +110,6 @@ export function DeviceDialog({
   const runSnippet = `YUNOVA_DEVICE_WORKSPACE=<Agent 可操作的目录> \\
 YUNOVA_DEVICE_URL=${window.location.origin} \\
 ./yunova-desktop --headless`
-
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(runSnippet)
@@ -220,7 +219,8 @@ YUNOVA_DEVICE_URL=${window.location.origin} \\
           <p className="text-xs text-muted-foreground">
             客户端登录后只保存一枚设备令牌，不保存密码；移除设备即刻失效。
             桌面客户端默认逐条确认命令，审批请求会推送到所有登录端，任一端处理即生效。
-            工作目录决定 Agent 能改动的范围，请指向具体项目而不是整个用户目录。
+            建任务时可以挑一个工作目录，可挑范围由那台电脑的「本机设置」决定；
+            请指向具体项目而不是整个用户目录。
           </p>
         </div>
       </DialogContent>

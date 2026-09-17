@@ -9,6 +9,7 @@ import { Sidebar } from "@/components/app/Sidebar"
 import { SidebarToggle } from "@/components/app/SidebarToggle"
 import { AgentTranscript, ApprovalCard } from "@/components/app/AgentTranscript"
 import { DeviceDialog } from "@/components/app/DeviceDialog"
+import { WorkspacePicker } from "@/components/app/WorkspacePicker"
 import {
   ModeSelector,
   ModeSwitch,
@@ -102,6 +103,12 @@ export default function AgentTaskPage() {
   )
   const [target, setTarget] = useState<AgentTarget>("cloud")
   const [deviceId, setDeviceId] = useState<number | null>(null)
+  // Directory the task will run in on the chosen machine. Null means "let the
+  // client use its default", which is what every task did before this could
+  // be chosen. Reset with the machine: a path from one computer is meaningless
+  // on another, and carrying it over would produce a refusal at start.
+  const [workspace, setWorkspace] = useState<string | null>(null)
+  const [workspaceOpen, setWorkspaceOpen] = useState(false)
   // The model the task runs on. Empty means "whatever the runtime defaults
   // to", which is what every task did before this control existed; the label
   // says so rather than naming a model the server never actually pinned.
@@ -377,6 +384,7 @@ export default function AgentTaskPage() {
           device_id: deviceId ?? undefined,
           title: message.slice(0, 40),
           model: model || undefined,
+          workspace: workspace ?? undefined,
         })
         // Carry the prompt across the navigation so the user does not retype
         // it after the route changes.
@@ -385,7 +393,7 @@ export default function AgentTaskPage() {
         toast.error(`创建任务失败：${(e as Error).message}`)
       }
     },
-    [target, deviceId, model, nav]
+    [target, deviceId, model, workspace, nav]
   )
 
   /** Switch the model this task runs on.
@@ -648,8 +656,22 @@ export default function AgentTaskPage() {
                   onTargetChange={setTarget}
                   devices={devices}
                   deviceId={deviceId}
-                  onDeviceChange={setDeviceId}
+                  onDeviceChange={(id) => {
+                    setDeviceId(id)
+                    // A path belongs to one machine; keeping it across a switch
+                    // would aim the task at a directory the new machine has
+                    // never heard of.
+                    setWorkspace(null)
+                  }}
                   targetLocked={sessionId != null}
+                  workspace={session ? session.workspace : workspace}
+                  onPickWorkspace={
+                    // Only before the task exists: its runtime and transcript
+                    // belong to the directory it started in.
+                    sessionId == null && deviceId != null
+                      ? () => setWorkspaceOpen(true)
+                      : undefined
+                  }
                   hideSwitch={heroSwitch}
                 />
                 {/* Work mode is always platform-billed, so only models the
@@ -706,6 +728,12 @@ export default function AgentTaskPage() {
       </main>
 
       <DeviceDialog open={devicesOpen} onOpenChange={setDevicesOpen} />
+      <WorkspacePicker
+        deviceId={deviceId}
+        open={workspaceOpen}
+        onOpenChange={setWorkspaceOpen}
+        onPick={setWorkspace}
+      />
     </div>
   )
 }

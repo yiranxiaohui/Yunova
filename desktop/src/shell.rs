@@ -367,11 +367,25 @@ async fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
 /// so the app offers the OS dialog rather than leaving it to a text field.
 #[tauri::command]
 async fn pick_workspace(app: AppHandle) -> Result<Option<String>, String> {
+    pick_folder(app, "选择 Agent 可操作的目录").await
+}
+
+/// Native folder picker for an additional allowed directory.
+///
+/// Separate command rather than a parameter, so the dialog can say what the
+/// choice means: adding a root widens what tasks may pick, and that is a
+/// different decision from changing the default.
+#[tauri::command]
+async fn pick_extra_workspace(app: AppHandle) -> Result<Option<String>, String> {
+    pick_folder(app, "添加任务可选的项目目录").await
+}
+
+async fn pick_folder(app: AppHandle, title: &str) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
     let (tx, rx) = std::sync::mpsc::channel();
     app.dialog()
         .file()
-        .set_title("选择 Agent 可操作的目录")
+        .set_title(title)
         .pick_folder(move |picked| {
             let _ = tx.send(picked);
         });
@@ -396,6 +410,7 @@ fn config_of(settings: &Settings) -> ConnectorConfig {
         site_url: settings.site_url.clone(),
         name: settings.name.clone(),
         workspace: settings.workspace_path(),
+        workspace_roots: settings.workspace_roots(),
         state_dir: settings.state_dir(),
         program: settings.program.clone(),
         auto_approve: settings.auto_approve,
@@ -637,6 +652,7 @@ pub fn run() {
             sign_in,
             sign_out,
             pick_workspace,
+            pick_extra_workspace,
             show_site,
             open_panel,
             install_runtime,

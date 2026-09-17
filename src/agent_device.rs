@@ -26,6 +26,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
@@ -36,7 +38,7 @@ use axum::{Extension, Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc, oneshot};
 
 use crate::agent_session::AgentTransport;
 use crate::db::{self, DbKind, Pool};
@@ -109,6 +111,53 @@ pub enum FromDevice {
     },
     /// A local runtime could not be started.
     RuntimeError { session_id: i64, message: String },
+    /// The directories this machine lets tasks run in.
+    ///
+    /// Pushed by the client after the handshake and again whenever the user
+    /// edits them, rather than stored server-side: the roots are the local
+    /// security boundary, so the machine at risk has to be their only source
+    /// of truth. The server caches them for the lifetime of the socket purely
+    /// so the web UI has something to offer in a picker.
+    Workspaces {
+        #[serde(default)]
+        default: Option<String>,
+        #[serde(default)]
+        roots: Vec<WorkspaceRoot>,
+    },
+    /// Answer to [`ToDevice::ListDir`].
+    DirListing {
+        req_id: u64,
+        #[serde(default)]
+        path: Option<String>,
+        #[serde(default)]
+        parent: Option<String>,
+        #[serde(default)]
+        entries: Vec<DirEntry>,
+        #[serde(default)]
+        error: Option<String>,
+    },
+}
+
+/// One directory the user authorized on their own machine.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct WorkspaceRoot {
+    /// Absolute path, already expanded by the client.
+    pub path: String,
+    /// What to show in a picker; the leaf name when the client sends nothing.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+/// One child directory in a listing.
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct DirEntry {
+    pub path: String,
+    pub name: String,
+    /// Whether the entry looks like a code project, so the picker can hint at
+    /// the directory the user probably meant instead of making them recognise
+    /// it by name alone.
+    #[serde(default)]
+    pub repo: bool,
 }
 
 /// Frames to the desktop client.
@@ -140,6 +189,14 @@ pub enum ToDevice {
     StartRuntime {
         session_id: i64,
         models_json: Value,
+        /// The directory the user picked for this task, if any.
+        ///
+        /// A request, not a command: the client only honours it when it falls
+        /// inside a root the user authorized locally, and otherwise refuses
+        /// the start. Absent means "your default workspace", which is what
+        /// every task did before tasks could choose.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        workspace: Option<String>,
     },
     /// One JSONL record for the local runtime's stdin, verbatim.
     Frame {
@@ -150,20 +207,119 @@ pub enum ToDevice {
     StopRuntime {
         session_id: i64,
     },
+    /// List the directories under `path`, so the web UI can pick the project a
+    /// task should run in.
+    ///
+    /// `path` is `None` for "the authorized roots themselves". The client
+    /// answers only for paths inside those roots, which keeps this from
+    /// becoming a way for the server to enumerate someone's disk.
+    ListDir {
+        req_id: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+    },
 }
+
+/// A directory listing a device answered with.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Listing {
+    pub path: Option<String>,
+    pub parent: Option<String>,
+    pub entries: Vec<DirEntry>,
+}
+
+/// The workspace roots a connected machine is offering.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct Workspaces {
+    pub default: Option<String>,
+    pub roots: Vec<WorkspaceRoot>,
+}
+
+/// How long the web UI waits for a machine to answer a listing.
+///
+/// Short on purpose: this runs while someone is looking at a directory picker,
+/// and a home network hiccup should surface as "读取目录失败" they can retry
+/// rather than a spinner that never resolves.
+const LIST_DIR_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A connected desktop client.
 pub struct DeviceHandle {
     pub user_id: i64,
     tx: mpsc::Sender<ToDevice>,
+    /// Last roots this machine reported. Cached per socket, never persisted:
+    /// the authoritative copy is the client's own settings file, and a stale
+    /// server-side list would offer directories the user has since removed.
+    workspaces: RwLock<Workspaces>,
+    /// Listings this server is waiting for, keyed by request id.
+    pending_dirs: Mutex<HashMap<u64, oneshot::Sender<Result<Listing, String>>>>,
+    next_req: AtomicU64,
 }
 
 impl DeviceHandle {
+    pub fn new(user_id: i64, tx: mpsc::Sender<ToDevice>) -> Self {
+        Self {
+            user_id,
+            tx,
+            workspaces: RwLock::new(Workspaces::default()),
+            pending_dirs: Mutex::new(HashMap::new()),
+            next_req: AtomicU64::new(1),
+        }
+    }
+
     pub async fn send(&self, msg: ToDevice) -> Result<(), String> {
         self.tx
             .send(msg)
             .await
             .map_err(|_| "设备连接已断开".to_string())
+    }
+
+    pub async fn workspaces(&self) -> Workspaces {
+        self.workspaces.read().await.clone()
+    }
+
+    async fn set_workspaces(&self, next: Workspaces) {
+        *self.workspaces.write().await = next;
+    }
+
+    /// Ask the machine what directories live under `path`.
+    ///
+    /// Request/response over a socket that is otherwise one-way, so the id is
+    /// matched here rather than by the caller: a listing that arrives after
+    /// its waiter gave up has to be discarded, not delivered to whoever asked
+    /// next.
+    pub async fn list_dir(&self, path: Option<String>) -> Result<Listing, String> {
+        let req_id = self.next_req.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending_dirs.lock().await.insert(req_id, tx);
+        if let Err(e) = self.send(ToDevice::ListDir { req_id, path }).await {
+            self.pending_dirs.lock().await.remove(&req_id);
+            return Err(e);
+        }
+        match tokio::time::timeout(LIST_DIR_TIMEOUT, rx).await {
+            Ok(Ok(result)) => result,
+            // The socket closed under us, so the waiter's sender was dropped.
+            Ok(Err(_)) => Err("设备连接已断开".into()),
+            Err(_) => {
+                self.pending_dirs.lock().await.remove(&req_id);
+                Err("读取目录超时，请确认那台电脑仍然在线".into())
+            }
+        }
+    }
+
+    /// Hand a device's answer to whoever is waiting for it.
+    async fn resolve_dir(&self, req_id: u64, result: Result<Listing, String>) {
+        if let Some(waiter) = self.pending_dirs.lock().await.remove(&req_id) {
+            let _ = waiter.send(result);
+        }
+    }
+
+    /// Fail every outstanding listing, so a disconnect does not leave a picker
+    /// waiting out the full timeout for a machine that is already gone.
+    async fn fail_pending_dirs(&self) {
+        let waiters: Vec<_> = self.pending_dirs.lock().await.drain().collect();
+        for (_, waiter) in waiters {
+            let _ = waiter.send(Err("设备连接已断开".into()));
+        }
     }
 }
 
@@ -480,6 +636,13 @@ async fn list_devices(
 
     let mut out = Vec::with_capacity(rows.len());
     for (id, name, platform, last_seen_at, revoked) in rows {
+        // Only an online machine has roots to report: they live in its own
+        // settings, so an offline row deliberately carries none rather than a
+        // remembered list the user may have changed since.
+        let workspaces = match state.agent_devices.get(id).await {
+            Some(handle) => handle.workspaces().await,
+            None => Workspaces::default(),
+        };
         out.push(json!({
             "id": id,
             "name": name,
@@ -489,6 +652,10 @@ async fn list_devices(
             // Whether the desktop client is connected right now. A task
             // cannot start on an offline machine, so the picker needs this.
             "online": state.agent_devices.is_online(id).await,
+            // The directories this machine allows tasks in, and which of them
+            // it uses when a task names none.
+            "workspace_roots": workspaces.roots,
+            "default_workspace": workspaces.default,
         }));
     }
     Json(out).into_response()
@@ -542,10 +709,81 @@ fn revoke_device_sql(kind: DbKind) -> String {
     )
 }
 
+/// Browse a machine's authorized directories, for the task's workspace picker.
+///
+/// Proxied through the open socket rather than served from anything stored
+/// here: only the machine knows what exists on its disk, and only the machine
+/// gets to decide what it will show. The server never learns a path the client
+/// did not volunteer, and asking for one outside the authorized roots is
+/// refused there, not here.
+#[derive(Deserialize)]
+struct BrowseQuery {
+    /// Absent means "the authorized roots".
+    #[serde(default)]
+    path: Option<String>,
+}
+
+async fn browse_device(
+    State(state): State<AppState>,
+    Extension(installed): Extension<InstalledState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+    Query(q): Query<BrowseQuery>,
+) -> Response {
+    // Ownership is checked against the stored row first: an online handle
+    // alone would let any signed-in account browse a device id it guessed.
+    let owns: Option<(i64,)> = sqlx::query_as(&db::q(
+        installed.kind,
+        "SELECT id FROM agent_devices WHERE id = ? AND user_id = ? AND revoked = 0",
+    ))
+    .bind(id)
+    .bind(user.id)
+    .fetch_optional(&installed.pool)
+    .await
+    .ok()
+    .flatten();
+    if owns.is_none() {
+        return (StatusCode::NOT_FOUND, "设备不存在或无权访问").into_response();
+    }
+
+    let Some(device) = state.agent_devices.get(id).await else {
+        return (StatusCode::CONFLICT, "该电脑当前不在线，请先打开桌面客户端").into_response();
+    };
+    // Defence in depth, matching the session start path: the registry is keyed
+    // by device id, so a stale entry must never be driven for another account.
+    if device.user_id != user.id {
+        return (StatusCode::NOT_FOUND, "设备不存在或无权访问").into_response();
+    }
+
+    let path = q
+        .path
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    let workspaces = device.workspaces().await;
+    match device.list_dir(path).await {
+        Ok(listing) => Json(json!({
+            "path": listing.path,
+            "parent": listing.parent,
+            "entries": listing.entries,
+            // Sent alongside every listing so the picker can mark the
+            // client's default and offer "back to the roots" without a
+            // second round trip.
+            "default": workspaces.default,
+            "roots": workspaces.roots,
+        }))
+        .into_response(),
+        // The machine refused or could not read it; its own wording is the
+        // useful one, since it knows whether this was "outside the authorized
+        // directories" or a permission error.
+        Err(e) => (StatusCode::BAD_GATEWAY, e).into_response(),
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/agent/devices", get(list_devices))
         .route("/agent/devices/{id}", delete(revoke_device).patch(rename_device))
+        .route("/agent/devices/{id}/dirs", get(browse_device))
 }
 
 pub fn public_routes() -> Router<AppState> {
@@ -797,10 +1035,7 @@ async fn handle_socket(
     .await;
 
     let (tx, mut rx) = mpsc::channel::<ToDevice>(128);
-    let handle = Arc::new(DeviceHandle {
-        user_id,
-        tx: tx.clone(),
-    });
+    let handle = Arc::new(DeviceHandle::new(user_id, tx.clone()));
     state.agent_devices.insert(device_id, handle.clone()).await;
 
     let ok = serde_json::to_string(&ToDevice::HelloOk {
@@ -885,6 +1120,30 @@ async fn handle_socket(
                 eprintln!("[agent-device] device {device_id} session {session_id}: {message}");
                 frame_senders.write().await.remove(&session_id);
             }
+            FromDevice::Workspaces { default, roots } => {
+                // Trimmed and capped here because it is rendered in a picker:
+                // a client bug that reported thousands of roots must not turn
+                // into an unusable menu or an oversized JSON response.
+                let roots = roots.into_iter().take(64).collect();
+                handle.set_workspaces(Workspaces { default, roots }).await;
+            }
+            FromDevice::DirListing {
+                req_id,
+                path,
+                parent,
+                entries,
+                error,
+            } => {
+                let result = match error {
+                    Some(message) => Err(message),
+                    None => Ok(Listing {
+                        path,
+                        parent,
+                        entries,
+                    }),
+                };
+                handle.resolve_dir(req_id, result).await;
+            }
             FromDevice::Hello { .. } | FromDevice::Attach { .. } | FromDevice::Login { .. } => {
                 // Already handled during the handshake. Re-authenticating on
                 // a live socket is ignored rather than honoured: rebinding
@@ -897,6 +1156,7 @@ async fn handle_socket(
     // "live" against a machine that is gone.
     state.agent_device_frames.write().await.remove(&device_id);
     frame_senders.write().await.clear();
+    handle.fail_pending_dirs().await;
     state.agent_devices.remove(device_id).await;
     writer.abort();
     eprintln!("[agent-device] device {device_id} disconnected");
@@ -1193,6 +1453,7 @@ mod tests {
         let msg = ToDevice::StartRuntime {
             session_id: 3,
             models_json: json!({"providers":{"yunova-claude":{"apiKey":"yna_t"}}}),
+            workspace: Some("/home/u/code/app".into()),
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
         assert_eq!(v["type"], "start_runtime");
@@ -1200,12 +1461,132 @@ mod tests {
         // The device must receive a gateway-scoped credential, never an
         // upstream provider key.
         assert_eq!(v["models_json"]["providers"]["yunova-claude"]["apiKey"], "yna_t");
+        assert_eq!(v["workspace"], "/home/u/code/app");
+
+        // A task that named no directory must omit the field rather than send
+        // null: the client reads "absent" as "use your default", and an
+        // explicit null would have to be special-cased on both sides.
+        let msg = ToDevice::StartRuntime {
+            session_id: 4,
+            models_json: json!({"providers":{}}),
+            workspace: None,
+        };
+        let v: Value = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
+        assert!(v.get("workspace").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_machine_reports_which_directories_it_will_accept() {
+        // The web picker offers what the machine advertises, so this is the
+        // only path by which the roots reach the browser. They are cached per
+        // socket and never persisted: the client's settings file is the
+        // authority, and a stored copy would outlive a directory the user
+        // removed.
+        let (tx, _rx) = mpsc::channel::<ToDevice>(4);
+        let handle = DeviceHandle::new(1, tx);
+        assert!(
+            handle.workspaces().await.roots.is_empty(),
+            "a machine that has not reported yet must offer nothing"
+        );
+
+        handle
+            .set_workspaces(Workspaces {
+                default: Some("/home/u/Yunova".into()),
+                roots: vec![WorkspaceRoot {
+                    path: "/home/u/code".into(),
+                    label: Some("code".into()),
+                }],
+            })
+            .await;
+        let ws = handle.workspaces().await;
+        assert_eq!(ws.default.as_deref(), Some("/home/u/Yunova"));
+        assert_eq!(ws.roots.len(), 1);
+        assert_eq!(ws.roots[0].path, "/home/u/code");
+    }
+
+    #[tokio::test]
+    async fn a_listing_reaches_the_waiter_that_asked_for_it() {
+        // Request/response over a socket that is otherwise one-way, so an
+        // answer has to be matched by id. Delivering it to whoever asked next
+        // would show one machine's directories under another request.
+        let (tx, mut rx) = mpsc::channel::<ToDevice>(4);
+        let handle = Arc::new(DeviceHandle::new(1, tx));
+
+        let asking = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move { handle.list_dir(Some("/home/u/code".into())).await })
+        };
+
+        let req_id = match rx.recv().await.unwrap() {
+            ToDevice::ListDir { req_id, path } => {
+                assert_eq!(path.as_deref(), Some("/home/u/code"));
+                req_id
+            }
+            other => panic!("expected a list_dir request, got {other:?}"),
+        };
+
+        handle
+            .resolve_dir(
+                req_id,
+                Ok(Listing {
+                    path: Some("/home/u/code".into()),
+                    parent: None,
+                    entries: vec![DirEntry {
+                        path: "/home/u/code/app".into(),
+                        name: "app".into(),
+                        repo: true,
+                    }],
+                }),
+            )
+            .await;
+
+        let listing = asking.await.unwrap().unwrap();
+        assert_eq!(listing.entries.len(), 1);
+        assert!(listing.entries[0].repo);
+
+        // An answer with no waiter is dropped rather than queued for the next
+        // request, which is what keeps a late reply from being mistaken for a
+        // fresh one.
+        handle
+            .resolve_dir(
+                req_id,
+                Ok(Listing {
+                    path: None,
+                    parent: None,
+                    entries: Vec::new(),
+                }),
+            )
+            .await;
+    }
+
+    #[tokio::test]
+    async fn a_disconnect_fails_the_pickers_waiting_on_that_machine() {
+        // Otherwise a directory picker would spin for the full timeout after
+        // the user closed their laptop, and the eventual message would be
+        // "超时" rather than the true "that computer went offline".
+        let (tx, mut rx) = mpsc::channel::<ToDevice>(4);
+        let handle = Arc::new(DeviceHandle::new(1, tx));
+
+        let asking = {
+            let handle = Arc::clone(&handle);
+            tokio::spawn(async move { handle.list_dir(None).await })
+        };
+        // Wait until the request is actually queued, so the failure below
+        // cannot race ahead of it.
+        rx.recv().await.unwrap();
+
+        handle.fail_pending_dirs().await;
+        let err = asking
+            .await
+            .unwrap()
+            .expect_err("a dropped socket must fail");
+        assert!(err.contains("连接已断开"), "got: {err}");
     }
 
     #[tokio::test]
     async fn the_transport_relays_a_framed_line_as_structured_json() {
         let (tx, mut rx) = mpsc::channel::<ToDevice>(4);
-        let device = Arc::new(DeviceHandle { user_id: 1, tx });
+        let device = Arc::new(DeviceHandle::new(1, tx));
         let transport = DeviceTransport::new(device, 9);
 
         // The session layer hands over an encoded JSONL line, newline included.
@@ -1229,7 +1610,7 @@ mod tests {
     #[tokio::test]
     async fn shutdown_asks_the_device_to_stop_that_session_only() {
         let (tx, mut rx) = mpsc::channel::<ToDevice>(4);
-        let device = Arc::new(DeviceHandle { user_id: 1, tx });
+        let device = Arc::new(DeviceHandle::new(1, tx));
         DeviceTransport::new(device, 42).shutdown().await;
         match rx.recv().await.unwrap() {
             ToDevice::StopRuntime { session_id } => assert_eq!(session_id, 42),
@@ -1241,7 +1622,7 @@ mod tests {
     async fn a_disconnected_device_fails_sends_instead_of_hanging() {
         let (tx, rx) = mpsc::channel::<ToDevice>(1);
         drop(rx);
-        let device = Arc::new(DeviceHandle { user_id: 1, tx });
+        let device = Arc::new(DeviceHandle::new(1, tx));
         let err = DeviceTransport::new(device, 1)
             .send("{\"type\":\"abort\"}\n".to_string())
             .await
@@ -1254,7 +1635,7 @@ mod tests {
         let reg = DeviceRegistry::new();
         let (tx, _rx) = mpsc::channel::<ToDevice>(1);
         assert!(!reg.is_online(5).await);
-        reg.insert(5, Arc::new(DeviceHandle { user_id: 1, tx })).await;
+        reg.insert(5, Arc::new(DeviceHandle::new(1, tx))).await;
         assert!(reg.is_online(5).await);
         assert!(reg.get(5).await.is_some());
         reg.remove(5).await;

@@ -73,6 +73,26 @@ pub fn run() {
     let state_dir = runtime_env::var("YUNOVA_DEVICE_STATE_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| workspace.join(".yunova-agent"));
+    // Extra directories tasks may pick, colon-separated like `PATH` because a
+    // headless run is configured by environment variables and that is the
+    // shape an operator already knows. Unset means "only the workspace",
+    // which is what this client did before tasks could choose.
+    let extra_workspaces: Vec<PathBuf> = runtime_env::var("YUNOVA_DEVICE_WORKSPACES")
+        .ok()
+        .map(|raw| {
+            raw.split(':')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut workspace_roots = vec![workspace.clone()];
+    for extra in extra_workspaces {
+        if !workspace_roots.contains(&extra) {
+            workspace_roots.push(extra);
+        }
+    }
     let auto_approve = matches!(
         runtime_env::var("YUNOVA_DEVICE_AUTO_APPROVE")
             .unwrap_or_default()
@@ -84,6 +104,7 @@ pub fn run() {
         site_url: raw,
         name: runtime_env::var("YUNOVA_DEVICE_NAME").unwrap_or_else(|_| hostname()),
         workspace,
+        workspace_roots,
         state_dir,
         program: runtime_env::var("YUNOVA_PI_BIN").unwrap_or_else(|_| "pi".into()),
         auto_approve,
@@ -103,6 +124,20 @@ pub fn run() {
     );
     println!("  设备名:   {}", config.name);
     println!("  工作目录: {}", config.workspace.display());
+    // Printed because it is the local security boundary: an operator who set
+    // it from the environment needs to see what the machine actually accepted.
+    if config.workspace_roots.len() > 1 {
+        println!(
+            "  可选目录: {}",
+            config
+                .workspace_roots
+                .iter()
+                .skip(1)
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     println!(
         "  审批:     {}",
         if config.auto_approve {

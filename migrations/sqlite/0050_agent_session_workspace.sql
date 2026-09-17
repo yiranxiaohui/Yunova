@@ -1,0 +1,16 @@
+-- Per-task working directory for device sessions.
+--
+-- A machine used to run every task in the one directory its desktop client
+-- was configured with, so working on a second project meant editing a local
+-- setting and reconnecting. The directory is a property of the *task*, which
+-- is why it belongs on the session row: a transcript reopened next week has
+-- to be able to say where those tools actually ran.
+--
+-- NULL means "the client's default workspace", which is what every existing
+-- session was, so the column needs no backfill.
+--
+-- The stored value is never trusted as an instruction: the desktop client
+-- re-checks it against the roots the user authorized locally before starting
+-- a runtime in it. The server records a choice; the machine at risk still
+-- owns the boundary.
+ALTER TABLE agent_sessions ADD COLUMN workspace TEXT;

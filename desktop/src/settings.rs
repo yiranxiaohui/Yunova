@@ -29,8 +29,24 @@ pub struct Settings {
     #[serde(default = "hostname")]
     pub name: String,
     /// The directory the agent may work in.
+    ///
+    /// Still a single string, and still the default a task gets when it names
+    /// none. Extra directories live in `extra_workspaces`, which keeps a
+    /// settings file written by an older build readable and keeps the meaning
+    /// of "the workspace" unchanged for everything that does not care about
+    /// per-task choices.
     #[serde(default)]
     pub workspace: String,
+    /// Additional directories tasks may run in.
+    ///
+    /// The whole allowlist is `workspace` plus these. It is stored on the
+    /// machine rather than on the server because it *is* the local boundary:
+    /// a task names a directory, and this decides whether the machine will
+    /// honour that name. A server that could extend this list would make the
+    /// boundary the server's, which is exactly what the device target exists
+    /// to avoid.
+    #[serde(default)]
+    pub extra_workspaces: Vec<String>,
     /// Whether tool calls run without asking.
     #[serde(default)]
     pub auto_approve: bool,
@@ -65,6 +81,7 @@ impl Default for Settings {
             // Never `$HOME`: an unconfigured app must not hand an agent
             // everything the user owns just because nobody narrowed it.
             workspace: default_workspace().to_string_lossy().into_owned(),
+            extra_workspaces: Vec::new(),
             auto_approve: false,
             connect_on_launch: true,
             program: default_program(),
@@ -166,6 +183,39 @@ impl Settings {
         PathBuf::from(shellexpand(&self.workspace))
     }
 
+    /// Every directory a task on this machine may run in.
+    ///
+    /// The default workspace is always first, so a picker can present it as
+    /// the one a task gets when it asks for nothing. Duplicates are dropped
+    /// because the list is shown to the user, and a directory listed twice
+    /// reads as a bug in the app rather than in the settings file.
+    pub fn workspace_roots(&self) -> Vec<PathBuf> {
+        let mut out = vec![self.workspace_path()];
+        for extra in &self.extra_workspaces {
+            let path = PathBuf::from(shellexpand(extra));
+            if path.as_os_str().is_empty() || out.contains(&path) {
+                continue;
+            }
+            out.push(path);
+        }
+        out
+    }
+
+    /// Resolve the directory a task asked for.
+    ///
+    /// Thin wrapper over [`crate::runtime::resolve_workspace`] so the window
+    /// and the headless client cannot disagree about what is allowed: the
+    /// check is the local security boundary, and two copies of it would be two
+    /// chances to get it wrong.
+    #[cfg(test)]
+    pub fn resolve_workspace(&self, requested: Option<&str>) -> Result<PathBuf, String> {
+        crate::runtime::resolve_workspace(
+            &self.workspace_path(),
+            &self.workspace_roots(),
+            requested,
+        )
+    }
+
     /// Where per-session runtime config goes.
     ///
     /// Under the workspace, but in a dot-directory the agent has no reason to
@@ -180,7 +230,7 @@ impl Settings {
 
 /// Expand a leading `~`, which is what users type and what a file picker never
 /// produces.
-fn shellexpand(raw: &str) -> String {
+pub fn shellexpand(raw: &str) -> String {
     let raw = raw.trim();
     match raw.strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') || rest.starts_with('\\') => {
@@ -329,5 +379,105 @@ mod tests {
         if runtime_env::var("YUNOVA_DEVICE_STATE_DIR").is_err() {
             assert_eq!(s.state_dir(), PathBuf::from("/tmp/ws/.yunova-agent"));
         }
+    }
+
+    #[test]
+    fn the_default_workspace_leads_the_authorized_list() {
+        // A picker presents the first root as "what a task gets when it names
+        // nothing", so the order is meaning and not presentation. Tildes are
+        // expanded here too: the list is compared against resolved paths when
+        // a task is started, and a literal "~" would never match.
+        let mut s = Settings::default();
+        s.workspace = "/tmp/ws".into();
+        s.extra_workspaces = vec![
+            "~/code".into(),
+            // A repeat of the default must not appear twice, and neither must
+            // an empty line left in a hand-edited settings file.
+            "/tmp/ws".into(),
+            "  ".into(),
+        ];
+
+        let roots = s.workspace_roots();
+        assert_eq!(roots.first(), Some(&PathBuf::from("/tmp/ws")));
+        if let Some(home) = home() {
+            assert!(roots.contains(&home.join("code")));
+        }
+        assert_eq!(
+            roots
+                .iter()
+                .filter(|p| *p == &PathBuf::from("/tmp/ws"))
+                .count(),
+            1,
+            "the default must not be listed twice"
+        );
+        assert!(!roots.iter().any(|p| p.as_os_str().is_empty()));
+    }
+
+    #[test]
+    fn a_settings_file_from_an_older_build_still_loads() {
+        // The extra directories are a new field, so a file written before it
+        // existed has to keep working: an app that reset its settings on
+        // upgrade would silently drop the user's workspace and approval
+        // choice.
+        let dir = temp("legacy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            r#"{"site_url":"https://self.hosted.example","name":"laptop",
+                "workspace":"/tmp/ws","auto_approve":true,
+                "connect_on_launch":true,"program":"pi"}"#,
+        )
+        .unwrap();
+
+        let s = Settings::load(&path);
+        assert_eq!(s.name, "laptop");
+        assert!(s.auto_approve);
+        assert!(
+            s.extra_workspaces.is_empty(),
+            "a missing list must read as 'no extra directories', not as a failure to load"
+        );
+        if runtime_env::var("YUNOVA_DEVICE_WORKSPACE").is_err() {
+            assert_eq!(s.workspace_roots(), vec![PathBuf::from("/tmp/ws")]);
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_window_and_the_headless_client_agree_on_what_is_allowed() {
+        // `Settings` is the window's view and `runtime::resolve_workspace` is
+        // what actually runs, so this pins them to the same answer: a UI that
+        // offered a directory the runtime then refused would look broken.
+        let base = std::env::temp_dir().join(format!("yunova-agree-{}", std::process::id()));
+        let allowed = base.join("allowed");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(allowed.join("proj")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let mut s = Settings::default();
+        s.workspace = allowed.to_string_lossy().into_owned();
+        s.extra_workspaces = Vec::new();
+
+        assert_eq!(
+            s.resolve_workspace(Some(&allowed.join("proj").to_string_lossy()))
+                .unwrap(),
+            std::fs::canonicalize(allowed.join("proj")).unwrap()
+        );
+        assert!(
+            s.resolve_workspace(Some(&outside.to_string_lossy()))
+                .is_err(),
+            "a directory nobody authorized must be refused"
+        );
+
+        // Adding it is the user's call, and doing so must be enough.
+        s.extra_workspaces = vec![outside.to_string_lossy().into_owned()];
+        assert_eq!(
+            s.resolve_workspace(Some(&outside.to_string_lossy()))
+                .unwrap(),
+            std::fs::canonicalize(&outside).unwrap()
+        );
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -40,10 +40,17 @@ pub struct RuntimeManager {
 /// Local execution policy. Everything here is the user's decision, not the
 /// server's.
 pub struct Config {
-    /// Directory the agent may work in. Never defaults to `$HOME`: a task
-    /// driven from a phone should not be able to touch everything the user
-    /// owns because nobody set a narrower scope.
+    /// Directory the agent may work in when a task names none. Never defaults
+    /// to `$HOME`: a task driven from a phone should not be able to touch
+    /// everything the user owns because nobody set a narrower scope.
     pub workspace: PathBuf,
+    /// Every directory a task may name, `workspace` included.
+    ///
+    /// A task carries the directory the user picked for it, so this is what
+    /// decides whether that pick is honoured. It lives here, on the machine at
+    /// risk, because a server that could add to it would own the boundary the
+    /// device target exists to keep local.
+    pub workspace_roots: Vec<PathBuf>,
     /// Where per-session runtime config is written.
     pub state_dir: PathBuf,
     /// The `pi` executable.
@@ -59,6 +66,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             workspace: PathBuf::from("."),
+            workspace_roots: Vec::new(),
             state_dir: PathBuf::from("."),
             program: "pi".into(),
             auto_approve: false,
@@ -88,10 +96,17 @@ impl RuntimeManager {
     /// `to_server` receives every JSONL record the runtime emits, tagged with
     /// the session, so the caller can relay it without knowing how the process
     /// is managed.
+    ///
+    /// `workspace` is the directory the task was created with, as forwarded by
+    /// the server. It is checked against the authorized roots here and the
+    /// start fails if it is outside them: refusing is the only safe answer,
+    /// because silently falling back to the default would run a task somewhere
+    /// other than where its author is watching.
     pub async fn start(
         &self,
         session_id: i64,
         models_json: &Value,
+        workspace: Option<&str>,
         to_server: mpsc::Sender<ToServer>,
     ) -> Result<(), String> {
         // A second runtime for one session would fork the transcript.
@@ -99,10 +114,16 @@ impl RuntimeManager {
             return Ok(());
         }
 
+        let cwd = resolve_workspace(
+            &self.config.workspace,
+            &self.config.workspace_roots,
+            workspace,
+        )?;
+
         let agent_dir = self.config.state_dir.join(format!("s{session_id}"));
         write_runtime_config(&agent_dir, models_json, self.config.auto_approve).await?;
 
-        tokio::fs::create_dir_all(&self.config.workspace)
+        tokio::fs::create_dir_all(&cwd)
             .await
             .map_err(|e| format!("无法创建工作目录: {e}"))?;
 
@@ -121,7 +142,7 @@ impl RuntimeManager {
         cmd.arg("--mode")
             .arg("rpc")
             .arg("--no-session")
-            .current_dir(&self.config.workspace)
+            .current_dir(&cwd)
             .env("PI_CODING_AGENT_DIR", &agent_dir)
             .env("PI_OFFLINE", "1")
             .env("PI_SKIP_VERSION_CHECK", "1")
@@ -257,6 +278,117 @@ impl RuntimeManager {
     async fn forget(&self, session_id: i64) {
         self.inner.lock().await.remove(&session_id);
     }
+}
+
+// ---------------------------------------------------------------------------
+// workspace scope
+// ---------------------------------------------------------------------------
+
+/// Decide which directory a task may run in.
+///
+/// The one place the local boundary is enforced. A task carries the directory
+/// the user picked for it, but that pick arrives over a socket from a server,
+/// so it is treated as a request: honoured when it resolves inside a root the
+/// user authorized on this machine, refused otherwise. `None` means the task
+/// named nothing and gets `default`, which is what every task did before they
+/// could choose.
+///
+/// Refusing rather than falling back matters. A task silently redirected to
+/// another directory would report success while editing files nobody asked it
+/// to touch.
+pub fn resolve_workspace(
+    default: &std::path::Path,
+    roots: &[PathBuf],
+    requested: Option<&str>,
+) -> Result<PathBuf, String> {
+    let Some(raw) = requested.map(str::trim).filter(|r| !r.is_empty()) else {
+        return Ok(default.to_path_buf());
+    };
+    let asked = PathBuf::from(crate::settings::shellexpand(raw));
+    // Checked before canonicalization, which resolves a relative path against
+    // this process's current directory and would quietly accept one sent from
+    // the network.
+    if !asked.is_absolute() {
+        return Err(format!("工作目录必须是绝对路径: {raw}"));
+    }
+    // Compared after resolving symlinks and `..`, so neither a crafted path
+    // nor a link planted inside a root can aim the runtime outside it.
+    let target = std::fs::canonicalize(&asked)
+        .map_err(|e| format!("无法访问目录 {}: {e}", asked.display()))?;
+    if !target.is_dir() {
+        return Err(format!("{} 不是目录", asked.display()));
+    }
+    let mut allowed: Vec<&PathBuf> = roots.iter().collect();
+    let default = default.to_path_buf();
+    if !allowed.contains(&&default) {
+        allowed.push(&default);
+    }
+    for root in allowed {
+        // A root that does not exist yet cannot contain anything, so it is
+        // skipped rather than treated as a matching prefix.
+        let Ok(root) = std::fs::canonicalize(root) else {
+            continue;
+        };
+        if target == root || target.starts_with(&root) {
+            return Ok(target);
+        }
+    }
+    Err(format!(
+        "{} 不在本机已授权的目录范围内，请先在「本机设置」里添加",
+        asked.display()
+    ))
+}
+
+/// One child directory, as offered to the web picker.
+pub struct ChildDir {
+    pub path: String,
+    pub name: String,
+    /// Whether it looks like a project, so the picker can hint at the
+    /// directory the user probably meant.
+    pub repo: bool,
+}
+
+/// What lives under `path`, for the task's directory picker.
+///
+/// Only ever called with a path the caller already ran through
+/// [`resolve_workspace`], so this cannot be used to read outside the
+/// authorized roots. Hidden entries and files are left out: the picker chooses
+/// a working directory, and `.git` or `node_modules` is never that choice.
+pub fn list_children(path: &std::path::Path) -> Result<Vec<ChildDir>, String> {
+    let mut out = Vec::new();
+    let reader =
+        std::fs::read_dir(path).map_err(|e| format!("无法读取目录 {}: {e}", path.display()))?;
+    for entry in reader.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || name == "node_modules" {
+            continue;
+        }
+        // `file_type` rather than `metadata`, then a follow-up check: a
+        // symlinked project directory is a normal way to organise code and
+        // should still be offered.
+        let is_dir = match entry.file_type() {
+            Ok(t) if t.is_dir() => true,
+            Ok(t) if t.is_symlink() => entry.path().is_dir(),
+            _ => false,
+        };
+        if !is_dir {
+            continue;
+        }
+        let child = entry.path();
+        let repo = child.join(".git").exists();
+        out.push(ChildDir {
+            path: child.to_string_lossy().into_owned(),
+            name,
+            repo,
+        });
+    }
+    // Sorted here rather than in the browser: the listing is capped below, so
+    // the order decides what survives the cap.
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    // A home directory with thousands of entries would make the picker
+    // unusable and the response large; the user can still type a path.
+    out.truncate(500);
+    Ok(out)
 }
 
 /// The approval gate installed on the user's machine.
@@ -434,13 +566,14 @@ mod tests {
         let dir = temp_dir("missing");
         let m = RuntimeManager::new(Config {
             workspace: dir.clone(),
+            workspace_roots: vec![dir.clone()],
             state_dir: dir.clone(),
             program: "yunova-no-such-runtime".into(),
             auto_approve: true,
         });
         let (tx, _rx) = mpsc::channel(4);
         let err = m
-            .start(1, &json!({"providers":{}}), tx)
+            .start(1, &json!({"providers":{}}), None, tx)
             .await
             .expect_err("a missing runtime must fail");
         assert!(err.contains("yunova-no-such-runtime"), "got: {err}");
@@ -450,6 +583,122 @@ mod tests {
         assert!(err.contains("安装"), "got: {err}");
 
         tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_outside_the_authorized_roots_is_refused_not_redirected() {
+        // The whole point of per-task directories: the task carries a path
+        // that arrived over a socket, so honouring it unchecked would hand the
+        // choice of what the agent can rewrite to whoever can reach the
+        // server. Refusing is also the only safe failure — silently running in
+        // the default directory would report success while editing files
+        // nobody asked it to touch.
+        let base = temp_dir("scope");
+        let allowed = base.join("allowed");
+        let outside = base.join("outside");
+        tokio::fs::create_dir_all(allowed.join("project"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(&outside).await.unwrap();
+
+        let roots = vec![allowed.clone()];
+
+        // Inside a root: honoured, and canonicalized so the runtime is given
+        // a real directory rather than whatever the caller typed.
+        let picked = resolve_workspace(
+            &allowed,
+            &roots,
+            Some(&allowed.join("project").to_string_lossy()),
+        )
+        .expect("a directory inside a root must be allowed");
+        assert_eq!(
+            picked,
+            std::fs::canonicalize(allowed.join("project")).unwrap()
+        );
+
+        // Outside every root: refused, with the reason the user can act on.
+        let err = resolve_workspace(&allowed, &roots, Some(&outside.to_string_lossy()))
+            .expect_err("a directory outside the roots must be refused");
+        assert!(err.contains("本机已授权"), "got: {err}");
+
+        // `..` must not walk out of a root: the check runs on the resolved
+        // path, so a traversal cannot dress an outside directory up as an
+        // inside one.
+        let traversal = allowed
+            .join("project")
+            .join("..")
+            .join("..")
+            .join("outside");
+        assert!(
+            resolve_workspace(&allowed, &roots, Some(&traversal.to_string_lossy())).is_err(),
+            "`..` must not escape the authorized roots"
+        );
+
+        // A relative path is refused rather than resolved against whatever
+        // directory this process happens to be in.
+        assert!(resolve_workspace(&allowed, &roots, Some("project")).is_err());
+
+        // Naming nothing still means the default, which is what every task
+        // created before this feature existed sends.
+        assert_eq!(
+            resolve_workspace(&allowed, &roots, None).unwrap(),
+            allowed.clone()
+        );
+
+        tokio::fs::remove_dir_all(&base).await.ok();
+    }
+
+    #[tokio::test]
+    async fn a_symlink_planted_in_a_root_cannot_aim_the_agent_outside_it() {
+        // Prefix-matching the path as written would accept this: the link
+        // lives under an authorized root, so only resolving it first reveals
+        // that the target does not.
+        let base = temp_dir("symlink");
+        let allowed = base.join("allowed");
+        let secret = base.join("secret");
+        tokio::fs::create_dir_all(&allowed).await.unwrap();
+        tokio::fs::create_dir_all(&secret).await.unwrap();
+
+        #[cfg(unix)]
+        {
+            let link = allowed.join("escape");
+            std::os::unix::fs::symlink(&secret, &link).unwrap();
+            let err =
+                resolve_workspace(&allowed, &[allowed.clone()], Some(&link.to_string_lossy()))
+                    .expect_err("a symlink out of a root must be refused");
+            assert!(err.contains("本机已授权"), "got: {err}");
+        }
+
+        tokio::fs::remove_dir_all(&base).await.ok();
+    }
+
+    #[tokio::test]
+    async fn browsing_lists_only_directories_worth_picking() {
+        // The picker chooses a working directory, so files and `.git` are
+        // noise; a Git repository is flagged because it is almost always the
+        // directory the user actually meant.
+        let base = temp_dir("browse");
+        tokio::fs::create_dir_all(base.join("repo").join(".git"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(base.join("plain")).await.unwrap();
+        tokio::fs::create_dir_all(base.join(".hidden"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(base.join("node_modules"))
+            .await
+            .unwrap();
+        tokio::fs::write(base.join("file.txt"), "x").await.unwrap();
+
+        let children = list_children(&base).unwrap();
+        let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["plain", "repo"], "got: {names:?}");
+        assert!(
+            children.iter().find(|c| c.name == "repo").unwrap().repo,
+            "a Git checkout must be marked so the picker can hint at it"
+        );
+
+        tokio::fs::remove_dir_all(&base).await.ok();
     }
 
     #[tokio::test]

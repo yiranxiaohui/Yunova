@@ -24,6 +24,10 @@ const fields = {
 }
 
 let lastSaved = null
+// Extra authorized directories. Held here rather than read back out of the
+// DOM because the list is edited by picker and by button: one array is the
+// state, and the list below is only a rendering of it.
+let extraWorkspaces = []
 
 function renderStatus(status, activeSessions) {
   const dot = el("dot")
@@ -63,6 +67,8 @@ function renderSettings(s) {
   el("siteLabel").textContent = s.site_url
   fields.name.value = s.name
   fields.workspace.value = s.workspace
+  extraWorkspaces = Array.isArray(s.extra_workspaces) ? [...s.extra_workspaces] : []
+  renderWorkspaces()
   fields.autoApprove.checked = s.auto_approve
   fields.connectOnLaunch.checked = s.connect_on_launch
   fields.program.value = s.program
@@ -70,11 +76,54 @@ function renderSettings(s) {
   lastSaved = JSON.stringify(collect())
 }
 
+// The authorized list, default first.
+//
+// The default is shown alongside the extras, and without a remove button,
+// because it cannot be removed: a machine always has one directory a task
+// falls back to, and a list that implied otherwise would invite the user to
+// try emptying it.
+function renderWorkspaces() {
+  const list = el("workspaceList")
+  list.textContent = ""
+
+  const row = (path, removable) => {
+    const li = document.createElement("li")
+    const code = document.createElement("code")
+    code.textContent = path
+    li.append(code)
+    if (removable) {
+      const remove = document.createElement("button")
+      remove.type = "button"
+      remove.className = "ghost danger"
+      remove.textContent = "移除"
+      remove.addEventListener("click", () => {
+        extraWorkspaces = extraWorkspaces.filter((p) => p !== path)
+        renderWorkspaces()
+      })
+      li.append(remove)
+    } else {
+      const tag = document.createElement("span")
+      tag.className = "tag"
+      tag.textContent = "默认"
+      li.append(tag)
+    }
+    list.append(li)
+  }
+
+  const fallback = fields.workspace.value.trim()
+  if (fallback) row(fallback, false)
+  for (const path of extraWorkspaces) {
+    // The default is already shown; listing it twice would look like a bug.
+    if (path !== fallback) row(path, true)
+  }
+}
+
 function collect() {
   return {
     site_url: fields.siteUrl.value.trim(),
     name: fields.name.value.trim(),
     workspace: fields.workspace.value.trim(),
+    extra_workspaces: extraWorkspaces,
     auto_approve: fields.autoApprove.checked,
     connect_on_launch: fields.connectOnLaunch.checked,
     program: fields.program.value.trim() || "pi",
@@ -160,8 +209,21 @@ el("save").addEventListener("click", async () => {
 
 el("pickWorkspace").addEventListener("click", async () => {
   const picked = await invoke("pick_workspace")
-  if (picked) fields.workspace.value = picked
+  if (!picked) return
+  fields.workspace.value = picked
+  // The default appears in the list, so it has to be redrawn when it changes.
+  renderWorkspaces()
 })
+
+el("addWorkspace").addEventListener("click", async () => {
+  const picked = await invoke("pick_extra_workspace")
+  if (!picked) return
+  if (!extraWorkspaces.includes(picked)) extraWorkspaces.push(picked)
+  renderWorkspaces()
+})
+
+// Typing a path by hand also changes the default, and the list has to follow.
+fields.workspace.addEventListener("input", renderWorkspaces)
 
 fields.autoApprove.addEventListener("change", () => {
   // Shown immediately, before saving: the consequence has to be visible while

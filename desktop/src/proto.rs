@@ -51,6 +51,46 @@ pub enum ToServer {
         session_id: i64,
         message: String,
     },
+    /// The directories this machine lets tasks run in.
+    ///
+    /// Sent right after the handshake and again when the user edits them, so
+    /// the web UI can offer a picker. Advertising them is not delegating the
+    /// decision: the list is what this client will *accept*, and it re-checks
+    /// every start against it.
+    Workspaces {
+        default: String,
+        roots: Vec<WorkspaceRoot>,
+    },
+    /// Answer to a `list_dir` request.
+    DirListing {
+        req_id: u64,
+        /// The directory listed, or `None` when the roots themselves were.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        /// Where "up" goes, stopping at a root so the picker cannot walk out
+        /// of the authorized scope.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        entries: Vec<DirEntry>,
+        /// Set instead of `entries` when the request was refused or failed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
+/// One directory this machine authorizes.
+#[derive(Debug, Serialize)]
+pub struct WorkspaceRoot {
+    pub path: String,
+    pub label: String,
+}
+
+/// One child directory in a listing.
+#[derive(Debug, Serialize)]
+pub struct DirEntry {
+    pub path: String,
+    pub name: String,
+    pub repo: bool,
 }
 
 /// Frames the server sends to this client.
@@ -75,6 +115,13 @@ pub enum FromServer {
     StartRuntime {
         session_id: i64,
         models_json: Value,
+        /// The directory this task was created with.
+        ///
+        /// Absent for a task that named none, which is every task created
+        /// before tasks could choose. Present values are re-checked against
+        /// the local roots before anything starts.
+        #[serde(default)]
+        workspace: Option<String>,
     },
     /// One JSONL record for a local runtime's stdin, verbatim.
     Frame {
@@ -83,5 +130,14 @@ pub enum FromServer {
     },
     StopRuntime {
         session_id: i64,
+    },
+    /// List the directories under `path`, for the web UI's picker.
+    ///
+    /// `None` asks for the authorized roots. Anything else is answered only
+    /// when it lies inside one of them.
+    ListDir {
+        req_id: u64,
+        #[serde(default)]
+        path: Option<String>,
     },
 }

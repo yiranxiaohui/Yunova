@@ -23,6 +23,10 @@ export interface AgentSession {
   /** Whether a runtime is attached right now. An idle session can still hold
    *  a warm runtime, so this is not the same as `status`. */
   live: boolean
+  /** Directory on the device this task runs in. Null means the machine's
+   *  default workspace, which is what every task used before tasks could
+   *  choose one. */
+  workspace: string | null
 }
 
 /** One entry of the mirrored session tree, in the runtime's own shape. */
@@ -56,7 +60,17 @@ export const agentApi = {
     device_id?: number
     title?: string
     model?: string
-  }): Promise<{ id: number; target: string; title: string; model: string | null }> {
+    /** Directory on the device to run in. Only valid for `device` tasks, and
+     *  only honoured by that machine when it is inside the directories the
+     *  user authorized there. */
+    workspace?: string
+  }): Promise<{
+    id: number
+    target: string
+    title: string
+    model: string | null
+    workspace: string | null
+  }> {
     return jsonOrThrow(
       await fetch("/api/agent/sessions", {
         method: "POST",
@@ -192,6 +206,53 @@ export interface AgentDevice {
   /** Whether the desktop client is connected right now. Liveness comes from
    *  an open socket, not a stored row, so a task cannot start without it. */
   online: boolean
+  /** Directories that machine allows tasks in. Empty while it is offline:
+   *  the list lives in the client's own settings, so only a connected machine
+   *  can report it. */
+  workspace_roots: WorkspaceRoot[]
+  /** The one a task gets when it names none. */
+  default_workspace: string | null
+}
+
+/** One directory a machine authorized for tasks. */
+export interface WorkspaceRoot {
+  path: string
+  label: string | null
+}
+
+/** One directory inside a machine's authorized scope. */
+export interface DeviceDirEntry {
+  path: string
+  name: string
+  /** Whether it looks like a code project, so the picker can hint at it. */
+  repo: boolean
+}
+
+/** A directory listing from a machine. */
+export interface DeviceListing {
+  /** The directory listed, or null when these are the roots themselves. */
+  path: string | null
+  /** Where "up" goes, or null at a root: browsing never leaves the scope. */
+  parent: string | null
+  entries: DeviceDirEntry[]
+  default: string | null
+  roots: WorkspaceRoot[]
+}
+
+/** Browse a machine's authorized directories.
+ *
+ *  Proxied through the machine's own open socket, so it answers only for
+ *  directories the user authorized there. Omit `path` for the roots. */
+export async function browseDevice(
+  id: number,
+  path?: string
+): Promise<DeviceListing> {
+  const q = path ? `?path=${encodeURIComponent(path)}` : ""
+  return jsonOrThrow(
+    await fetch(`/api/agent/devices/${id}/dirs${q}`, {
+      credentials: "same-origin",
+    })
+  )
 }
 
 export async function listDevices(): Promise<AgentDevice[]> {
