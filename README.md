@@ -607,6 +607,46 @@ Release 的资产列表，读不到（无出网、限流、内网部署）就退
 安装包里的版本号来自根 `Cargo.toml` 的 `[workspace.package] version`（见「部署」），
 所以它与服务端自报的版本总是同一个。
 
+#### 客户端自更新
+
+窗口里的界面随服务端更新，所以「更新」要解决的不是产品界面，而是**外壳**：连接器
+协议、托盘、系统通知、本机策略。这部分过期时不会报错——服务端换了一个
+`agent_device` 帧，老客户端打开的窗口一切正常，只是这台电脑再也不出现在
+「运行位置」里。产品里没有任何地方提示用户去看应用版本号，因此没有更新器的话，
+那台机器就一直缺着。
+
+所以：**启动后自动检查，安装由用户点。** 三件事是刻意这样定的。
+
+- **验签是整个机制本身。** 更新是通过网络送到一个「以在个人电脑上执行命令为职责」的
+  二进制里的任意代码。插件会拒绝任何无法用编译进应用的 `pubkey` 验证的包，且**无法
+  关闭**；因此分发通道（GitHub、CDN、中间代理）不需要被信任，只有那把离线私钥需要。
+- **不自动安装。** 这台机器可能正在跑一个从手机上发起、而手机已经收进兜里的任务；
+  Windows 上安装器还会直接结束进程。所以检查是自动的、安装是个按钮，并且连接器
+  还有活跃会话时按钮会拒绝执行，而不是静默杀掉用户看不见的工作。
+- **不是每种安装形态都能自更新。** `.deb` 归 dpkg 管，独立二进制谁解压的归谁——
+  后者正是服务器上 `--headless` 的用法。客户端在启动时就从二进制里被打包器写入的
+  bundle type 判断出形态，不能自更新的就直接说明「请用包管理器升级」，而不是等到
+  下载完才抛一个插件错误。
+
+签名私钥**不在仓库里**，也不在任何镜像里：它只存在于维护者机器的
+`~/.tauri/yunova-updater.key`（`0600`）与 GitHub Secrets 的
+`TAURI_SIGNING_PRIVATE_KEY`。公钥在 `desktop/tauri.conf.json` 的 `plugins.updater.pubkey`，
+可以公开。**私钥丢了就无法再给已安装的客户端发更新**（只能让用户手动重装一次新公钥的
+版本），所以它值得单独备份。
+
+更新清单 `latest.json` 由 `desktop-release.yml` 的 `updater-manifest` 作业在矩阵构建
+**全部成功之后**统一生成一次。这里没有沿用 `tauri-action` 自带的清单上传：它的做法是
+每个构建作业各自「下载清单 → 合并自己那一项 → 重新上传」，而五个平台的作业结束时间
+互相交叠，两个作业读到同一版本就会丢掉其中一个平台，而且丢了不会报错——只会让那个
+平台的用户永远收不到更新。放在矩阵之后还有第二个好处：清单只会为一个全部构建成功的
+发布而存在，客户端不会被指向一个只存在一半的版本。
+
+这套配置的每一处都是「构建照样成功、几个月后在用户机器上才失效」的类型，因此
+`desktop/tests/updater_config.rs` 会检查公钥能否 base64 解出 minisign 公钥块、端点是否
+HTTPS 且指向本项目、`createUpdaterArtifacts` 是否为真、以及 updater 需要的
+bundle target（`appimage`/`nsis`/`app`）是否还在;工作流则在构建后断言确实产出了 `.sig`
+——私钥缺失或写错时构建本身是不会失败的。
+
 | 环境变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `YUNOVA_DEVICE_URL` | 内置站点地址 | 站点地址，自动推导 WebSocket 端点；桌面模式下作为设置的初值/覆盖值 |
@@ -857,3 +897,27 @@ services:
 
 打 tag 前先把 `[workspace.package] version` 改成同一个数字并提交，否则镜像和安装包
 的自报版本会落后于 tag。
+
+### 桌面端发布需要的仓库 secret
+
+桌面客户端的安装包同时是**更新包**，所以 `desktop-release.yml` 需要两个 secret：
+
+| Secret | 说明 |
+| --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` | `~/.tauri/yunova-updater.key` 的**内容**（整文件文本，不是路径） |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 该私钥的密码；本项目生成时留空，因此设为空字符串 |
+
+两者缺失时 `tauri build` **仍然会成功**，只是不产出 `.sig`，而后果要等到用户点
+「检查更新」时才看得见。工作流因此在构建后加了一步断言：没有 `.sig` 就直接失败，
+宁可不发也不要发一个永远无法更新的版本。
+
+首次配置（钥匙已生成则跳过，**不要重新生成**，否则已安装的客户端会因公钥不匹配
+而再也无法更新）：
+
+```bash
+cargo tauri signer generate -w ~/.tauri/yunova-updater.key
+chmod 600 ~/.tauri/yunova-updater.key
+# 私钥内容 → GitHub Secrets；公钥内容 → desktop/tauri.conf.json 的 plugins.updater.pubkey
+gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/yunova-updater.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body ""
+```

@@ -38,6 +38,8 @@ mod runtime_install;
 mod settings;
 #[cfg(not(target_os = "android"))]
 mod shell;
+#[cfg(not(target_os = "android"))]
+mod updates;
 
 fn main() {
     // rustls 0.23 cannot pick a backend on its own; without this, connecting
@@ -71,7 +73,9 @@ fn usage() {
          \x20 YUNOVA_DEVICE_AUTO_APPROVE  设为 1 放开审批，谨慎使用\n\
          \x20 YUNOVA_PI_BIN               运行时可执行文件，默认 pi\n\
          \n\
-         桌面模式的设置保存在 OS 配置目录，可在应用内的「本机设置」中修改。",
+         桌面模式的设置保存在 OS 配置目录，可在应用内的「本机设置」中修改。\n\
+         桌面模式会在启动后检查更新，安装由「本机设置」里的按钮触发；\n\
+         无界面模式不自更新，请用包管理器或重新下载压缩包升级。",
         env!("CARGO_PKG_VERSION")
     );
 }

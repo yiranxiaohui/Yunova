@@ -135,6 +135,23 @@
         <p class="error" id="runtimeError" hidden></p>
       </section>
 
+      <section class="card" id="updateCard">
+        <h2>版本与更新</h2>
+        <p class="hint">
+          窗口里的界面随服务端更新，所以这里更新的是外壳本身——连接器、托盘与
+          系统通知。外壳过期不会报错，只会让这台电脑从「运行位置」里消失。
+        </p>
+        <p class="hint" id="updateStatus">正在检查更新…</p>
+        <pre id="updateNotes" class="notes" hidden></pre>
+        <div class="row">
+          <button class="ghost" id="checkUpdate">检查更新</button>
+          <button class="primary" id="installUpdate" hidden>下载并安装</button>
+          <button class="primary" id="restartApp" hidden>重启以完成更新</button>
+        </div>
+        <p class="warn" id="updateBlocked" hidden></p>
+        <p class="error" id="updateError" hidden></p>
+      </section>
+
       <section class="card">
         <h2>运行日志 <span class="count" id="sessions"></span></h2>
         <pre id="log" class="log"></pre>

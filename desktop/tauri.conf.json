@@ -15,6 +15,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["deb", "appimage", "nsis", "app", "dmg"],
     "icon": [
       "icons/32x32.png",
@@ -39,6 +40,17 @@
       "nsis": {
         "installMode": "currentUser",
         "languages": ["SimpChinese", "English"]
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVGQjc4MkFFRDdCODQ1NUUKUldSZVJialhyb0szN3gzdUNyaitxalVPczlxNzFYd1M0L0R3WHg4YWIyQmhQSFRidDdDbnV3VmIK",
+      "endpoints": [
+        "https://github.com/yiranxiaohui/Yunova/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

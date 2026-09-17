@@ -351,3 +351,20 @@ button[disabled] {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* Release notes come from the update manifest, so they are shown as plain
+   preformatted text: rendering them as markup would let whatever is in a
+   release body decide how this window looks. */
+.notes {
+  margin: 0;
+  max-height: 120px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font: 12px/1.5 inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

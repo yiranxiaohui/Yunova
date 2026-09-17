@@ -37,6 +37,7 @@ use crate::endpoint::{SESSION_COOKIE, site_origin};
 use crate::identity::Login;
 use crate::runtime_install::{self, RuntimeStatus};
 use crate::settings::{Settings, settings_path};
+use crate::updates::{self, UpdateState, Updates};
 
 /// Label of the webview showing the server's own UI.
 const SITE_WINDOW: &str = "site";
@@ -89,6 +90,9 @@ pub struct Snapshot {
     /// as the connection state rather than behind a second call the panel
     /// might forget to make.
     runtime: RuntimeStatus,
+    /// Update availability and progress, so the panel can offer the button
+    /// without a second round trip.
+    updates: UpdateState,
 }
 
 /// The [`Host`] implementation that turns connector events into window events,
@@ -199,7 +203,10 @@ fn now_hhmmss() -> String {
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
-async fn snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
+async fn snapshot(
+    state: State<'_, AppState>,
+    updates: State<'_, Arc<Updates>>,
+) -> Result<Snapshot, String> {
     let settings = state.settings.lock().await.clone();
     Ok(Snapshot {
         status: state.status.lock().await.clone(),
@@ -208,6 +215,7 @@ async fn snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
         log: state.log.lock().await.clone(),
         site_url: site_origin(&settings.site_url),
         runtime: runtime_install::status(&settings.program).await,
+        updates: updates.state().await,
         settings,
     })
 }
@@ -262,12 +270,52 @@ async fn check_runtime(state: State<'_, AppState>) -> Result<RuntimeStatus, Stri
     Ok(runtime_install::status(&settings.program).await)
 }
 
+/// Look for a newer signed release, on request.
+///
+/// Separate from the launch check so the user has a way to ask again after
+/// fixing whatever made the first attempt fail.
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<UpdateState, String> {
+    let result = updates::check(&app).await;
+    let state = app.state::<Arc<Updates>>().inner().clone().state().await;
+    match result {
+        Ok(_) => Ok(state),
+        Err(e) => Err(e),
+    }
+}
+
+/// Download and install the pending update.
+///
+/// Refuses while the connector has live sessions: the point of this app is
+/// that a task started on a phone runs here, and replacing the binary
+/// underneath one would lose work nobody is watching.
+#[tauri::command]
+async fn install_update(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(busy) = updates::can_install_now(state.connector.active_sessions().await) {
+        return Err(busy);
+    }
+    updates::install(&app).await
+}
+
+/// Restart into the version that was just installed.
+#[tauri::command]
+async fn restart_app(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    if let Some(busy) = updates::can_install_now(state.connector.active_sessions().await) {
+        return Err(busy);
+    }
+    // Stop local runtimes first: `restart` replaces this process, and the
+    // `RunEvent::Exit` handler that normally cleans them up does not run.
+    state.connector.stop().await;
+    app.restart();
+}
+
 /// Persist settings and, when already connected, reconnect so the change is
 /// real rather than merely recorded.
 #[tauri::command]
 async fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
+    updates: State<'_, Arc<Updates>>,
     next: Settings,
 ) -> Result<Snapshot, String> {
     let path = settings_path(None);
@@ -296,7 +344,7 @@ async fn save_settings(
         let encoded = serde_json::to_string(&target).unwrap_or_else(|_| "\"\"".into());
         let _ = win.eval(format!("window.location.replace({encoded})"));
     }
-    snapshot(state).await
+    snapshot(state, updates).await
 }
 
 #[tauri::command]
@@ -644,6 +692,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             snapshot,
             save_settings,
@@ -657,6 +706,9 @@ pub fn run() {
             open_panel,
             install_runtime,
             check_runtime,
+            check_update,
+            install_update,
+            restart_app,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -681,6 +733,7 @@ pub fn run() {
                 site,
                 paused: Arc::clone(&paused),
             });
+            app.manage(Arc::new(Updates::new()));
 
             build_tray(&handle)?;
 
@@ -715,6 +768,28 @@ pub fn run() {
             // the user is about to create it by signing in to the page.
             let watcher = handle.clone();
             tauri::async_runtime::spawn(watch_site_login(watcher, paused));
+
+            // Checked once at launch, never installed on its own. An outdated
+            // shell fails silently — the window keeps working while this
+            // machine stops showing up as a run target — so something has to
+            // ask; but a client that replaced its own binary while an agent
+            // was working would be worse than a stale one.
+            let updater = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                // A moment after launch, so the first connection attempt and
+                // the window get the network to themselves.
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                match updates::check(&updater).await {
+                    Ok(Some(found)) => {
+                        eprintln!("[update] {} is available", found.version);
+                    }
+                    Ok(None) => {}
+                    // Offline, captive portal, rate limit: recorded in the
+                    // panel, not raised at the user.
+                    Err(e) => eprintln!("[update] check failed: {e}"),
+                }
+                let _ = updates::emit_state(&updater).await;
+            });
             Ok(())
         })
         .build(tauri::generate_context!())

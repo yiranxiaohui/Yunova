@@ -4,6 +4,11 @@ name: Release desktop client
 # 并把这台电脑变成 Agent 的执行目标。它不进服务端镜像。打 vX.Y.Z tag 时构建各
 # 平台安装包，作为 GitHub Release 附件；网页的 /download 页面直接读这个
 # Release 的资产列表。
+#
+# 安装包同时是**更新包**：客户端内置 updater 会读本 Release 的 latest.json，
+# 并用编译进二进制的公钥验签。因此 TAURI_SIGNING_PRIVATE_KEY 必须配置且与
+# desktop/tauri.conf.json 里的 pubkey 成对——缺了它构建仍然成功，但产不出
+# .sig，装出去的客户端会永远更新失败（见 desktop/tests/updater_config.rs）。
 on:
   push:
     tags: ['v*.*.*']
@@ -89,14 +94,44 @@ jobs:
       # points at the client crate: the workspace root's build.rs compiles the
       # web bundle, which this app does not need — it loads the site over the
       # network — and which would require bun on every runner.
+      #
+      # `uploadUpdaterJson: false` is load-bearing. The action builds
+      # `latest.json` by *reading the asset back, merging its own platform key
+      # and re-uploading it*, and all five matrix jobs finish at overlapping
+      # times: two jobs that read the same version lose one of the two
+      # platforms, and the loss is invisible until a user on that platform
+      # never sees an update. The manifest is therefore assembled once, after
+      # the matrix, by the `updater-manifest` job below.
       - name: Build & upload desktop app
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs the updater artifacts. Without it the bundler produces no
+          # `.sig` and the release cannot be used for updates at all.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: desktop
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
+          uploadUpdaterJson: false
+
+      # Fails the job rather than shipping an un-updatable release: a missing
+      # or wrong signing secret is silent in the build above, and the symptom
+      # lands months later on a user's machine as "检查更新" that never
+      # succeeds.
+      - name: Verify the updater artifacts were signed
+        shell: bash
+        run: |
+          shopt -s nullglob globstar
+          sigs=(target/${{ matrix.target }}/release/bundle/**/*.sig)
+          if [ ${#sigs[@]} -eq 0 ]; then
+            echo "::error::no .sig files were produced for ${{ matrix.target }}." \
+                 "TAURI_SIGNING_PRIVATE_KEY is probably missing or wrong, and" \
+                 "clients would never be able to verify an update." >&2
+            exit 1
+          fi
+          printf 'signed: %s\n' "${sigs[@]}"
 
       # The bare executable stays published alongside the installers: it is
       # what a headless server runs (`yunova-desktop --headless`), where an
@@ -134,3 +169,102 @@ jobs:
           for f in "${found[@]}"; do
             gh release upload "${GITHUB_REF_NAME}" "$f" --clobber
           done
+
+  # Assemble `latest.json` once, from the assets the matrix actually published.
+  #
+  # Written here rather than by each build job because the file is one shared
+  # mutable object: five concurrent read-modify-write cycles drop platform
+  # entries at random. Doing it after the matrix also means the manifest is
+  # only ever published for a release whose builds all succeeded, so a client
+  # cannot be pointed at an update that half-exists.
+  #
+  # The `.sig` contents must be inlined -- the updater rejects a path or a URL
+  # -- and the asset URLs are the tag's own `download/<tag>/<asset>` form so
+  # the manifest keeps resolving after `latest` has moved on.
+  updater-manifest:
+    needs: [create-release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assemble and upload latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          gh release download "$TAG" --dir "$work" --pattern '*.sig'
+
+          # Map an asset name to the `OS-ARCH` key the updater looks up. The
+          # installer extension decides the OS, and the architecture is read
+          # from the bundler's own spelling in the file name.
+          python3 - "$work" "$TAG" "$REPO" <<'PY' > "$work/latest.json"
+          import json, os, re, sys, urllib.parse
+
+          work, tag, repo = sys.argv[1], sys.argv[2], sys.argv[3]
+          version = tag.lstrip("v")
+          base = f"https://github.com/{repo}/releases/download/{urllib.parse.quote(tag)}"
+
+          def arch_of(name: str) -> str | None:
+              low = name.lower()
+              if re.search(r"aarch64|arm64", low):
+                  return "aarch64"
+              if re.search(r"x86_64|amd64|x64", low):
+                  return "x86_64"
+              return None
+
+          # Only updater-capable bundles belong here. A `.deb` is owned by
+          # dpkg and the bare `.tar.gz` has no installer, so both are download
+          # artifacts only -- the client refuses to self-update in those
+          # shapes and says so.
+          def os_of(name: str) -> str | None:
+              if name.endswith(".AppImage.sig"):
+                  return "linux"
+              if name.endswith(".app.tar.gz.sig"):
+                  return "darwin"
+              if name.endswith("-setup.exe.sig") or name.endswith(".msi.sig"):
+                  return "windows"
+              return None
+
+          platforms: dict[str, dict[str, str]] = {}
+          for sig in sorted(os.listdir(work)):
+              if not sig.endswith(".sig"):
+                  continue
+              target_os, arch = os_of(sig), arch_of(sig)
+              if not target_os or not arch:
+                  print(f"skipping {sig}", file=sys.stderr)
+                  continue
+              with open(os.path.join(work, sig), encoding="utf-8") as f:
+                  signature = f.read().strip()
+              asset = sig[: -len(".sig")]
+              platforms[f"{target_os}-{arch}"] = {
+                  "signature": signature,
+                  "url": f"{base}/{urllib.parse.quote(asset)}",
+              }
+
+          if not platforms:
+              raise SystemExit("no updater signatures found; refusing to publish an empty manifest")
+
+          json.dump(
+              {"version": version, "notes": f"Yunova {tag}", "pub_date": None, "platforms": platforms},
+              sys.stdout,
+              indent=2,
+              ensure_ascii=False,
+          )
+          PY
+
+          # `pub_date` must be RFC 3339 or absent; emit it here where `date`
+          # can produce the right format.
+          python3 - "$work/latest.json" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY'
+          import json, sys
+          path, now = sys.argv[1], sys.argv[2]
+          with open(path, encoding="utf-8") as f:
+              manifest = json.load(f)
+          manifest["pub_date"] = now
+          with open(path, "w", encoding="utf-8") as f:
+              json.dump(manifest, f, indent=2, ensure_ascii=False)
+          PY
+
+          echo "platforms in the manifest:"
+          python3 -c 'import json,sys; print("\n".join(sorted(json.load(open(sys.argv[1]))["platforms"])))' "$work/latest.json"
+          gh release upload "$TAG" "$work/latest.json" --clobber

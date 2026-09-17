@@ -38,6 +38,15 @@ tauri-plugin-notification = "2"
 # fight over the same session ids, so the existing window is focused instead.
 tauri-plugin-single-instance = "2"
 tauri-plugin-opener = "2"
+# In-app updates. The shell is the part that *can* go stale: the window shows
+# the server's own UI, so the product updates itself, but an old connector
+# stops appearing as a run target without visibly breaking. Signature
+# verification against the compiled-in `pubkey` is not optional in this
+# plugin, which is what makes shipping executable code to users' machines
+# defensible. Not built for Android, where the platform has no updater and the
+# window shell is excluded anyway.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+tauri-plugin-updater = "2"
 
 [dev-dependencies]
 # Reading the manifests back in `version_single_source.rs`, to assert that the
