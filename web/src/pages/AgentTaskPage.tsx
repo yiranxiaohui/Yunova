@@ -451,10 +451,13 @@ export default function AgentTaskPage() {
 
   const header = useMemo(
     () => (
-      // Same height and treatment as chat's header (`min-h-16`), so the
-      // content below — including the mode switch — starts at the same y on
-      // both screens and the switch does not jump when modes change.
-      <div className="safe-top relative z-30 flex min-h-14 flex-wrap items-center gap-2 bg-background/65 px-2.5 py-2 backdrop-blur-xl md:px-4">
+      // Same height and treatment as chat's header, so the content below —
+      // including the mode switch — starts at the same y on both screens and
+      // the switch does not jump when modes change. The vertical padding is
+      // handed to `safe-top` as `--safe-area-extra-top` rather than written as
+      // `py-2`: the helper owns `padding-top`, so a competing utility would be
+      // dropped and the header would sit higher here than in chat.
+      <div className="safe-top [--safe-area-extra-top:0.5rem] relative z-30 flex min-h-14 flex-wrap items-center gap-2 bg-background/65 px-2.5 pb-2 backdrop-blur-xl md:px-4">
         <Sheet open={sidebarOpen} onOpenChange={setSidebarOpen}>
           <SheetTrigger asChild>
             <Button variant="ghost" size="icon-sm" className="tap-target md:hidden">
@@ -568,8 +571,11 @@ export default function AgentTaskPage() {
 
         {/* `safe-bottom` keeps the composer clear of the home indicator; a
             bottom-anchored control would otherwise be partly untappable in
-            the packaged app. */}
-        <div className="safe-bottom bg-background/70 px-3 pb-3 pt-1.5 backdrop-blur-xl md:px-6 md:pb-4">
+            the packaged app. It owns `padding-bottom`, so the desktop spacing
+            travels in `--safe-area-extra-bottom` instead of `pb-3`/`md:pb-4`,
+            which the helper would otherwise override — that is what pinned
+            this composer to the very bottom edge of the window. */}
+        <div className="safe-bottom [--safe-area-extra-bottom:0.75rem] md:[--safe-area-extra-bottom:1rem] bg-background/70 px-3 pt-1.5 backdrop-blur-xl md:px-6">
           <div className="mx-auto w-full max-w-4xl">
             {/* One rounded box, text above and controls below, matching chat's
                 composer: work mode carries more controls than chat, and beside

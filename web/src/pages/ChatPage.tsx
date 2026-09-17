@@ -1564,8 +1564,12 @@ export default function ChatPage() {
       <div className="flex min-w-0 flex-1 flex-col bg-background/25">
         {/* No bottom border: Doubao lets the column read as one surface. The
             translucent background stays, though, or scrolled messages would
-            slide visibly under the model picker. */}
-        <header className="relative z-30 flex min-h-14 items-center justify-between gap-2 bg-background/65 px-2.5 py-2 backdrop-blur-xl md:gap-3 md:px-4">
+            slide visibly under the model picker.
+
+            `safe-top` carries its vertical padding so this header and work
+            mode's are built the same way and resolve to the same height; on
+            hardware with a notch both also clear the status bar. */}
+        <header className="safe-top [--safe-area-extra-top:0.5rem] relative z-30 flex min-h-14 items-center justify-between gap-2 bg-background/65 px-2.5 pb-2 backdrop-blur-xl md:gap-3 md:px-4">
           <div className="flex min-w-0 flex-1 items-center gap-1.5 md:gap-2">
             <Button
               variant="ghost"
@@ -1861,7 +1865,7 @@ export default function ChatPage() {
           )}
         </div>
 
-        <div className="bg-background/70 px-3 pb-3 pt-1.5 backdrop-blur-xl md:px-6 md:pb-4">
+        <div className="safe-bottom [--safe-area-extra-bottom:0.75rem] md:[--safe-area-extra-bottom:1rem] bg-background/70 px-3 pt-1.5 backdrop-blur-xl md:px-6">
           <div className="mx-auto max-w-4xl">
             {/* The strip carries the compact switch and the context meter,
                 neither of which exists in the empty state, so it is dropped

@@ -298,14 +298,29 @@
  *
  * A WebView runs edge to edge under the notch and the home indicator, so a
  * bottom-anchored composer becomes partly untappable and a top bar hides
- * behind the status bar. These pad by the real inset and collapse to zero on
- * hardware without one, so the same markup serves web and app. */
-.safe-top {
-  padding-top: env(safe-area-inset-top, 0px);
+ * behind the status bar. These reserve the real inset and collapse to zero on
+ * hardware without one, so the same markup serves web and app.
+ *
+ * They *add* to the element's own padding instead of setting it. Two earlier
+ * traps made the naive version silently wrong on the desktop: a plain
+ * `padding-top: env(...)` resolves to `0px` where there is no notch, and
+ * because these rules sit outside `@layer utilities` they outrank every
+ * Tailwind utility no matter the source order. Together that erased the
+ * `py-2`/`pb-3` on whichever element carried the class, which is why work
+ * mode's header sat higher and its composer sat lower than chat's.
+ *
+ * `@utility` keeps them inside the utilities layer as well, so ordinary
+ * Tailwind padding still wins when it is the more specific intent. */
+@utility safe-top {
+  padding-top: calc(
+    var(--safe-area-extra-top, 0px) + env(safe-area-inset-top, 0px)
+  );
 }
 
-.safe-bottom {
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+@utility safe-bottom {
+  padding-bottom: calc(
+    var(--safe-area-extra-bottom, 0px) + env(safe-area-inset-bottom, 0px)
+  );
 }
 
 /* Touch devices get comfortable hit areas without inflating the desktop UI,
