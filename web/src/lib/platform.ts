@@ -36,9 +36,20 @@ export function platform(): Platform {
   const cap = capacitor()
   const raw = cap?.getPlatform?.()
   if (raw === "ios" || raw === "android") return raw
-  // The desktop shell exposes Tauri's bridge; treated as its own platform
-  // because it can execute locally while a browser cannot.
-  if ((globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return "desktop"
+  // The desktop shell announces itself with a marker injected into the site
+  // webview (`DESKTOP_MARKER` in `desktop/src/shell.rs`). That webview is
+  // named in no Tauri capability, so it cannot ask the shell anything over
+  // IPC; a read-only global is the whole channel, and one bit is all this
+  // needs. `__TAURI_INTERNALS__` is accepted too, for the panel window and
+  // for older clients that predate the marker.
+  const g = globalThis as {
+    __YUNOVA_DESKTOP__?: unknown
+    __TAURI_INTERNALS__?: unknown
+    isTauri?: unknown
+  }
+  if (g.__YUNOVA_DESKTOP__ === true || g.isTauri === true || g.__TAURI_INTERNALS__) {
+    return "desktop"
+  }
   return "web"
 }
 
@@ -56,6 +67,14 @@ export interface Capabilities {
   canNotify: boolean
   /** Whether tasks can run on this device itself. */
   canExecuteLocally: boolean
+  /**
+   * Whether offering the desktop client still makes sense here.
+   *
+   * It does not inside the desktop client itself — the user already installed
+   * it — and it does not in the packaged mobile app, where a store build must
+   * not link out to a binary download.
+   */
+  canInstallDesktop: boolean
   /** Whether a back gesture/button needs explicit handling. */
   needsBackHandling: boolean
 }
@@ -72,6 +91,10 @@ export function capabilities(): Capabilities {
     // Only the desktop shell hosts a local runtime. A phone drives tasks that
     // run in the cloud or on a paired computer.
     canExecuteLocally: p === "desktop",
+    // Only a browser can act on a desktop download: inside the client the app
+    // is already installed, and a packaged mobile build must not link out to a
+    // binary.
+    canInstallDesktop: p === "web",
     needsBackHandling: p === "android",
   }
 }

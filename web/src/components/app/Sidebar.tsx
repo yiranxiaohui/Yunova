@@ -32,6 +32,7 @@ import { agentApi, type AgentSession, type AgentTarget } from "@/lib/agent"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
 import { prefetchWorkMode } from "@/lib/mode"
+import { capabilities } from "@/lib/platform"
 import { useConfirm } from "@/lib/confirm-context"
 import { useIsDesktop } from "@/lib/use-media-query"
 import { useSidebarCollapsed } from "@/lib/sidebar-collapse"
@@ -176,6 +177,10 @@ export function Sidebar({
   // and a 4rem strip of icons inside it would be a worse version of nothing.
   const isDesktop = useIsDesktop()
   const collapsed = isDesktop && collapsedPref
+
+  // Whether to offer the client at all. Read once per mount because the host
+  // cannot change under a running page.
+  const canInstallDesktop = useMemo(() => capabilities().canInstallDesktop, [])
 
   useEffect(() => {
     setAvatarBroken(false)
@@ -690,16 +695,20 @@ export function Sidebar({
       >
         {/* Downloads live at the bottom of the sidebar, the way Doubao keeps
             "下载电脑版" out of the working area: it is a one-time action, not
-            something the user returns to mid-task. */}
-        <NavRow
-          icon={Download}
-          label="下载电脑版"
-          hint="安装桌面应用，并把任务跑在自己的电脑上"
-          collapsed={collapsed}
-          active={location.pathname.startsWith("/download")}
-          to="/download"
-          onClick={() => onNavigate?.()}
-        />
+            something the user returns to mid-task. Inside the desktop client
+            it is not an action at all — the app is already installed — so the
+            row is dropped rather than shown pointing at itself. */}
+        {canInstallDesktop && (
+          <NavRow
+            icon={Download}
+            label="下载电脑版"
+            hint="安装桌面应用，并把任务跑在自己的电脑上"
+            collapsed={collapsed}
+            active={location.pathname.startsWith("/download")}
+            to="/download"
+            onClick={() => onNavigate?.()}
+          />
+        )}
         {user ? (
           collapsed ? (
             <button

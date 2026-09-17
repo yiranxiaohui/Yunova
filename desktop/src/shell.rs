@@ -42,6 +42,18 @@ use crate::settings::{Settings, settings_path};
 const SITE_WINDOW: &str = "site";
 /// Label of the local control panel.
 const PANEL_WINDOW: &str = "panel";
+/// Marker injected into the site window so the page can tell it is running
+/// inside this client.
+///
+/// The page needs to know, or it keeps advertising the download of an app the
+/// user is already looking at. It cannot ask: the site webview is named in no
+/// capability, so every IPC call from it is refused — which is the point. A
+/// plain global is the right shape for that boundary, because it carries one
+/// bit of information and grants nothing.
+///
+/// Kept as a named constant because `web/src/lib/platform.ts` reads the same
+/// name, and a test asserts the two agree.
+const DESKTOP_MARKER: &str = "__YUNOVA_DESKTOP__";
 /// How many log lines the panel can show. Bounded because this process may run
 /// for weeks in the tray and an unbounded log is a slow memory leak.
 const LOG_LIMIT: usize = 400;
@@ -401,6 +413,11 @@ fn config_of(settings: &Settings) -> ConnectorConfig {
 /// the one non-negotiable boundary here: the page comes from a server, and a
 /// page from a server must not be able to reconfigure the machine it is
 /// displayed on.
+///
+/// The only thing handed to it is [`DESKTOP_MARKER`], a read-only boolean that
+/// lets the page drop the "install the desktop app" affordances. Read-only so
+/// the page cannot unset it for its own scripts, and a boolean so it reveals
+/// nothing about this machine.
 fn open_site(app: &AppHandle, settings: &Settings) -> tauri::Result<()> {
     if let Some(win) = app.get_webview_window(SITE_WINDOW) {
         let _ = win.show();
@@ -415,6 +432,9 @@ fn open_site(app: &AppHandle, settings: &Settings) -> tauri::Result<()> {
         .inner_size(1180.0, 800.0)
         .min_inner_size(900.0, 600.0)
         .center()
+        .initialization_script(format!(
+            "Object.defineProperty(window, '{DESKTOP_MARKER}', {{ value: true }});"
+        ))
         .build()?;
     Ok(())
 }

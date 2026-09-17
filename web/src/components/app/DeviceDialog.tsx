@@ -9,6 +9,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog"
 import { useConfirm } from "@/lib/confirm-context"
+import { capabilities } from "@/lib/platform"
 import {
   listDevices,
   renameDevice,
@@ -129,16 +130,23 @@ YUNOVA_DEVICE_URL=${window.location.origin} \\
           <DialogTitle>本地电脑</DialogTitle>
           <DialogDescription>
             在自己的电脑上安装并打开桌面客户端，在它的窗口里登录本账号，这台机器就会
-            自动出现在下面的列表里——不用填地址，也不用配对码。还没有客户端？
-            <a
-              href="/download"
-              target="_blank"
-              rel="noreferrer"
-              className="text-primary underline-offset-2 hover:underline"
-            >
-              前往下载
-            </a>
-            。
+            自动出现在下面的列表里——不用填地址，也不用配对码。
+            {/* The prompt only helps a browser visitor: reading this inside the
+                client means the app is already installed. */}
+            {capabilities().canInstallDesktop && (
+              <>
+                还没有客户端？
+                <a
+                  href="/download"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-primary underline-offset-2 hover:underline"
+                >
+                  前往下载
+                </a>
+                。
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
 

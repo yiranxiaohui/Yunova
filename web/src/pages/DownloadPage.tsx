@@ -15,6 +15,7 @@ import {
 import { toast } from "sonner"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
+import { capabilities } from "@/lib/platform"
 import {
   DESKTOP_BUILDS,
   DESKTOP_REPO,
@@ -53,6 +54,10 @@ export default function DownloadPage() {
 
   const os = useMemo(() => guessOs(), [])
   const primary = useMemo(() => preferredBuild(os), [os])
+  // The page stays reachable inside the client (the CLI section links here),
+  // so say which situation the visitor is in instead of silently offering an
+  // install they already completed.
+  const inClient = useMemo(() => !capabilities().canInstallDesktop, [])
   const primaryInstaller = useMemo(
     () => (primary ? installerAsset(primary, release) : null),
     [primary, release]
@@ -157,6 +162,11 @@ YUNOVA_BASE_URL=${window.location.origin} pi`
       </header>
 
       <main className="mx-auto w-full max-w-5xl px-4 py-8 md:px-7 md:py-12">
+        {inClient && (
+          <p className="mb-6 rounded-xl border border-primary/30 bg-primary/5 px-4 py-2.5 text-center text-xs text-muted-foreground">
+            你正在使用已安装的客户端，无需重复安装。下面的链接用于给其他电脑或服务器安装。
+          </p>
+        )}
         <section className="flex flex-col items-center gap-5 text-center">
           <div className="relative">
             <div className="absolute inset-2 rounded-3xl bg-primary/25 blur-2xl" />
