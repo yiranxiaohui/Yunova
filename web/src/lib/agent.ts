@@ -403,6 +403,26 @@ export function entriesToItems(entries: AgentEntry[]): AgentItem[] {
   return out
 }
 
+/**
+ * Append only the items a view has not rendered yet.
+ *
+ * Item ids derive from server-assigned entry ids, so they are stable across
+ * requests. That makes an overlapping range harmless: a replayed `since`
+ * cursor, or two reconciliations racing over the same mirror write, would
+ * otherwise append the same turn a second time.
+ */
+export function mergeAgentItems(
+  prev: AgentItem[],
+  fresh: AgentItem[]
+): AgentItem[] {
+  if (fresh.length === 0) return prev
+  const seen = new Set(prev.map((i) => i.id))
+  const add = fresh.filter((i) => !seen.has(i.id))
+  // Returning `prev` unchanged keeps React from re-rendering the transcript
+  // for a sync that turned out to carry nothing new.
+  return add.length === 0 ? prev : [...prev, ...add]
+}
+
 /** Human-readable label for an approval request. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function approvalTitle(req: any): string {

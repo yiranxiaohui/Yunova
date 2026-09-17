@@ -23,6 +23,7 @@ import {
   agentApi,
   entriesToItems,
   listDevices,
+  mergeAgentItems,
   subscribeAgentSession,
   type AgentItem,
   type AgentSession,
@@ -116,6 +117,17 @@ export default function AgentTaskPage() {
   const bottomRef = useRef<HTMLDivElement>(null)
   // Latest mirrored entry id, used as the incremental cursor.
   const cursor = useRef<string | undefined>(undefined)
+  // Serializes reconciliation, see `syncEntries`.
+  const syncChain = useRef<Promise<unknown>>(Promise.resolve())
+  // The session the transcript on screen belongs to, so a sync that was
+  // queued for the previous task can tell that it came back too late.
+  const activeSid = useRef<number | null>(sessionId)
+  // Declared before every effect that syncs: React runs effects in
+  // declaration order, so the guard is current by the time the loading effect
+  // below asks for entries.
+  useEffect(() => {
+    activeSid.current = sessionId
+  }, [sessionId])
 
   // The session list itself is rendered by the sidebar, which loads it
   // independently; this only refreshes the *current* session's status so the
@@ -133,24 +145,42 @@ export default function AgentTaskPage() {
   /** Reconcile the transcript from the server.
    *
    *  Always the recovery path: initial load, a reconnect, and a `resync` hint
-   *  all funnel here, so there is a single way the view catches up. */
-  const syncEntries = useCallback(async (sid: number, full = false) => {
-    try {
-      if (full) cursor.current = undefined
-      const entries = await agentApi.entries(sid, cursor.current)
-      if (entries.length > 0) {
-        cursor.current = entries[entries.length - 1]!.id
-      } else if (!full) {
-        // Nothing new; keep what is rendered.
-        return
+   *  all funnel here, so there is a single way the view catches up.
+   *
+   *  Serialized through `syncChain`, because the cursor is read before the
+   *  request and written after it: two overlapping incremental syncs would
+   *  both start from the same id, fetch the same range and append it twice.
+   *  That is what duplicated a whole turn on screen — a settle arrives as the
+   *  runtime's own `agent_settled` frame *and* as the server's `settled` once
+   *  mirroring finished, so two syncs raced across the same mirror write. */
+  const syncEntries = useCallback((sid: number, full = false) => {
+    const run = async () => {
+      // The route moved on while this call waited its turn; the transcript on
+      // screen belongs to another session now, so appending would corrupt it.
+      if (activeSid.current !== sid) return
+      try {
+        if (full) cursor.current = undefined
+        const entries = await agentApi.entries(sid, cursor.current)
+        if (activeSid.current !== sid) return
+        if (entries.length > 0) {
+          cursor.current = entries[entries.length - 1]!.id
+        } else if (!full) {
+          // Nothing new; keep what is rendered.
+          return
+        }
+        const fresh = entriesToItems(entries)
+        // A full sync must replace even when it returns nothing, or switching
+        // to an empty session would leave the previous transcript on screen.
+        setItems((prev) => (full ? fresh : mergeAgentItems(prev, fresh)))
+      } catch (e) {
+        toast.error(`读取会话记录失败：${(e as Error).message}`)
       }
-      const fresh = entriesToItems(entries)
-      // A full sync must replace even when it returns nothing, or switching to
-      // an empty session would leave the previous transcript on screen.
-      setItems((prev) => (full ? fresh : [...prev, ...fresh]))
-    } catch (e) {
-      toast.error(`读取会话记录失败：${(e as Error).message}`)
     }
+    // Chained on settle *and* rejection so one failed pass cannot wedge every
+    // later sync behind it.
+    const next = syncChain.current.then(run, run)
+    syncChain.current = next
+    return next
   }, [])
 
   // Load the user's machines so the picker can offer them.
@@ -406,11 +436,20 @@ export default function AgentTaskPage() {
   )
 
   // Deliver a prompt carried over from task creation.
+  //
+  // Consumed from the history entry as well as guarded by the ref: the ref
+  // only survives as long as this mount, so a reload of `/t/:id` would replay
+  // the same prompt and the task really would hold the turn twice.
   const pending = (window.history.state?.usr?.pending ?? null) as string | null
   const pendingSent = useRef(false)
   useEffect(() => {
     if (!pending || pendingSent.current || sessionId == null) return
     pendingSent.current = true
+    const state = window.history.state
+    window.history.replaceState(
+      { ...state, usr: { ...(state?.usr ?? {}), pending: undefined } },
+      ""
+    )
     void send(pending)
   }, [pending, sessionId, send])
 
