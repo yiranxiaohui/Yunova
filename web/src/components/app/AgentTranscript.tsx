@@ -242,6 +242,18 @@ export function AgentTranscript({
         }
         if (item.kind === "thinking") return <Thinking key={item.id} text={item.text} />
         if (item.kind === "tool") return <ToolCard key={item.id} item={item} />
+        if (item.kind === "error") {
+          // A failed turn produces no visible content, so without this the
+          // task would look like it ignored the prompt entirely.
+          return (
+            <div
+              key={item.id}
+              className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+            >
+              {item.text}
+            </div>
+          )
+        }
         return (
           <div key={item.id} className="text-xs text-muted-foreground">
             {item.text}

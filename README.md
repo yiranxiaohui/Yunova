@@ -520,7 +520,15 @@ Release 的资产列表，读不到（无出网、限流、内网部署）就退
 | `YUNOVA_DEVICE_NAME` | 主机名 | 列表里显示的名字 |
 | `YUNOVA_DEVICE_AUTO_APPROVE` | 关 | 设为 `1` 放开审批，谨慎使用 |
 | `YUNOVA_PI_BIN` | `pi` | 运行时可执行文件 |
-| `YUNOVA_DEVICE_GATEWAY_URL` | 服务端配置 | 设备端运行时回调的网关地址（服务器上设置） |
+| `YUNOVA_DEVICE_GATEWAY_URL` | **必填（服务端）** | 设备端运行时回调的网关地址，见下 |
+
+**`YUNOVA_DEVICE_GATEWAY_URL` 必须在服务器上显式配置**，否则「本机电脑」任务
+会被拒绝启动。这个地址是写进设备端 `models.json` 的 `baseUrl`，由**你的电脑**
+去拨号，所以既不能是回环地址也不能是服务端的监听地址（`0.0.0.0`）——从前这里
+会回退到监听地址，结果运行时拿到 `http://0.0.0.0:3000`，能正常启动但每次模型调用
+都失败成 `Connection error.`，界面上看起来就是「工作模式没反应」。现在服务端会直接
+报错而不是下发一个坏配置。填公网入口即可，例如 `https://chat.yunnet.top`；
+同一局域网的自托管实例填局域网地址也可以。
 
 构建桌面端需要系统 WebView。macOS 与 Windows 自带（WebKit / WebView2）；
 Linux 上需要 `libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`librsvg2-dev`、`patchelf`、
