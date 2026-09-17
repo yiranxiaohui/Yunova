@@ -22,6 +22,8 @@
 //!   running on this machine. The tray reflects that, and quitting is explicit.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
@@ -31,7 +33,7 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::sync::Mutex;
 
 use crate::connector::{Connector, ConnectorConfig, Host, Status, bound_account};
-use crate::endpoint::site_origin;
+use crate::endpoint::{SESSION_COOKIE, site_origin};
 use crate::identity::Login;
 use crate::settings::{Settings, settings_path};
 
@@ -49,6 +51,13 @@ pub struct AppState {
     settings: Mutex<Settings>,
     log: Arc<Mutex<Vec<String>>>,
     status: Arc<Mutex<Status>>,
+    /// Where the site webview points, so the cookie lookup does not have to
+    /// take the settings lock from a synchronous trait method.
+    site: Arc<std::sync::RwLock<String>>,
+    /// Set when the user disconnected on purpose. Without it the watcher that
+    /// makes attaching automatic would immediately undo an explicit
+    /// "断开", which is the sort of fight the user always loses.
+    paused: Arc<AtomicBool>,
 }
 
 /// What the panel renders in one request, so it never has to stitch together
@@ -70,25 +79,34 @@ struct WindowHost {
     app: AppHandle,
     log: Arc<Mutex<Vec<String>>>,
     status: Arc<Mutex<Status>>,
+    site: Arc<std::sync::RwLock<String>>,
+    paused: Arc<AtomicBool>,
 }
 
 impl Host for WindowHost {
     fn status(&self, status: Status) {
         let app = self.app.clone();
         let slot = Arc::clone(&self.status);
+        let paused = Arc::clone(&self.paused);
         tauri::async_runtime::spawn(async move {
             *slot.lock().await = status.clone();
             // Emitted rather than polled so the panel reflects a dropped
             // connection immediately instead of on its next timer tick.
             let _ = app.emit("connector://status", &status);
 
-            // A sign-in is the one state the user must act on, and the panel
-            // is the only place to do it. Without this the app would show the
-            // site and sit there silently unattached — the machine would
-            // simply never appear in the device list, with nothing on screen
-            // saying why.
-            if let Status::NeedsLogin { .. } = status {
-                let _ = show_panel(&app);
+            // A sign-in is the one state the user must act on — and the place
+            // to do it is the site itself, because signing in there is what
+            // binds this machine now. Opening the local panel instead would
+            // ask for the same password a second time in a window that looks
+            // like a settings dialog.
+            // Not while paused, though: "解除绑定" and "断开" both end in this
+            // state on purpose, and yanking the user out of the panel they
+            // just clicked in would read as the app fighting them.
+            if let Status::NeedsLogin { .. } = status
+                && !paused.load(Ordering::SeqCst)
+            {
+                let settings = app.state::<AppState>().settings.lock().await.clone();
+                let _ = open_site(&app, &settings);
             }
         });
     }
@@ -111,6 +129,19 @@ impl Host for WindowHost {
             }
             let _ = app.emit("connector://log", &stamped);
         });
+    }
+
+    /// The site's session cookie, read out of the app's own site webview.
+    ///
+    /// This is what makes the client attach by itself: the user signs in to
+    /// the page once — which they have to do anyway to use the product — and
+    /// the connector proves the machine with that session instead of asking
+    /// for the password again in a second window. The remote page never gets
+    /// to *send* anything here; the app reads the cookie from its own webview,
+    /// so this adds no IPC surface for a server to reach.
+    fn session_token(&self) -> Option<String> {
+        let origin = self.site.read().ok()?.clone();
+        site_session(&self.app, &origin)
     }
 
     fn attention(&self, title: String, body: String) {
@@ -172,8 +203,15 @@ async fn save_settings(
 ) -> Result<Snapshot, String> {
     let path = settings_path(None);
     next.save(&path)?;
+    // `save` fills a cleared address back in, so read back what was stored
+    // rather than trusting the form: otherwise the panel and the connector
+    // would disagree about which site this is.
+    let next = Settings::load(&path);
     let reconnect = state.connector.is_running().await;
     *state.settings.lock().await = next.clone();
+    if let Ok(mut slot) = state.site.write() {
+        *slot = site_origin(&next.site_url);
+    }
 
     if reconnect && next.is_configured() {
         state.connector.start(config_of(&next), None).await;
@@ -198,12 +236,16 @@ async fn connect(state: State<'_, AppState>) -> Result<(), String> {
     if !settings.is_configured() {
         return Err("请先填写站点地址".into());
     }
+    state.paused.store(false, Ordering::SeqCst);
     state.connector.start(config_of(&settings), None).await;
     Ok(())
 }
 
 #[tauri::command]
 async fn disconnect(state: State<'_, AppState>) -> Result<(), String> {
+    // Remembered, so the watcher that attaches automatically does not
+    // reconnect a second later and make the button look broken.
+    state.paused.store(true, Ordering::SeqCst);
     state.connector.stop().await;
     Ok(())
 }
@@ -226,6 +268,7 @@ async fn sign_in(
     if !settings.is_configured() {
         return Err("请先填写站点地址".into());
     }
+    state.paused.store(false, Ordering::SeqCst);
     state
         .connector
         .start(
@@ -242,6 +285,9 @@ async fn sign_in(
 #[tauri::command]
 async fn sign_out(state: State<'_, AppState>) -> Result<(), String> {
     let settings = state.settings.lock().await.clone();
+    // Unbinding must stick: the site window is probably still signed in, and
+    // re-attaching from that session would undo the click instantly.
+    state.paused.store(true, Ordering::SeqCst);
     state.connector.sign_out(&config_of(&settings)).await;
     Ok(())
 }
@@ -379,10 +425,14 @@ pub fn run() {
             let handle = app.handle().clone();
             let log = Arc::new(Mutex::new(Vec::new()));
             let status = Arc::new(Mutex::new(Status::Offline));
+            let site = Arc::new(std::sync::RwLock::new(site_origin(&settings.site_url)));
+            let paused = Arc::new(AtomicBool::new(false));
             let host = Arc::new(WindowHost {
                 app: handle.clone(),
                 log: Arc::clone(&log),
                 status: Arc::clone(&status),
+                site: Arc::clone(&site),
+                paused: Arc::clone(&paused),
             });
             let connector = Connector::new(host);
 
@@ -391,13 +441,18 @@ pub fn run() {
                 settings: Mutex::new(settings.clone()),
                 log,
                 status,
+                site,
+                paused: Arc::clone(&paused),
             });
 
             build_tray(&handle)?;
 
-            // An unconfigured app opens the panel, because there is nothing to
-            // show until a server is known; a configured one opens the site,
-            // which is what the user came for.
+            // The site opens first and the connector follows, with no address
+            // to type and no button to press: the app knows its own site, and
+            // signing in to that page is what binds this machine. Only a
+            // build with no address at all (a self-hosted one that cleared
+            // the default) has anything to ask, and only then is the panel the
+            // first thing the user sees.
             if settings.is_configured() {
                 open_site(&handle, &settings)?;
                 if settings.connect_on_launch {
@@ -409,6 +464,12 @@ pub fn run() {
             } else {
                 show_panel(&handle)?;
             }
+
+            // Runs regardless of how the first connection went, because the
+            // credential it is waiting for does not exist yet on a first run:
+            // the user is about to create it by signing in to the page.
+            let watcher = handle.clone();
+            tauri::async_runtime::spawn(watch_site_login(watcher, paused));
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -464,6 +525,64 @@ fn has_single_instance_support() -> bool {
     // Windows uses a named mutex and macOS an Apple event; neither can fail
     // the way the D-Bus path does.
     true
+}
+
+/// The site's session cookie, as held by the app's own site webview.
+///
+/// Reading it here rather than accepting it from the page keeps the boundary
+/// intact: the remote document still has no IPC and cannot hand anything to
+/// this process. What it can do — be signed in — is exactly what the server
+/// will accept as proof that this machine belongs to that account.
+///
+/// Blocks the calling thread until the webview thread answers, which is why
+/// every caller here is a spawned task: from the main thread, or from inside a
+/// command or event handler, that wait is the deadlock Tauri documents.
+fn site_session(app: &AppHandle, origin: &str) -> Option<String> {
+    let win = app.get_webview_window(SITE_WINDOW)?;
+    // The cookie store is keyed by URL, so ask for the configured origin
+    // rather than wherever the page happens to have navigated.
+    let url = origin.parse().ok()?;
+    let cookies = win.cookies_for_url(url).ok()?;
+    cookies
+        .into_iter()
+        .find(|c| c.name() == SESSION_COOKIE)
+        .map(|c| c.value().trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Re-attach once the user signs in to the site window.
+///
+/// The connector gives up when it has no credential to offer, which on a first
+/// run is every moment before the user finishes signing in to the page. Left
+/// there, the app would show a perfectly working site while the web UI
+/// reported "本地电脑（离线）" until something restarted it — the exact symptom
+/// this watcher exists to remove. It only ever *starts* a connection that
+/// parked for lack of a credential, so an explicit 断开 stays honoured.
+async fn watch_site_login(app: AppHandle, paused: Arc<AtomicBool>) {
+    loop {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let state = app.state::<AppState>();
+        if paused.load(Ordering::SeqCst) || state.connector.is_running().await {
+            continue;
+        }
+        if !matches!(state.connector.status().await, Status::NeedsLogin { .. }) {
+            continue;
+        }
+        // Only retry when there is now something new to try with: a stored
+        // token, or a session in the window that was not there before.
+        let settings = state.settings.lock().await.clone();
+        if !settings.is_configured() {
+            continue;
+        }
+        let cfg = config_of(&settings);
+        let origin = match state.site.read() {
+            Ok(slot) => slot.clone(),
+            Err(_) => continue,
+        };
+        if bound_account(&cfg).is_some() || site_session(&app, &origin).is_some() {
+            state.connector.start(cfg, None).await;
+        }
+    }
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {

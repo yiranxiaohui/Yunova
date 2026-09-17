@@ -63,7 +63,7 @@ fn usage() {
          \x20 yunova-desktop --headless   无界面模式，供服务器/开发机使用\n\
          \n\
          无界面模式的环境变量:\n\
-         \x20 YUNOVA_DEVICE_URL           必填，站点地址（如 https://yunnet.top）\n\
+         \x20 YUNOVA_DEVICE_URL           站点地址，默认连接本应用内置的站点\n\
          \x20 YUNOVA_USERNAME/PASSWORD    免交互登录\n\
          \x20 YUNOVA_DEVICE_WORKSPACE     Agent 可操作的目录，默认当前目录\n\
          \x20 YUNOVA_DEVICE_NAME          设备名，默认主机名\n\

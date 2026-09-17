@@ -227,6 +227,33 @@ button:disabled {
   font-size: 12px;
 }
 
+/*
+ * Folded-away settings.
+ *
+ * The site address and the password form are both things a normal install
+ * never needs — the app knows its own address and the window's sign-in binds
+ * the machine — but a self-hosted deployment and a window that cannot sign in
+ * still need them reachable. A disclosure keeps them one click away instead of
+ * making them the first thing a first-time user is asked for.
+ */
+summary {
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+summary:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.fold {
+  display: grid;
+  gap: 10px;
+  padding-top: 10px;
+}
+
 .warn {
   margin: 0;
   color: var(--warn);

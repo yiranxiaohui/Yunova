@@ -60,6 +60,7 @@ function renderStatus(status, activeSessions) {
 
 function renderSettings(s) {
   fields.siteUrl.value = s.site_url
+  el("siteLabel").textContent = s.site_url
   fields.name.value = s.name
   fields.workspace.value = s.workspace
   fields.autoApprove.checked = s.auto_approve
@@ -170,6 +171,9 @@ el("signIn").addEventListener("click", async () => {
       return void fail(e)
     }
   }
+  if (!username || !password) {
+    return void fail("账号和密码都不能为空")
+  }
   try {
     await invoke("sign_in", { username, password })
     // Cleared right away: the field has no further use and a password left in
@@ -185,6 +189,9 @@ el("password").addEventListener("keydown", (e) => {
 })
 
 el("openSite").addEventListener("click", () => invoke("show_site"))
+// Signing in on the site is the normal way to bind this machine, so the
+// sign-in card points there first and keeps the password form folded away.
+el("openSiteLogin").addEventListener("click", () => invoke("show_site"))
 
 await listen("connector://status", async (event) => {
   // The session count lives on the Rust side, so a status change re-reads it
