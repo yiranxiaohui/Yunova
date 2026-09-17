@@ -94,7 +94,11 @@ POST /api/proxy/openai {model:"gpt-5",...}
 
 接口：`POST /api/admin/pricing/sync-newapi`
 `{base_url, group?, channel_ids?, dry_run?, overwrite_existing?, enable_imported?}`。
-管理员提供的 URL 会走 SSRF 防护，无法用于探测内网。
+管理员提供的 URL 会走 SSRF 防护，无法用于探测内网。唯一的例外是 fake-ip 段
+`198.18.0.0/15`：主机经透明代理（mihomo / sing-box / Clash 的 fake-ip 模式）解析时，
+所有公网域名都会拿到该段里的合成地址，真实目标由隧道在连接时解析，因此把它当私网
+拒绝只会让每个正常中转站都报「DNS 解析到私网 / 回环地址」。真正的内网域名仍会解析到
+RFC1918 / 回环地址并被拦下。
 
 ### 从积分升级到额度
 
