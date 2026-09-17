@@ -1,0 +1,9 @@
+{
+  "name": "yunova-brand",
+  "private": true,
+  "type": "module",
+  "description": "Icon rasteriser for brand/generate.py",
+  "dependencies": {
+    "@resvg/resvg-js": "^2.6.2"
+  }
+}

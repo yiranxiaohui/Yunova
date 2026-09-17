@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Yunova">
+  <defs>
+    <linearGradient id="i-tile" x1="0.08" y1="0" x2="0.92" y2="1">
+      <stop offset="0" stop-color="#9A6BFF"/>
+      <stop offset="0.45" stop-color="#6D3BD1"/>
+      <stop offset="1" stop-color="#2C0B66"/>
+    </linearGradient>
+    <radialGradient id="i-halo" cx="0.5" cy="0.4" r="0.62">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.28"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="i-core" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.9"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="i-mark" x1="0.5" y1="0.06" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="0.55" stop-color="#FCFAFF"/>
+      <stop offset="1" stop-color="#DCCBFF"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#i-tile)"/>
+  <rect width="512" height="512" fill="url(#i-halo)"/>
+  <circle cx="256" cy="250" r="128" fill="url(#i-core)"/>
+  <path d="M146.66 128.57 Q211.17 175.29 256.00 189.20 Q300.83 175.29 365.34 128.57 Q314.65 205.52 289.70 262.94 Q269.82 319.18 256.00 405.80 Q242.18 319.18 222.30 262.94 Q197.35 205.52 146.66 128.57 Z" fill="url(#i-mark)"/>
+  <path d="M392.00 102.00 Q393.48 121.52 397.94 124.06 Q400.48 128.52 420.00 130.00 Q400.48 131.48 397.94 135.94 Q393.48 138.48 392.00 158.00 Q390.52 138.48 386.06 135.94 Q383.52 131.48 364.00 130.00 Q383.52 128.52 386.06 124.06 Q390.52 121.52 392.00 102.00 Z" fill="#FFFFFF" fill-opacity="0.9"/>
+</svg>

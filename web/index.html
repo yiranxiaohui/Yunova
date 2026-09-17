@@ -2,8 +2,13 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="apple-touch-icon" href="/logo.png" />
+    <!-- SVG first for crisp tab icons at any DPI; the .ico carries the 16/32px
+         rasters for older browsers and Windows pinned sites, and the PNG is the
+         last resort. Apple ignores SVG here and needs its own opaque 180px PNG. -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/favicon.png" />
+    <link rel="alternate icon" href="/favicon.ico" sizes="any" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
     <!-- `viewport-fit=cover` is required for env(safe-area-inset-*) to report
          real values; without it iOS letterboxes the page and the bottom
          composer sits under the home indicator. -->

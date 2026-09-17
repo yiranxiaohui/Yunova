@@ -36,7 +36,7 @@ export function AuthShell({
 
           <div className="relative flex items-center gap-3">
             <img
-              src="/logo.png"
+              src="/logo.svg"
               alt="Yunova"
               className="size-11 rounded-2xl ring-1 ring-white/20 shadow-2xl"
             />

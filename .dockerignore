@@ -3,6 +3,10 @@
 target
 web/node_modules
 web/dist
+# Brand icon generator: its outputs are already committed under web/public and
+# desktop/icons, so only its scratch space would enter the build context.
+brand/node_modules
+brand/build
 # Capacitor native projects: generated locally by `cap add`, never needed by
 # the server image, and several MB of Gradle/Xcode scaffolding that would
 # otherwise enter the build context and invalidate the web layer cache.

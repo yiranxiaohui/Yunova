@@ -127,6 +127,13 @@ cd web && bun run dev    # 前端 :5173 → /api 走 vite proxy
 
 测试在本地跑：`cargo test` + `cd web && npx tsc -b && bun test`。CI 只负责构建镜像、不跑测试。
 
+## 品牌图标
+
+图标由 `brand/generate.py` 参数化生成（三角新星，向下光芒兼作字母 Y 的竖笔），
+favicon、站内 logo、Tauri 磁贴与 `.ico`/`.icns` 全部出自同一段定义，避免各自漂移。
+修改图形后执行 `cd brand && python3 generate.py` 重新生成全部资源，
+细节见 [`brand/README.md`](brand/README.md)。
+
 ## 创作流水线
 
 `/workflows` 提供可拖拽、可连线的媒体节点画布，内置图片生成、视频生成、

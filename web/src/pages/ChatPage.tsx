@@ -483,7 +483,7 @@ function Bubble({
     <div className="group flex flex-col items-start gap-1">
       <div className="flex max-w-[96%] items-start gap-2.5 sm:max-w-[90%]">
         <img
-          src="/logo.png"
+          src="/logo.svg"
           alt=""
           className="size-8 shrink-0 rounded-xl ring-1 ring-border/70 shadow-sm"
         />
@@ -1725,7 +1725,7 @@ export default function ChatPage() {
                 <div className="relative">
                   <div className="absolute inset-2 rounded-3xl bg-primary/30 blur-2xl" />
                   <img
-                    src="/logo.png"
+                    src="/logo.svg"
                     alt=""
                     className="relative size-14 rounded-[1.15rem] ring-1 ring-white/15 shadow-panel md:size-16"
                   />
