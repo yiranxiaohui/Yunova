@@ -457,6 +457,28 @@ Linux 上需要 `libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`librsvg2-dev`、`pat
 **打包阶段**失败，而不是编译阶段）。
 打包用 `cd desktop && cargo tauri build`。
 
+#### macOS 上的「已损坏」
+
+发布的安装包**没有** Apple Developer ID 签名也没有公证，因此 macOS 会拦下来。
+`bundle.macOS.signingIdentity` 设为 `-`（ad-hoc 临时签名）**不是**为了绕过它，
+而是为了决定用户看到哪一种弹窗：
+
+- 不写 `signingIdentity` 时，打包器**根本不跑 `codesign`**，`.app` 对资源和
+  `Info.plist` 没有任何封封，只剩链接器给 Mach-O 加的那层 ad-hoc 签名。
+  在 Apple Silicon 上这不够过 Gatekeeper：文件一旦带上浏览器下载的
+  `com.apple.quarantine`，系统就报**「已损坏，无法打开」**——这条文案会把人
+  直接引向废纸篓，而不是引向那个其实可以放行的「身份不明的开发者」对话框。
+- 写成 `-` 后 Tauri 会对整个 bundle 执行 `codesign --force -s -`，封封成立，
+  于是退回正常的「身份不明的开发者」路径，用户可以右键→打开放行。
+
+ad-hoc 签名不证明任何身份，也**不会**去掉那个提示；要做到双击即装，只有真实
+证书签名 + 公证一条路。CI 里若提供了 `APPLE_CERTIFICATE` / `APPLE_ID` 等凭据，
+会**优先**于这里的 `-`，无需改配置。
+
+那为什么不干脉去掉 `quarantine`？因为那是让用户关掉 Gatekeeper 对这个应用的
+检查，不应该写成推荐做法；但在没有证书之前，它确实是唯一的应急手段，
+所以 `/download` 页面在 macOS 卡片里直接写明了这条命令。
+
 安全模型与云电脑**有本质区别**，协议设计也因此不同：沙箱是一次性且隔离的，
 个人电脑不是。所以约束 Agent 的策略**由客户端拥有**，而不是交给服务器：
 
