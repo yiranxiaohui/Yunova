@@ -114,7 +114,15 @@ jobs:
           projectPath: desktop
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
-          uploadUpdaterJson: false
+          # The action's own manifest upload is a read-modify-write on one
+          # shared asset, and the five platform jobs overlap: on v0.4.23 two
+          # of them raced and left `latest.json` registered but pointing at a
+          # deleted blob (`BlobNotFound`), which every client would have
+          # fetched as a 404. The `updater-manifest` job below writes it once
+          # instead. NOTE: the input is `includeUpdaterJson` -- `v0` rejects
+          # any other spelling with a *warning* and carries on doing the
+          # racing upload, which is exactly how v0.4.23 shipped broken.
+          includeUpdaterJson: false
 
       # Fails the job rather than shipping an un-updatable release: a missing
       # or wrong signing secret is silent in the build above, and the symptom
@@ -123,15 +131,17 @@ jobs:
       - name: Verify the updater artifacts were signed
         shell: bash
         run: |
-          shopt -s nullglob globstar
-          sigs=(target/${{ matrix.target }}/release/bundle/**/*.sig)
-          if [ ${#sigs[@]} -eq 0 ]; then
+          # `find`, not a `**` glob: the macOS runners still ship bash 3.2,
+          # where `globstar` does not exist, so the glob stayed literal and
+          # the check failed on a build that had in fact signed correctly.
+          count=$(find "target/${{ matrix.target }}/release/bundle" -name '*.sig' | wc -l)
+          if [ "$count" -eq 0 ]; then
             echo "::error::no .sig files were produced for ${{ matrix.target }}." \
                  "TAURI_SIGNING_PRIVATE_KEY is probably missing or wrong, and" \
                  "clients would never be able to verify an update." >&2
             exit 1
           fi
-          printf 'signed: %s\n' "${sigs[@]}"
+          find "target/${{ matrix.target }}/release/bundle" -name '*.sig' -print
 
       # The bare executable stays published alongside the installers: it is
       # what a headless server runs (`yunova-desktop --headless`), where an
@@ -194,6 +204,20 @@ jobs:
           set -euo pipefail
           work=$(mktemp -d)
           gh release download "$TAG" --dir "$work" --pattern '*.sig'
+
+          # A `latest.json` already on the release means the build jobs uploaded
+          # one themselves -- i.e. the input that disables that upload was
+          # renamed again and silently ignored. Left alone, the racing uploads
+          # are what corrupted v0.4.23, so fail loudly instead of writing this
+          # job's copy over whatever state that race happened to leave behind.
+          if gh release view "$TAG" --json assets \
+               --jq '.assets[].name' | grep -qx 'latest.json'; then
+            echo "::error::the build jobs uploaded latest.json themselves, so" \
+                 "tauri-action's manifest upload is still enabled. Check the" \
+                 "'includeUpdaterJson: false' input still matches the action's" \
+                 "current input name." >&2
+            exit 1
+          fi
 
           # Map an asset name to the `OS-ARCH` key the updater looks up. The
           # installer extension decides the OS, and the architecture is read
