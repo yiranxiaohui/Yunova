@@ -1518,7 +1518,10 @@ function EmailPanel() {
               }
             />
             <p className="text-[11px] text-muted-foreground">
-              上游每花费 1 美元，从用户余额扣除的人民币金额。
+              上游每花费 1 美元，从用户余额扣除的人民币金额。默认 <b>1</b>：
+              中转站就是按列表美元价 1 美元收 1 元卖额度的，填 1 即与上游持平。
+              这里不要填真实外汇牌价（如 7.2），否则每个模型都按成本的好几倍扣费；
+              要加利潦请用下方的全局加价。
             </p>
           </div>
           <div className="flex flex-col gap-1.5">

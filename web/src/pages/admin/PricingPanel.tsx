@@ -56,6 +56,7 @@ import {
   microQuotaForMicroUsd,
   microUsdToUsd,
   usdToMicroUsd,
+  DEFAULT_USD_TO_CNY_RATE_MICRO,
   type AdminSettings,
 } from "@/lib/quota"
 import {
@@ -523,7 +524,8 @@ function PricingDialog({
       cancelled = true
     }
   }, [])
-  const usdToCnyRateMicro = rate?.usd_to_cny_rate_micro ?? 7_200_000
+  const usdToCnyRateMicro =
+    rate?.usd_to_cny_rate_micro ?? DEFAULT_USD_TO_CNY_RATE_MICRO
   const multiplierPercent = rate?.price_multiplier_percent ?? 100
   const [allModels, setAllModels] = useState<AllChannelModel[]>([])
   const [probeErrors, setProbeErrors] = useState<

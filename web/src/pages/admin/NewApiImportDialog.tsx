@@ -16,7 +16,12 @@ import {
   type Channel,
   type NewApiSyncResult,
 } from "@/lib/channels"
-import { adminQuotaApi, formatQuota, microQuotaForMicroUsd } from "@/lib/quota"
+import {
+  adminQuotaApi,
+  formatQuota,
+  microQuotaForMicroUsd,
+  DEFAULT_USD_TO_CNY_RATE_MICRO,
+} from "@/lib/quota"
 
 /**
  * 从 NewAPI 站点导入模型价格。
@@ -43,7 +48,9 @@ export function NewApiImportDialog({
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [done, setDone] = useState<NewApiSyncResult | null>(null)
-  const [usdToCnyRateMicro, setUsdToCnyRateMicro] = useState(7_200_000)
+  const [usdToCnyRateMicro, setUsdToCnyRateMicro] = useState(
+    DEFAULT_USD_TO_CNY_RATE_MICRO
+  )
   const [multiplier, setMultiplier] = useState(100)
 
   useEffect(() => {

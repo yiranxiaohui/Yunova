@@ -84,9 +84,11 @@ pub fn compute_cost(rate: QuotaRate, p: &ModelPrice, seconds: i64, size: &str) -
 mod pricing_tests {
     use super::*;
 
-    /// $1 of upstream spend costs ¥7.2, no markup.
-    const RATE: QuotaRate =
-        QuotaRate { usd_to_cny_micro: 7_200_000, multiplier_percent: 100 };
+    /// The shipped default: $1 of upstream spend costs ¥1, no markup.
+    const RATE: QuotaRate = QuotaRate {
+        usd_to_cny_micro: crate::quota::DEFAULT_USD_TO_CNY_MICRO,
+        multiplier_percent: 100,
+    };
 
     /// A clip model priced at $0.005 base + $0.005/second, the micro-USD
     /// equivalent of the 5 + 5 credits these tests used before the quota switch.
@@ -158,8 +160,10 @@ mod pricing_tests {
     #[test]
     fn the_global_markup_raises_the_quota_charged_for_a_clip() {
         let price = video_price("veo3.1-fast", vec![4]);
-        let marked_up =
-            QuotaRate { usd_to_cny_micro: 7_200_000, multiplier_percent: 150 };
+        let marked_up = QuotaRate {
+            usd_to_cny_micro: crate::quota::DEFAULT_USD_TO_CNY_MICRO,
+            multiplier_percent: 150,
+        };
 
         let base = compute_cost(RATE, &price, 4, "1280x720").unwrap();
         assert_eq!(

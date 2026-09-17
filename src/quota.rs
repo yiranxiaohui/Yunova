@@ -13,6 +13,12 @@
 //!   * `usd_to_cny_rate_micro` — exchange rate in micro-CNY per 1 USD
 //!   * `price_multiplier_percent` — markup applied to every model (100 = 1.0x)
 //!
+//! The rate defaults to **parity**: ¥1 of quota buys $1 of upstream spend.
+//! That is not a currency conversion — it mirrors how the relay gateways this
+//! site resells from sell their own quota (1 yuan per USD of list price), so
+//! an untouched install charges what the operator actually pays. Charging the
+//! real FX rate would bill every model several times its cost.
+//!
 //! Chat is billed **after** the response, from the upstream's reported token
 //! usage (see [`crate::usage`]). Image and video keep per-call / per-second
 //! pricing because those APIs report no tokens.
@@ -43,8 +49,9 @@ pub const MICRO_QUOTA: i64 = 1_000_000;
 /// Divisor for per-token rates, which are configured per 1M tokens.
 pub const TOKENS_PER_PRICE_UNIT: i64 = 1_000_000;
 
-/// Default USD→CNY rate, in micro-CNY per USD (7.2 CNY per USD).
-pub const DEFAULT_USD_TO_CNY_MICRO: i64 = 7_200_000;
+/// Default USD→quota rate, in micro-CNY per USD: parity, ¥1 per $1 of
+/// upstream spend. Deliberately not the FX rate — see the module docs.
+pub const DEFAULT_USD_TO_CNY_MICRO: i64 = MICRO_QUOTA;
 
 /// Signup and invite grants, in micro-quota. 1 quota = 1 CNY.
 pub const DEFAULT_SIGNUP_GRANT: i64 = 1 * MICRO_QUOTA;
@@ -1142,18 +1149,28 @@ pub fn admin_routes() -> Router<AppState> {
 mod pricing_tests {
     use super::*;
 
-    /// $1 of upstream spend costs ¥7.2, with no markup.
+    /// The shipped default: $1 of upstream spend costs ¥1, with no markup.
     const RATE: QuotaRate =
-        QuotaRate { usd_to_cny_micro: 7_200_000, multiplier_percent: 100 };
+        QuotaRate { usd_to_cny_micro: DEFAULT_USD_TO_CNY_MICRO, multiplier_percent: 100 };
 
     /// Micro-quota for a whole number of yuan, for readable expectations.
     fn yuan(n: f64) -> i64 {
         (n * MICRO_QUOTA as f64).round() as i64
     }
 
+    /// Regression: the default rate must be parity, not an FX rate. The
+    /// upstream gateways this site resells from sell quota at 1 yuan per USD
+    /// of list price, so anything above 1.0 silently bills a multiple of what
+    /// the operator paid.
+    #[test]
+    fn the_default_rate_sells_upstream_dollars_at_parity() {
+        assert_eq!(DEFAULT_USD_TO_CNY_MICRO, MICRO_QUOTA);
+        assert_eq!(RATE.micro_quota_for_micro_usd(MICRO_USD), MICRO_QUOTA);
+    }
+
     #[test]
     fn upstream_dollars_convert_to_yuan_at_the_configured_rate() {
-        // 1M input tokens of a $1.25/1M model = $1.25 = ¥9.00.
+        // 1M input tokens of a $1.25/1M model = $1.25 = ¥1.25.
         let cost = chat_quota_cost(
             RATE,
             1_250_000,
@@ -1161,9 +1178,9 @@ mod pricing_tests {
             None,
             TokenUsage { input: 1_000_000, output: 0, cached_input: 0 },
         );
-        assert_eq!(cost, yuan(9.0));
+        assert_eq!(cost, yuan(1.25));
 
-        // 1M output tokens at $10/1M = $10 = ¥72.
+        // 1M output tokens at $10/1M = $10 = ¥10.
         let cost = chat_quota_cost(
             RATE,
             1_250_000,
@@ -1171,14 +1188,26 @@ mod pricing_tests {
             None,
             TokenUsage { input: 0, output: 1_000_000, cached_input: 0 },
         );
-        assert_eq!(cost, yuan(72.0));
+        assert_eq!(cost, yuan(10.0));
+
+        // A non-parity rate is still honoured for an operator who wants a
+        // margin expressed as an exchange rate rather than a markup.
+        let dearer = QuotaRate { usd_to_cny_micro: 7_200_000, multiplier_percent: 100 };
+        let cost = chat_quota_cost(
+            dearer,
+            1_250_000,
+            0,
+            None,
+            TokenUsage { input: 1_000_000, output: 0, cached_input: 0 },
+        );
+        assert_eq!(cost, yuan(9.0));
     }
 
     /// A realistic single request costs a fraction of a fen. Storing quota in
     /// micro-units is what keeps that from rounding away to nothing.
     #[test]
     fn a_typical_request_keeps_its_sub_fen_cost() {
-        // 1000 in + 500 out on $1.25/$10 = $0.00625 = ¥0.045.
+        // 1000 in + 500 out on $1.25/$10 = $0.00625 = ¥0.00625.
         let cost = chat_quota_cost(
             RATE,
             1_250_000,
@@ -1186,8 +1215,8 @@ mod pricing_tests {
             None,
             TokenUsage { input: 1_000, output: 500, cached_input: 0 },
         );
-        assert_eq!(cost, 45_000);
-        assert_eq!(format_quota(cost), "0.045");
+        assert_eq!(cost, 6_250);
+        assert_eq!(format_quota(cost), "0.00625");
     }
 
     #[test]
@@ -1195,8 +1224,8 @@ mod pricing_tests {
         // 1M input of which 900k cached, cached rate is 1/10th of input.
         let usage = TokenUsage { input: 1_000_000, output: 0, cached_input: 900_000 };
         let cost = chat_quota_cost(RATE, 1_250_000, 10_000_000, Some(125_000), usage);
-        // 100k * $1.25 + 900k * $0.125 per 1M = $0.2375 = ¥1.71
-        assert_eq!(cost, yuan(1.71));
+        // 100k * $1.25 + 900k * $0.125 per 1M = $0.2375 = ¥0.2375
+        assert_eq!(cost, yuan(0.2375));
     }
 
     #[test]
@@ -1215,7 +1244,8 @@ mod pricing_tests {
 
     #[test]
     fn the_global_multiplier_marks_every_model_up() {
-        let doubled = QuotaRate { usd_to_cny_micro: 7_200_000, multiplier_percent: 200 };
+        let doubled =
+            QuotaRate { usd_to_cny_micro: DEFAULT_USD_TO_CNY_MICRO, multiplier_percent: 200 };
         let usage = TokenUsage { input: 1_000_000, output: 0, cached_input: 0 };
         assert_eq!(
             chat_quota_cost(doubled, 1_250_000, 0, None, usage),

@@ -110,6 +110,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (44, include_str!("../migrations/sqlite/0044_drop_workers.sql")),
     (45, include_str!("../migrations/sqlite/0045_agent_token_expiry.sql")),
     (46, include_str!("../migrations/sqlite/0046_device_fingerprint.sql")),
+    (47, include_str!("../migrations/sqlite/0047_usd_parity_rate.sql")),
 ];
 static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/mysql/0001_init.sql")),
@@ -155,6 +156,7 @@ static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
     (44, include_str!("../migrations/mysql/0044_drop_workers.sql")),
     (45, include_str!("../migrations/mysql/0045_agent_token_expiry.sql")),
     (46, include_str!("../migrations/mysql/0046_device_fingerprint.sql")),
+    (47, include_str!("../migrations/mysql/0047_usd_parity_rate.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -200,6 +202,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (44, include_str!("../migrations/postgres/0044_drop_workers.sql")),
     (45, include_str!("../migrations/postgres/0045_agent_token_expiry.sql")),
     (46, include_str!("../migrations/postgres/0046_device_fingerprint.sql")),
+    (47, include_str!("../migrations/postgres/0047_usd_parity_rate.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -486,7 +489,8 @@ mod tests {
         assert_eq!(delta, -500_000);
 
         // The two old knobs collapse into one exchange rate:
-        // 500000 points/USD ÷ 50000 points/yuan = 10 CNY per USD.
+        // 500000 points/USD ÷ 50000 points/yuan = 10 CNY per USD. (Migration
+        // 47 does not re-run here, so this is migration 40's output verbatim.)
         let (rate,): (String,) =
             sqlx::query_as("SELECT v FROM app_settings WHERE k = 'usd_to_cny_rate_micro'")
                 .fetch_one(&pool).await.unwrap();
@@ -504,6 +508,50 @@ mod tests {
         )
         .fetch_one(&pool).await.unwrap();
         assert_eq!(leftover, 0);
+
+        pool.close().await;
+    }
+
+    /// Migration 40 derived a 10 CNY-per-USD rate from the obsolete default
+    /// point scale, which billed every model ten times its upstream cost.
+    /// Migration 47 corrects that to parity, because the gateways this site
+    /// resells from price their own quota at 1 yuan per USD of list price.
+    #[tokio::test]
+    async fn usd_parity_migration_fixes_the_tenfold_default_rate() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        // A fresh install must bill at parity out of the box.
+        let (rate,): (String,) =
+            sqlx::query_as("SELECT v FROM app_settings WHERE k = 'usd_to_cny_rate_micro'")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(rate, "1000000", "¥1 of quota buys $1 of upstream spend");
+
+        // An operator who tuned the rate by hand keeps it: the correction only
+        // replaces the value migration 40 wrote by default.
+        pool.execute("DELETE FROM _migrations WHERE id = 47").await.unwrap();
+        pool.execute("UPDATE app_settings SET v = '7200000' WHERE k = 'usd_to_cny_rate_micro'")
+            .await.unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+        let (kept,): (String,) =
+            sqlx::query_as("SELECT v FROM app_settings WHERE k = 'usd_to_cny_rate_micro'")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(kept, "7200000", "a deliberate rate is a business decision");
+
+        // The 10x default, wherever it survived, is the one value rewritten.
+        pool.execute("DELETE FROM _migrations WHERE id = 47").await.unwrap();
+        pool.execute("UPDATE app_settings SET v = '10000000' WHERE k = 'usd_to_cny_rate_micro'")
+            .await.unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+        let (fixed,): (String,) =
+            sqlx::query_as("SELECT v FROM app_settings WHERE k = 'usd_to_cny_rate_micro'")
+                .fetch_one(&pool).await.unwrap();
+        assert_eq!(fixed, "1000000");
 
         pool.close().await;
     }
