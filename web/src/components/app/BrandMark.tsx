@@ -17,7 +17,7 @@ export function BrandMark({
       <div className="relative shrink-0">
         <div className="absolute inset-1 rounded-xl bg-primary/40 blur-md" />
         <img
-          src="/logo.png"
+          src="/logo.svg"
           alt="Yunova"
           className={cn(
             "relative rounded-xl ring-1 ring-white/15 shadow-panel",

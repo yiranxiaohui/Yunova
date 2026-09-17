@@ -524,7 +524,7 @@ export default function AgentTaskPage() {
                 <div className="relative">
                   <div className="absolute inset-2 rounded-3xl bg-primary/30 blur-2xl" />
                   <img
-                    src="/logo.png"
+                    src="/logo.svg"
                     alt=""
                     className="relative size-14 rounded-[1.15rem] ring-1 ring-white/15 shadow-panel md:size-16"
                   />

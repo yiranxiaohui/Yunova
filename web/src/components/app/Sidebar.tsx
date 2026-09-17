@@ -387,7 +387,7 @@ export function Sidebar({
       >
         {collapsed ? (
           <img
-            src="/logo.png"
+            src="/logo.svg"
             alt="Yunova"
             title="Yunova"
             className="size-7 rounded-lg ring-1 ring-white/15"

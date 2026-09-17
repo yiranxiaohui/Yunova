@@ -122,7 +122,7 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
           <div className="relative">
             <div className="absolute inset-2 rounded-3xl bg-primary/25 blur-2xl" />
             <img
-              src="/logo.png"
+              src="/logo.svg"
               alt=""
               className="relative size-16 rounded-[1.35rem] ring-1 ring-white/15 shadow-panel"
             />
