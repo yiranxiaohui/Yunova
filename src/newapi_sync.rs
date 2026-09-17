@@ -157,8 +157,7 @@ fn ratio_to_micro_usd_per_1m(ratio: f64) -> i64 {
 /// mistake here cannot make something free, because an unmappable combination
 /// is skipped rather than imported at zero.
 pub fn looks_like_image(m: &NewApiModel) -> bool {
-    if m
-        .supported_endpoint_types
+    if m.supported_endpoint_types
         .iter()
         .any(|t| t.contains("image"))
     {
@@ -253,12 +252,22 @@ pub struct SyncRequest {
     /// admin can review exactly what a real run would store.
     #[serde(default)]
     pub dry_run: bool,
+    /// Refresh only models that already exist in `model_pricing` and ignore
+    /// everything else the upstream lists. A gateway advertises hundreds of
+    /// models while an operator sells a hand-picked dozen; once that list is
+    /// curated, a resync should re-price exactly those rows and not drag the
+    /// whole catalog back in. Implies `overwrite_existing`, because updating
+    /// the price *is* the point of this mode.
+    #[serde(default)]
+    pub existing_only: bool,
     /// Import models already present in `model_pricing`. Off by default so a
     /// resync cannot silently overwrite a hand-tuned price.
     #[serde(default)]
     pub overwrite_existing: bool,
     /// Import disabled-by-default instead of live. Off by default: a freshly
-    /// imported catalog should not start billing until it is reviewed.
+    /// imported catalog should not start billing until it is reviewed. Only
+    /// applies to newly created rows — an existing model keeps whatever
+    /// enabled state the admin gave it.
     #[serde(default)]
     pub enable_imported: bool,
 }
@@ -289,9 +298,15 @@ pub struct SyncResponse {
     pub imported: usize,
     pub updated: usize,
     pub skipped_existing: usize,
+    /// Upstream models ignored because they are not in `model_pricing` and
+    /// `existing_only` was set.
+    pub skipped_missing: usize,
     /// Models whose upstream billing mode has no Yunova equivalent. Reported
     /// rather than imported, because importing them would store a zero price.
     pub skipped_unsupported: usize,
+    /// Local models the upstream catalog never mentioned, so their price is
+    /// unchanged. The answer to "did my whole list get refreshed?".
+    pub not_listed: Vec<String>,
     pub models: Vec<SyncedModel>,
     /// Non-fatal problems, for example a model whose price could not be read.
     pub warnings: Vec<String>,
@@ -338,7 +353,12 @@ pub async fn admin_sync_pricing(
         .await
     {
         Ok(r) => r,
-        Err(_) => return err(StatusCode::BAD_GATEWAY, "无法连接到上游站点，请检查 Base URL"),
+        Err(_) => {
+            return err(
+                StatusCode::BAD_GATEWAY,
+                "无法连接到上游站点，请检查 Base URL",
+            );
+        }
     };
     if !resp.status().is_success() {
         let code = resp.status();
@@ -363,7 +383,10 @@ pub async fn admin_sync_pricing(
     if parsed.data.len() > MAX_MODELS {
         return err(
             StatusCode::BAD_GATEWAY,
-            format!("上游返回了 {} 个模型，超出上限 {MAX_MODELS}", parsed.data.len()),
+            format!(
+                "上游返回了 {} 个模型，超出上限 {MAX_MODELS}",
+                parsed.data.len()
+            ),
         );
     }
 
@@ -381,10 +404,21 @@ async fn apply_sync(
     req: &SyncRequest,
     models: Vec<NewApiModel>,
 ) -> Result<SyncResponse, sqlx::Error> {
-    let existing: std::collections::HashSet<String> = channels::list_pricing(pool, kind)
-        .await?
-        .into_iter()
-        .map(|p| p.model)
+    // Existing rows carry state the upstream knows nothing about — whether the
+    // model is enabled, its display name, context limit and channel bindings.
+    // A resync re-prices them, so keep the whole row rather than just the name.
+    let existing: std::collections::HashMap<String, channels::ModelPrice> =
+        channels::list_pricing(pool, kind)
+            .await?
+            .into_iter()
+            .map(|p| (p.model.clone(), p))
+            .collect();
+    // Only chat/image rows can be re-priced from a New API catalog; a video
+    // model has no counterpart upstream, so it is not "missing" from a sync.
+    let mut unseen: std::collections::BTreeSet<String> = existing
+        .values()
+        .filter(|p| p.kind == "chat" || p.kind == "image")
+        .map(|p| p.model.clone())
         .collect();
 
     let fetched = models.len();
@@ -394,7 +428,9 @@ async fn apply_sync(
         imported: 0,
         updated: 0,
         skipped_existing: 0,
+        skipped_missing: 0,
         skipped_unsupported: 0,
+        not_listed: Vec::new(),
         models: Vec::new(),
         warnings: Vec::new(),
     };
@@ -410,6 +446,21 @@ async fn apply_sync(
             }
         }
 
+        let current = existing.get(&name);
+        // Seen upstream, so it is not "unlisted" regardless of what happens
+        // next — an unmappable or mismatched model is reported by its own
+        // warning, not as a model the catalog forgot.
+        if current.is_some() {
+            unseen.remove(&name);
+        }
+        // "Only sync what I already added": an upstream model with no local row
+        // is not reported as skipped-unsupported or warned about, it is simply
+        // none of this sync's business.
+        if req.existing_only && current.is_none() {
+            out.skipped_missing += 1;
+            continue;
+        }
+
         let price = match derive_price(&m) {
             Ok(p) => p,
             Err(reason) => {
@@ -418,8 +469,24 @@ async fn apply_sync(
                 continue;
             }
         };
-        let existed = existing.contains(&name);
-        if existed && !req.overwrite_existing {
+        // A local row's kind decides how it is billed. Rewriting a chat row
+        // as an image row (or a per-second video row as either) would zero the
+        // columns its billing path reads and serve the model for free, so a
+        // kind change is reported instead of applied.
+        if let Some(p) = current.filter(|p| p.kind != price.kind.as_str()) {
+            out.skipped_unsupported += 1;
+            out.warnings.push(format!(
+                "{}：本地为 {} 模型，上游按 {} 计费，计费方式不一致，已保留原价",
+                p.model,
+                p.kind,
+                price.kind.as_str()
+            ));
+            continue;
+        }
+        let existed = current.is_some();
+        // `existing_only` exists to refresh prices, so it overwrites by
+        // definition; otherwise a known model is left alone unless asked.
+        if existed && !(req.overwrite_existing || req.existing_only) {
             out.skipped_existing += 1;
             out.models.push(SyncedModel {
                 model: name,
@@ -446,11 +513,21 @@ async fn apply_sync(
             let input = PricingInput {
                 model: name.clone(),
                 kind: price.kind.as_str().to_string(),
+                // Re-pricing must not silently unbind a configured model.
+                // `upsert_price` only replaces bindings when this is `Some`,
+                // so leaving it `None` keeps whatever the admin bound.
                 channel_ids: req.channel_ids.clone(),
-                display_name: None,
-                enabled: req.enable_imported,
-                protocol: req.protocol.clone(),
-                context_limit: None,
+                display_name: current.and_then(|p| p.display_name.clone()),
+                // An operator who disabled a model wants it to stay disabled
+                // after a price refresh; only new rows follow the checkbox.
+                enabled: match current {
+                    Some(p) => p.enabled,
+                    None => req.enable_imported,
+                },
+                protocol: current
+                    .map(|p| p.protocol.clone())
+                    .unwrap_or_else(|| req.protocol.clone()),
+                context_limit: current.and_then(|p| p.context_limit),
                 input_price: price.input_price,
                 output_price: price.output_price,
                 cached_input_price: price.cached_input_price,
@@ -481,6 +558,7 @@ async fn apply_sync(
     }
 
     out.models.sort_by(|a, b| a.model.cmp(&b.model));
+    out.not_listed = unseen.into_iter().collect();
     Ok(out)
 }
 
@@ -657,5 +735,255 @@ mod tests {
         let parsed: NewApiPricingResponse = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.data.len(), 1);
         assert_eq!(priced(&parsed.data[0]).input_price, 3_000_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // apply_sync over a real pool
+    // -----------------------------------------------------------------------
+
+    async fn pool() -> Pool {
+        use sqlx::any::AnyPoolOptions;
+        crate::db::install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool, DbKind::Sqlite).await.unwrap();
+        // The shipped catalog is seeded by migrations; start from an empty
+        // price list so each test states its own local models.
+        sqlx::query("DELETE FROM model_pricing")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool
+    }
+
+    fn request() -> SyncRequest {
+        SyncRequest {
+            base_url: "https://relay.example.com".into(),
+            protocol: default_protocol(),
+            channel_ids: None,
+            group: None,
+            dry_run: false,
+            existing_only: false,
+            overwrite_existing: false,
+            enable_imported: false,
+        }
+    }
+
+    async fn add_local(pool: &Pool, model: &str, kind: &str, enabled: bool, input: i64) {
+        channels::upsert_price(
+            pool,
+            DbKind::Sqlite,
+            &PricingInput {
+                model: model.into(),
+                kind: kind.into(),
+                channel_ids: None,
+                display_name: Some(format!("{model} 显示名")),
+                enabled,
+                protocol: "openai".into(),
+                context_limit: Some(128_000),
+                input_price: input,
+                output_price: input,
+                cached_input_price: None,
+                per_call_price: input,
+                base_price: 0,
+                per_second_price: 0,
+                allowed_seconds: None,
+                size_rules: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn price_of(pool: &Pool, model: &str) -> channels::ModelPrice {
+        channels::get_price(pool, DbKind::Sqlite, model)
+            .await
+            .unwrap()
+            .expect("model should exist locally")
+    }
+
+    /// The whole point of `existing_only`: a relay lists hundreds of models,
+    /// the operator sells three. A resync re-prices those three and must not
+    /// drag the rest of the catalog into `model_pricing`.
+    #[tokio::test]
+    async fn existing_only_refreshes_local_models_and_ignores_the_rest() {
+        let pool = pool().await;
+        add_local(&pool, "kept", "chat", true, 1).await;
+
+        let mut upstream = model("kept");
+        upstream.model_ratio = 3.0;
+        let req = SyncRequest {
+            existing_only: true,
+            ..request()
+        };
+        let out = apply_sync(
+            &pool,
+            DbKind::Sqlite,
+            &req,
+            vec![upstream, model("unwanted-a"), model("unwanted-b")],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.fetched, 3);
+        assert_eq!(out.updated, 1, "the local model is re-priced");
+        assert_eq!(out.imported, 0, "nothing new may be added");
+        assert_eq!(out.skipped_missing, 2);
+        assert!(out.warnings.is_empty(), "ignoring a model is not a problem");
+        assert_eq!(
+            out.models
+                .iter()
+                .map(|m| m.model.as_str())
+                .collect::<Vec<_>>(),
+            ["kept"],
+            "the report lists only what this mode touches"
+        );
+
+        assert_eq!(price_of(&pool, "kept").await.input_price, 6_000_000);
+        for ignored in ["unwanted-a", "unwanted-b"] {
+            assert!(
+                channels::get_price(&pool, DbKind::Sqlite, ignored)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{ignored} must not be created"
+            );
+        }
+    }
+
+    /// `existing_only` means "refresh my prices", so it must not need the
+    /// overwrite checkbox as well — and it must not resurrect a model the
+    /// operator deliberately disabled.
+    #[tokio::test]
+    async fn a_refresh_updates_prices_without_touching_admin_owned_state() {
+        let pool = pool().await;
+        add_local(&pool, "paused", "chat", false, 1).await;
+        let before = price_of(&pool, "paused").await;
+
+        let mut upstream = model("paused");
+        upstream.model_ratio = 0.15;
+        upstream.completion_ratio = 4.0;
+        let req = SyncRequest {
+            existing_only: true,
+            // Deliberately left false: the refresh mode implies it.
+            overwrite_existing: false,
+            enable_imported: true,
+            ..request()
+        };
+        let out = apply_sync(&pool, DbKind::Sqlite, &req, vec![upstream])
+            .await
+            .unwrap();
+        assert_eq!((out.updated, out.skipped_existing), (1, 0));
+
+        let after = price_of(&pool, "paused").await;
+        assert_eq!(
+            (after.input_price, after.output_price),
+            (300_000, 1_200_000)
+        );
+        assert!(!after.enabled, "a disabled model stays disabled");
+        assert_eq!(after.display_name, before.display_name);
+        assert_eq!(after.context_limit, before.context_limit);
+    }
+
+    /// A dry run reports the same decisions and writes nothing.
+    #[tokio::test]
+    async fn a_dry_run_of_a_refresh_writes_nothing() {
+        let pool = pool().await;
+        add_local(&pool, "kept", "chat", true, 1).await;
+
+        let mut upstream = model("kept");
+        upstream.model_ratio = 9.0;
+        let req = SyncRequest {
+            existing_only: true,
+            dry_run: true,
+            ..request()
+        };
+        let out = apply_sync(&pool, DbKind::Sqlite, &req, vec![upstream, model("other")])
+            .await
+            .unwrap();
+
+        assert_eq!((out.updated, out.skipped_missing), (1, 1));
+        assert_eq!(price_of(&pool, "kept").await.input_price, 1, "unchanged");
+    }
+
+    /// Without `existing_only` the previous behaviour is unchanged: the full
+    /// catalog is imported and known models are protected by the checkbox.
+    #[tokio::test]
+    async fn a_full_import_still_adds_new_models_and_skips_known_ones() {
+        let pool = pool().await;
+        add_local(&pool, "kept", "chat", true, 1).await;
+
+        let out = apply_sync(
+            &pool,
+            DbKind::Sqlite,
+            &request(),
+            vec![model("kept"), model("fresh")],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            (out.imported, out.skipped_existing, out.skipped_missing),
+            (1, 1, 0)
+        );
+        assert_eq!(price_of(&pool, "kept").await.input_price, 1, "protected");
+        let fresh = price_of(&pool, "fresh").await;
+        assert_eq!(fresh.input_price, 2_000_000);
+        assert!(!fresh.enabled, "new rows still land disabled");
+    }
+
+    /// Local models the catalog never mentioned are reported, because "my
+    /// list was refreshed" is only true if nothing silently went stale.
+    #[tokio::test]
+    async fn local_models_absent_from_the_catalog_are_reported_not_removed() {
+        let pool = pool().await;
+        add_local(&pool, "listed", "chat", true, 1).await;
+        add_local(&pool, "retired", "chat", true, 7).await;
+        add_local(&pool, "my-video", "video", true, 0).await;
+
+        let req = SyncRequest {
+            existing_only: true,
+            ..request()
+        };
+        let out = apply_sync(&pool, DbKind::Sqlite, &req, vec![model("listed")])
+            .await
+            .unwrap();
+
+        assert_eq!(out.not_listed, ["retired"], "video rows are not syncable");
+        assert_eq!(price_of(&pool, "retired").await.input_price, 7, "kept");
+    }
+
+    /// A name collision across billing kinds must not zero the columns the
+    /// local row is billed by.
+    #[tokio::test]
+    async fn a_kind_mismatch_keeps_the_local_price() {
+        let pool = pool().await;
+        add_local(&pool, "my-video", "video", true, 0).await;
+        add_local(&pool, "dall-e-3", "chat", true, 5).await;
+
+        let mut video_upstream = model("my-video");
+        video_upstream.model_ratio = 2.0;
+        let req = SyncRequest {
+            existing_only: true,
+            ..request()
+        };
+        // "dall-e-3" reads as an image model upstream but is a chat row here.
+        let out = apply_sync(
+            &pool,
+            DbKind::Sqlite,
+            &req,
+            vec![video_upstream, model("dall-e-3")],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!((out.updated, out.skipped_unsupported), (0, 2));
+        assert_eq!(out.warnings.len(), 2);
+        assert!(out.not_listed.is_empty(), "both were listed upstream");
+        assert_eq!(price_of(&pool, "dall-e-3").await.input_price, 5);
+        assert_eq!(price_of(&pool, "my-video").await.kind, "video");
     }
 }

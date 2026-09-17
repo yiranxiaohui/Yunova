@@ -131,9 +131,14 @@ export type NewApiSyncRequest = {
   group?: string
   /** 预演：返回将要写入的结果但不落库 */
   dry_run?: boolean
+  /**
+   * 只同步本地已添加的模型：上游目录里本站没有的模型直接忽略，不会新增。
+   * 该模式本身就是为了刷新价格，因此隐含 `overwrite_existing`。
+   */
+  existing_only?: boolean
   /** 覆盖已存在的模型价格；默认跳过，避免冲掉手工调整 */
   overwrite_existing?: boolean
-  /** 导入后直接启用；默认导入为停用，便于先复核再开放 */
+  /** 导入后直接启用；默认导入为停用，便于先复核再开放。只作用于新增的模型 */
   enable_imported?: boolean
 }
 
@@ -154,8 +159,12 @@ export type NewApiSyncResult = {
   imported: number
   updated: number
   skipped_existing: number
+  /** 上游有、本站未添加，因而被「只同步已添加」忽略的模型数 */
+  skipped_missing: number
   /** 上游计费方式与本站不兼容、已跳过的模型数（详见 warnings） */
   skipped_unsupported: number
+  /** 本地已添加但上游目录里没有的模型，价格保持不变 */
+  not_listed: string[]
   models: NewApiSyncedModel[]
   warnings: string[]
 }

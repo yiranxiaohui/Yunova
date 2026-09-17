@@ -28,6 +28,10 @@ import {
  *
  * 默认走「预演 → 复核 → 写入」三步：先 dry-run 看清会写什么，确认后再落库。
  * 导入的模型默认<b>停用</b>，避免一次拉进上百个模型后立刻开始计费。
+ *
+ * 中转站通常列出几百个模型，而站点只卖其中一小部分，因此默认只同步<b>本地已添加</b>
+ * 的模型：上游有、本地没有的直接忽略，已添加的按上游价重新计价。取消勾选才会把
+ * 整个目录拉进来。
  */
 export function NewApiImportDialog({
   open,
@@ -41,6 +45,7 @@ export function NewApiImportDialog({
   const [baseUrl, setBaseUrl] = useState("")
   const [group, setGroup] = useState("")
   const [channelId, setChannelId] = useState<number | null>(null)
+  const [existingOnly, setExistingOnly] = useState(true)
   const [overwrite, setOverwrite] = useState(false)
   const [enableImported, setEnableImported] = useState(false)
   const [channels, setChannels] = useState<Channel[]>([])
@@ -94,6 +99,7 @@ export function NewApiImportDialog({
         group: group.trim() || undefined,
         channel_ids: channelId != null ? [channelId] : undefined,
         dry_run: dryRun,
+        existing_only: existingOnly,
         overwrite_existing: overwrite,
         enable_imported: enableImported,
       })
@@ -131,7 +137,7 @@ export function NewApiImportDialog({
           </DialogTitle>
           <DialogDescription>
             读取上游站点的 <code>/api/pricing</code>，把倍率换算成官方美元价后写入模型计费。
-            导入的模型默认<b>停用</b>，复核后再启用。
+            默认<b>只刷新本地已添加的模型</b>，上游多出来的模型不会被拉进来。
           </DialogDescription>
         </DialogHeader>
 
@@ -189,11 +195,35 @@ export function NewApiImportDialog({
               </div>
             </div>
 
-            <label className="flex items-center gap-2 text-sm">
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-0.5 size-4 accent-primary"
+                checked={existingOnly}
+                onChange={(e) => {
+                  setExistingOnly(e.target.checked)
+                  reset()
+                }}
+              />
+              <span>
+                只同步本地已添加的模型（推荐）
+                <span className="block text-[11px] text-muted-foreground">
+                  上游有、本站未添加的模型直接忽略；已添加的按上游价重新计价，
+                  启用状态、显示名与渠道绑定保持不变。取消勾选会导入整个目录。
+                </span>
+              </span>
+            </label>
+            <label
+              className={
+                "flex items-center gap-2 text-sm " +
+                (existingOnly ? "opacity-45" : "")
+              }
+            >
               <input
                 type="checkbox"
                 className="size-4 accent-primary"
-                checked={overwrite}
+                checked={overwrite || existingOnly}
+                disabled={existingOnly}
                 onChange={(e) => {
                   setOverwrite(e.target.checked)
                   reset()
@@ -201,11 +231,17 @@ export function NewApiImportDialog({
               />
               覆盖已存在的模型价格（默认跳过，保护手工调整过的价格）
             </label>
-            <label className="flex items-center gap-2 text-sm">
+            <label
+              className={
+                "flex items-center gap-2 text-sm " +
+                (existingOnly ? "opacity-45" : "")
+              }
+            >
               <input
                 type="checkbox"
                 className="size-4 accent-primary"
                 checked={enableImported}
+                disabled={existingOnly}
                 onChange={(e) => {
                   setEnableImported(e.target.checked)
                   reset()
@@ -224,7 +260,11 @@ export function NewApiImportDialog({
               <div className="rounded-lg border border-border">
                 <div className="flex flex-wrap items-center gap-3 border-b border-border bg-muted/30 px-3 py-2 text-xs">
                   <span className="font-medium">
-                    {shown.dry_run ? "预演结果" : "导入完成"}
+                    {shown.dry_run
+                      ? "预演结果"
+                      : existingOnly
+                        ? "同步完成"
+                        : "导入完成"}
                   </span>
                   <span className="text-muted-foreground">
                     上游 {shown.fetched} 个
@@ -238,12 +278,29 @@ export function NewApiImportDialog({
                   <span className="text-muted-foreground">
                     跳过 {shown.skipped_existing}
                   </span>
+                  {shown.skipped_missing > 0 && (
+                    <span className="text-muted-foreground">
+                      未添加·忽略 {shown.skipped_missing}
+                    </span>
+                  )}
                   {shown.skipped_unsupported > 0 && (
                     <span className="text-amber-600 dark:text-amber-400">
                       不兼容 {shown.skipped_unsupported}
                     </span>
                   )}
                 </div>
+
+                {shown.not_listed.length > 0 && (
+                  <div className="border-b border-border bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+                    上游目录里没有以下已添加模型，价格保持不变：
+                    <span className="font-mono">
+                      {" "}
+                      {shown.not_listed.slice(0, 12).join("、")}
+                    </span>
+                    {shown.not_listed.length > 12 &&
+                      ` …另有 ${shown.not_listed.length - 12} 个`}
+                  </div>
+                )}
 
                 {shown.warnings.length > 0 && (
                   <div className="border-b border-border bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400">
@@ -262,6 +319,11 @@ export function NewApiImportDialog({
                 )}
 
                 <div className="nc-scroll max-h-56 overflow-y-auto">
+                  {shown.models.length === 0 ? (
+                    <p className="px-3 py-3 text-xs text-muted-foreground">
+                      上游目录与本地已添加的模型没有任何交集，没有需要同步的价格。
+                    </p>
+                  ) : (
                   <table className="w-full text-xs">
                     <thead className="sticky top-0 bg-muted/50 text-muted-foreground">
                       <tr>
@@ -305,6 +367,7 @@ export function NewApiImportDialog({
                       ))}
                     </tbody>
                   </table>
+                  )}
                 </div>
               </div>
             )}
@@ -326,7 +389,8 @@ export function NewApiImportDialog({
             onClick={() => void run(false)}
             disabled={busy || !baseUrl.trim()}
           >
-            {busy && <LoaderCircle className="animate-spin" />} 导入
+            {busy && <LoaderCircle className="animate-spin" />}{" "}
+            {existingOnly ? "同步" : "导入"}
           </Button>
         </DialogFooter>
       </DialogContent>

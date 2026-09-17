@@ -89,6 +89,13 @@ POST /api/proxy/openai {model:"gpt-5",...}
   `缓存 = 输入 × cache_ratio`；`quota_type=1` 时改用 `model_price`（已是美元）。
   换算后统一落成微美元，和手工录入的价格完全等价。
   配合默认的 1:1 汇率，导入完就是「上游列表价多少美元，本站扣多少元」。
+- **默认只同步本地已添加的模型**（`existing_only`）：中转站动辅几百个模型，站点只卖其中一小部分。
+  筛好一次后，重新同步应该只给这些模型刷价，上游有、本地没有的直接忽略（计入 `skipped_missing`）。
+  该模式隐含覆盖（刷价就是目的），但**只改价格**：启用状态、显示名、上下文上限、
+  协议与渠道绑定全部保留，因此被管理员停用的模型不会被一次同步重新激活。
+  本地有、上游目录里没有的模型以 `not_listed` 回报（价格保留不动），避免「以为全部刷新了」。
+- **计费方式不一致的同名模型不会被改写**：本地 `chat` / `image` / `video` 各自读不同价格列，
+  若改写成其他 kind 会把原有列清零而变成免费，因此只告警、不写库。
 - **不兼容的计费方式会被跳过而不是按 0 导入**：上游「按次计费的对话模型」和
   「按 token 计费的图像模型」在本站没有对应计费模式，若强行导入会变成免费，
   因此只报告原因、不写库，由管理员手动定价。
@@ -98,7 +105,7 @@ POST /api/proxy/openai {model:"gpt-5",...}
 - 可按 NewAPI 分组过滤，并一次性绑定到指定渠道。
 
 接口：`POST /api/admin/pricing/sync-newapi`
-`{base_url, group?, channel_ids?, dry_run?, overwrite_existing?, enable_imported?}`。
+`{base_url, group?, channel_ids?, dry_run?, existing_only?, overwrite_existing?, enable_imported?}`。
 管理员提供的 URL 会走 SSRF 防护，无法用于探测内网。唯一的例外是 fake-ip 段
 `198.18.0.0/15`：主机经透明代理（mihomo / sing-box / Clash 的 fake-ip 模式）解析时，
 所有公网域名都会拿到该段里的合成地址，真实目标由隧道在连接时解析，因此把它当私网
