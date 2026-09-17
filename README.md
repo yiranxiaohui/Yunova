@@ -439,7 +439,9 @@ Release 的资产列表，读不到（无出网、限流、内网部署）就退
 
 构建桌面端需要系统 WebView。macOS 与 Windows 自带（WebKit / WebView2）；
 Linux 上需要 `libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`librsvg2-dev`、`patchelf`、
-`libayatana-appindicator3-dev`、`libsoup-3.0-dev`、`libxdo-dev`。
+`libayatana-appindicator3-dev`、`libsoup-3.0-dev`、`libxdo-dev`；打 `.deb`/`.AppImage`
+还需要 `xdg-utils`（Tauri 的 Linux 打包器要找 `/usr/bin/xdg-open`，缺了会在
+**打包阶段**失败，而不是编译阶段）。
 打包用 `cd desktop && cargo tauri build`。
 
 安全模型与云电脑**有本质区别**，协议设计也因此不同：沙箱是一次性且隔离的，
