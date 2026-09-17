@@ -488,8 +488,8 @@ pub async fn reset_running_sessions(pool: &Pool, kind: DbKind) {
         kind,
         &format!(
             "UPDATE agent_tokens SET revoked = {} WHERE name LIKE 'session-%' AND revoked = {}",
-            db::bool_true(kind),
-            db::bool_false(kind),
+            "1",
+            "0",
         ),
     );
     match sqlx::query(&revoke).execute(pool).await {

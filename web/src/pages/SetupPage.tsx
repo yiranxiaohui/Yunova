@@ -8,7 +8,7 @@ import { setupApi, type ConnectionForm } from "@/lib/setup"
 import { BrandMark } from "@/components/app/BrandMark"
 import { cn } from "@/lib/utils"
 
-type Kind = "sqlite" | "mysql" | "postgres"
+type Kind = "sqlite" | "postgres"
 
 const KIND_META: Record<Kind, { label: string; badge: string; port: number; placeholder: string; note: string }> = {
   sqlite: {
@@ -17,13 +17,6 @@ const KIND_META: Record<Kind, { label: string; badge: string; port: number; plac
     port: 0,
     placeholder: "yunova.db",
     note: "最简单。单文件、本机即跑，适合个人或小团队。",
-  },
-  mysql: {
-    label: "MySQL",
-    badge: "生产",
-    port: 3306,
-    placeholder: "yunova",
-    note: "已有 MySQL 的环境选这个。",
   },
   postgres: {
     label: "PostgreSQL",
@@ -40,7 +33,7 @@ export default function SetupPage() {
   const [kind, setKind] = useState<Kind>("sqlite")
   const [sqlitePath, setSqlitePath] = useState("yunova.db")
   const [host, setHost] = useState("localhost")
-  const [port, setPort] = useState<number>(3306)
+  const [port, setPort] = useState<number>(5432)
   const [dbUser, setDbUser] = useState("")
   const [dbPass, setDbPass] = useState("")
   const [database, setDatabase] = useState("")
@@ -62,7 +55,6 @@ export default function SetupPage() {
 
   useEffect(() => {
     setTestOk(false)
-    if (kind === "mysql") setPort(3306)
     if (kind === "postgres") setPort(5432)
   }, [kind])
 
@@ -71,7 +63,7 @@ export default function SetupPage() {
       return { kind: "sqlite", sqlite_path: sqlitePath.trim() || "yunova.db" }
     }
     return {
-      kind,
+      kind: "postgres",
       host: host.trim(),
       port,
       user: dbUser,
@@ -131,10 +123,10 @@ export default function SetupPage() {
           <div className="rounded-2xl border border-border bg-card p-4 shadow-panel sm:p-6">
             <h2 className="text-lg font-semibold">选择数据库</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              三者都可以随时切换，数据不会跟着走。生产环境推荐 PostgreSQL。
+              两者都可以随时切换，数据不会跟着走。生产环境推荐 PostgreSQL。
             </p>
 
-            <div className="mt-4 grid gap-2 sm:grid-cols-3">
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
               {(Object.keys(KIND_META) as Kind[]).map((k) => {
                 const m = KIND_META[k]
                 const active = kind === k

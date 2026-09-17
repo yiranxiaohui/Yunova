@@ -160,12 +160,9 @@ async fn count_user_public_skills(
     kind: DbKind,
     user_id: i64,
 ) -> Result<i64, Response> {
-    let public_true = db::bool_true(kind);
     let sql = db::q(
         kind,
-        &format!(
-            "SELECT COUNT(*) FROM skills WHERE user_id = ? AND is_public = {public_true}"
-        ),
+        "SELECT COUNT(*) FROM skills WHERE user_id = ? AND is_public = 1",
     );
     let (n,): (i64,) = sqlx::query_as(&sql)
         .bind(user_id)
@@ -192,13 +189,10 @@ async fn list_skills(
     Extension(installed): Extension<InstalledState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
-    let pub_col = db::bool_as_int(installed.kind, "is_public");
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT id, name, description, instructions, {pub_col}, created_at, updated_at
-             FROM skills WHERE user_id = ? ORDER BY updated_at DESC"
-        ),
+        "SELECT id, name, description, instructions, is_public, created_at, updated_at
+             FROM skills WHERE user_id = ? ORDER BY updated_at DESC",
     );
     let rows: Result<Vec<Skill>, _> = sqlx::query_as(&sql)
         .bind(user.id)
@@ -230,49 +224,20 @@ async fn insert_skill(
         kind,
         "INSERT INTO skills (user_id, name, description, instructions) VALUES (?, ?, ?, ?)",
     );
-    let id = match kind {
-        DbKind::Sqlite | DbKind::Postgres => {
-            let row: (i64,) = sqlx::query_as(&format!("{base_insert} RETURNING id"))
-                .bind(user_id)
-                .bind(name)
-                .bind(description)
-                .bind(instructions)
-                .fetch_one(pool)
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            row.0
-        }
-        DbKind::Mysql => {
-            let mut tx = pool
-                .begin()
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            sqlx::query(&base_insert)
-                .bind(user_id)
-                .bind(name)
-                .bind(description)
-                .bind(instructions)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let (id,): (i64,) = sqlx::query_as("SELECT LAST_INSERT_ID()")
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            tx.commit()
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            id
-        }
-    };
+    let row: (i64,) = sqlx::query_as(&format!("{base_insert} RETURNING id"))
+        .bind(user_id)
+        .bind(name)
+        .bind(description)
+        .bind(instructions)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let id = row.0;
 
-    let pub_col = db::bool_as_int(kind, "is_public");
     let sel = db::q(
         kind,
-        &format!(
-            "SELECT id, name, description, instructions, {pub_col}, created_at, updated_at
-             FROM skills WHERE id = ?"
-        ),
+        "SELECT id, name, description, instructions, is_public, created_at, updated_at
+         FROM skills WHERE id = ?",
     );
     sqlx::query_as::<_, Skill>(&sel)
         .bind(id)
@@ -326,7 +291,6 @@ async fn list_public(
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
-    let public_true = db::bool_true(installed.kind);
     let order_by = match q.sort.as_deref() {
         Some("new") => "s.created_at DESC, s.id DESC",
         _ => "s.clone_count DESC, s.created_at DESC, s.id DESC",
@@ -340,7 +304,7 @@ async fn list_public(
                 "SELECT s.id, s.name, s.description, s.instructions,
                         u.username AS author_username, s.created_at, s.clone_count
                  FROM skills s JOIN users u ON u.id = s.user_id
-                 WHERE s.is_public = {public_true}
+                 WHERE s.is_public = 1
                    AND (s.name LIKE ? OR s.description LIKE ? OR s.instructions LIKE ?)
                  ORDER BY {order_by}
                  LIMIT ? OFFSET ?"
@@ -361,7 +325,7 @@ async fn list_public(
                 "SELECT s.id, s.name, s.description, s.instructions,
                         u.username AS author_username, s.created_at, s.clone_count
                  FROM skills s JOIN users u ON u.id = s.user_id
-                 WHERE s.is_public = {public_true}
+                 WHERE s.is_public = 1
                  ORDER BY {order_by}
                  LIMIT ? OFFSET ?"
             ),
@@ -383,13 +347,10 @@ async fn clone_public(
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<i64>,
 ) -> Response {
-    let public_true = db::bool_true(installed.kind);
     let sel = db::q(
         installed.kind,
-        &format!(
-            "SELECT name, description, instructions, user_id
-             FROM skills WHERE id = ? AND is_public = {public_true}"
-        ),
+        "SELECT name, description, instructions, user_id
+             FROM skills WHERE id = ? AND is_public = 1",
     );
     let row: Option<(String, String, String, i64)> = match sqlx::query_as(&sel)
         .bind(id)
@@ -456,10 +417,9 @@ async fn update_skill(
     }
 
     if let Some(true) = body.is_public {
-        let pub_col = db::bool_as_int(installed.kind, "is_public");
         let sel = db::q(
             installed.kind,
-            &format!("SELECT {pub_col} FROM skills WHERE id = ? AND user_id = ?"),
+            "SELECT is_public FROM skills WHERE id = ? AND user_id = ?",
         );
         let current_is_public: Option<(i64,)> = sqlx::query_as(&sel)
             .bind(id)
@@ -541,16 +501,13 @@ async fn list_conversation_skills(
     if let Err(r) = conversation_belongs(&installed.pool, installed.kind, conv_id, user.id).await {
         return r;
     }
-    let pub_col = db::bool_as_int(installed.kind, "s.is_public");
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT s.id, s.name, s.description, s.instructions, {pub_col}, s.created_at, s.updated_at
+        "SELECT s.id, s.name, s.description, s.instructions, s.is_public, s.created_at, s.updated_at
              FROM conversation_skills cs
              JOIN skills s ON s.id = cs.skill_id
              WHERE cs.conversation_id = ? AND s.user_id = ?
-             ORDER BY cs.created_at ASC, s.id ASC"
-        ),
+             ORDER BY cs.created_at ASC, s.id ASC",
     );
     let rows: Result<Vec<Skill>, _> = sqlx::query_as(&sql)
         .bind(conv_id)

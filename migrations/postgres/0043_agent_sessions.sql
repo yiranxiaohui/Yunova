@@ -18,9 +18,9 @@ CREATE TABLE agent_devices (
     name          TEXT NOT NULL,
     token_hash    TEXT NOT NULL UNIQUE,
     platform      TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_seen_at  TIMESTAMPTZ,
-    revoked       BOOLEAN NOT NULL DEFAULT FALSE
+    created_at    TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    last_seen_at  TEXT,
+    revoked       INT NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_agent_devices_user ON agent_devices(user_id, id DESC);
 
@@ -43,8 +43,8 @@ CREATE TABLE agent_sessions (
     -- cursor for incremental sync, so a reconnect never refetches or
     -- duplicates history.
     cursor      TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at  TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    updated_at  TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 CREATE INDEX idx_agent_sessions_user_updated
     ON agent_sessions(user_id, updated_at DESC);
@@ -62,7 +62,7 @@ CREATE TABLE agent_entries (
     parent_id   TEXT,
     kind        TEXT NOT NULL,
     payload     TEXT NOT NULL,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at  TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
     UNIQUE (session_id, entry_id)
 );
 CREATE INDEX idx_agent_entries_session ON agent_entries(session_id, id);

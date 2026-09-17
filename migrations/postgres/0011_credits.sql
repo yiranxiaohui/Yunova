@@ -1,7 +1,7 @@
 CREATE TABLE app_settings (
     k          TEXT PRIMARY KEY,
     v          TEXT NOT NULL,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 
 INSERT INTO app_settings (k, v) VALUES ('shared_enabled', 'false');
@@ -13,7 +13,7 @@ CREATE TABLE user_credits (
     user_id       BIGINT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     balance       BIGINT NOT NULL DEFAULT 0,
     lifetime_used BIGINT NOT NULL DEFAULT 0,
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at    TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 
 CREATE TABLE credit_ledger (
@@ -21,6 +21,6 @@ CREATE TABLE credit_ledger (
     user_id    BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     delta      BIGINT NOT NULL,
     reason     TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 CREATE INDEX idx_credit_ledger_user ON credit_ledger(user_id, created_at DESC);

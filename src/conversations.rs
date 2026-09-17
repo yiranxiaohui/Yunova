@@ -133,45 +133,15 @@ async fn create_conversation(
         "INSERT INTO conversations (user_id, title, system_prompt) VALUES (?, ?, ?)",
     );
 
-    let id = match installed.kind {
-        DbKind::Sqlite | DbKind::Postgres => {
-            let row: Result<(i64,), _> = sqlx::query_as(&format!("{base_insert} RETURNING id"))
-                .bind(user.id)
-                .bind(&title)
-                .bind(&system_prompt)
-                .fetch_one(&installed.pool)
-                .await;
-            match row {
-                Ok((v,)) => v,
-                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            }
-        }
-        DbKind::Mysql => {
-            let mut tx = match installed.pool.begin().await {
-                Ok(t) => t,
-                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            };
-            if let Err(e) = sqlx::query(&base_insert)
-                .bind(user.id)
-                .bind(&title)
-                .bind(&system_prompt)
-                .execute(&mut *tx)
-                .await
-            {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
-            }
-            let row: Result<(i64,), _> = sqlx::query_as("SELECT LAST_INSERT_ID()")
-                .fetch_one(&mut *tx)
-                .await;
-            let id = match row {
-                Ok((v,)) => v,
-                Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            };
-            if let Err(e) = tx.commit().await {
-                return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
-            }
-            id
-        }
+    let row: Result<(i64,), _> = sqlx::query_as(&format!("{base_insert} RETURNING id"))
+        .bind(user.id)
+        .bind(&title)
+        .bind(&system_prompt)
+        .fetch_one(&installed.pool)
+        .await;
+    let id = match row {
+        Ok((v,)) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     };
 
     let select_sql = db::q(

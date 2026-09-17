@@ -1,12 +1,11 @@
 # Yunova — default stack: just the app with a persistent data volume.
 #
-#   docker compose up -d                 # SQLite (walk the /setup wizard)
-#   docker compose --profile mysql up -d # Yunova + MySQL
-#   docker compose --profile postgres up -d
+#   docker compose up -d                    # SQLite (walk the /setup wizard)
+#   docker compose --profile postgres up -d  # Yunova + PostgreSQL
 #
-# When using the mysql/postgres profiles the app is preconfigured via
-# YUNOVA_DATABASE_URL so the install wizard skips the DB step; you still
-# create the admin user from /setup on first visit.
+# With the postgres profile the app is preconfigured via YUNOVA_DATABASE_URL so
+# the install wizard skips the DB step; you still create the admin user from
+# /setup on first visit.
 
 services:
   yunova:
@@ -36,9 +35,7 @@ services:
       # reaches the host, where nothing listens on the internal port.
       YUNOVA_SANDBOX_GATEWAY_CONTAINER: yunova
       # Configure S3-compatible media storage in 管理后台 → 媒体存储.
-      # Uncomment for MySQL profile:
-      # YUNOVA_DATABASE_URL: mysql://yunova:yunova@mysql:3306/yunova
-      # Uncomment for Postgres profile:
+      # Uncomment for the Postgres profile:
       # YUNOVA_DATABASE_URL: postgres://yunova:yunova@postgres:5432/yunova
     healthcheck:
       test: ["CMD", "bash", "-c", ":>/dev/tcp/127.0.0.1/3000"]
@@ -46,25 +43,6 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  mysql:
-    profiles: ["mysql"]
-    image: mysql:8
-    container_name: yunova-mysql
-    restart: unless-stopped
-    environment:
-      MYSQL_ROOT_PASSWORD: rootpw
-      MYSQL_DATABASE: yunova
-      MYSQL_USER: yunova
-      MYSQL_PASSWORD: yunova
-    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
-    volumes:
-      - ${YUNOVA_MYSQL_DATA_PATH:-./yunova_mysql}:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-prootpw"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
 
   postgres:
     profiles: ["postgres"]

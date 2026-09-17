@@ -54,8 +54,8 @@ pub const TOKENS_PER_PRICE_UNIT: i64 = 1_000_000;
 pub const DEFAULT_USD_TO_CNY_MICRO: i64 = MICRO_QUOTA;
 
 /// Signup and invite grants, in micro-quota. 1 quota = 1 CNY.
-pub const DEFAULT_SIGNUP_GRANT: i64 = 1 * MICRO_QUOTA;
-pub const DEFAULT_INVITE_GRANT: i64 = 1 * MICRO_QUOTA;
+pub const DEFAULT_SIGNUP_GRANT: i64 = MICRO_QUOTA;
+pub const DEFAULT_INVITE_GRANT: i64 = MICRO_QUOTA;
 
 // ---------------------------------------------------------------------------
 // app-wide settings (KV)
@@ -94,23 +94,13 @@ pub async fn set_setting(
     val: &str,
 ) -> Result<(), sqlx::Error> {
     let now = db::now_expr(kind);
-    let sql = match kind {
-        DbKind::Sqlite => {
-            format!(
-                "INSERT INTO app_settings (k, v, updated_at) VALUES (?, ?, {now})
-                 ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = {now}"
-            )
-        }
-        DbKind::Postgres => format!(
+    let sql = db::q(
+        kind,
+        &format!(
             "INSERT INTO app_settings (k, v, updated_at) VALUES (?, ?, {now})
-             ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = {now}"
+             ON CONFLICT (k) DO UPDATE SET v = excluded.v, updated_at = {now}"
         ),
-        DbKind::Mysql => format!(
-            "INSERT INTO app_settings (`k`, `v`, updated_at) VALUES (?, ?, {now})
-             ON DUPLICATE KEY UPDATE `v` = VALUES(`v`), updated_at = {now}"
-        ),
-    };
-    let sql = db::q(kind, &sql);
+    );
     sqlx::query(&sql)
         .bind(key)
         .bind(val)
@@ -733,12 +723,12 @@ async fn build_stats(
         kind,
         &format!(
             "SELECT
-               COALESCE(SUM(CASE WHEN delta < 0 AND kind IN {SPEND_KINDS} THEN -delta ELSE 0 END), 0),
-               COALESCE(SUM(CASE WHEN delta > 0 AND kind IN {SPEND_KINDS} THEN delta ELSE 0 END), 0),
-               COALESCE(SUM(CASE WHEN delta > 0 AND kind = 'grant' THEN delta ELSE 0 END), 0),
-               COALESCE(SUM(CASE WHEN delta > 0 AND kind = 'recharge' THEN delta ELSE 0 END), 0),
-               COALESCE(SUM(input_tokens), 0),
-               COALESCE(SUM(output_tokens), 0)
+               CAST(COALESCE(SUM(CASE WHEN delta < 0 AND kind IN {SPEND_KINDS} THEN -delta ELSE 0 END), 0) AS BIGINT),
+               CAST(COALESCE(SUM(CASE WHEN delta > 0 AND kind IN {SPEND_KINDS} THEN delta ELSE 0 END), 0) AS BIGINT),
+               CAST(COALESCE(SUM(CASE WHEN delta > 0 AND kind = 'grant' THEN delta ELSE 0 END), 0) AS BIGINT),
+               CAST(COALESCE(SUM(CASE WHEN delta > 0 AND kind = 'recharge' THEN delta ELSE 0 END), 0) AS BIGINT),
+               CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT),
+               CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT)
              FROM balance_ledger
              WHERE created_at >= ?{user_filter_sql}"
         ),
@@ -750,15 +740,15 @@ async fn build_stats(
     let (spent, refunded, granted, recharged, input_tokens, output_tokens) =
         q1.fetch_one(pool).await?;
 
-    // Daily breakdown. day_bucket truncates the timestamp to YYYY-MM-DD per
-    // dialect; aliasing it as `day` lets GROUP/ORDER use the same name.
-    let day = db::day_bucket(kind, "created_at");
+    // Daily breakdown. day_bucket slices the date out of the stored timestamp
+    // text; aliasing it as `day` lets GROUP/ORDER use the same name.
+    let day = db::day_bucket("created_at");
     let daily_sql = db::q(
         kind,
         &format!(
             "SELECT {day} AS day,
-                    COALESCE(SUM(CASE WHEN delta < 0 AND kind IN {SPEND_KINDS} THEN -delta ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN delta > 0 AND kind IN {SPEND_KINDS} THEN delta ELSE 0 END), 0)
+                    CAST(COALESCE(SUM(CASE WHEN delta < 0 AND kind IN {SPEND_KINDS} THEN -delta ELSE 0 END), 0) AS BIGINT),
+                    CAST(COALESCE(SUM(CASE WHEN delta > 0 AND kind IN {SPEND_KINDS} THEN delta ELSE 0 END), 0) AS BIGINT)
              FROM balance_ledger
              WHERE created_at >= ?{user_filter_sql}
              GROUP BY day
@@ -783,10 +773,10 @@ async fn build_stats(
         &format!(
             "SELECT model, kind, protocol,
                     COUNT(CASE WHEN delta < 0 THEN 1 END),
-                    COALESCE(SUM(CASE WHEN delta < 0 THEN -delta ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0),
-                    COALESCE(SUM(input_tokens), 0),
-                    COALESCE(SUM(output_tokens), 0)
+                    CAST(COALESCE(SUM(CASE WHEN delta < 0 THEN -delta ELSE 0 END), 0) AS BIGINT),
+                    CAST(COALESCE(SUM(CASE WHEN delta > 0 THEN delta ELSE 0 END), 0) AS BIGINT),
+                    CAST(COALESCE(SUM(input_tokens), 0) AS BIGINT),
+                    CAST(COALESCE(SUM(output_tokens), 0) AS BIGINT)
              FROM balance_ledger
              WHERE created_at >= ? AND model IS NOT NULL AND kind IN {SPEND_KINDS}{user_filter_sql}
              GROUP BY model, kind, protocol
@@ -820,7 +810,7 @@ async fn build_stats(
     let kind_sql = db::q(
         kind,
         &format!(
-            "SELECT kind, COALESCE(SUM(delta), 0)
+            "SELECT kind, CAST(COALESCE(SUM(delta), 0) AS BIGINT)
              FROM balance_ledger
              WHERE created_at >= ? AND kind IS NOT NULL{user_filter_sql}
              GROUP BY kind"
@@ -894,8 +884,8 @@ async fn admin_get_stats(
         installed.kind,
         &format!(
             "SELECT l.user_id, u.username,
-                    COALESCE(SUM(CASE WHEN l.delta < 0 AND l.kind IN {SPEND_KINDS} THEN -l.delta ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN l.delta > 0 AND l.kind IN {SPEND_KINDS} THEN l.delta ELSE 0 END), 0)
+                    CAST(COALESCE(SUM(CASE WHEN l.delta < 0 AND l.kind IN {SPEND_KINDS} THEN -l.delta ELSE 0 END), 0) AS BIGINT),
+                    CAST(COALESCE(SUM(CASE WHEN l.delta > 0 AND l.kind IN {SPEND_KINDS} THEN l.delta ELSE 0 END), 0) AS BIGINT)
              FROM balance_ledger l
              JOIN users u ON u.id = l.user_id
              WHERE l.created_at >= ?

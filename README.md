@@ -24,8 +24,12 @@ Agent 任务执行、图片与视频创作、媒体剪辑和工作流放在统�
 仓库中的 Compose 文件用于新安装，默认服务名为 `yunova`，挂载目录为 `./yunova_data`。
 升级已有部署时，应保留其 Compose 项目名、服务名、端口、配置和数据挂载，先只切换到已发布的
 Yunova 镜像。不要直接用新模板覆盖旧部署，否则可能创建一个使用空数据目录的新实例。
-需要使用模板连接现有目录时，可指定 `YUNOVA_DATA_PATH`、`YUNOVA_MYSQL_DATA_PATH` 和
+需要使用模板连接现有目录时，可指定 `YUNOVA_DATA_PATH` 和
 `YUNOVA_POSTGRES_DATA_PATH`；数据库名称和账号仍需匹配原有配置。
+
+旧版本的安装向导还列着 MySQL，现在只剩 SQLite 和 PostgreSQL 两选一，
+原因见下文「双库并行 migration」。已在跑的 SQLite 部署可用 `yunova db-copy`
+整体搬到 PostgreSQL，见「切换数据库后端」。
 
 ## 计费模型（v3，2026-09）
 
@@ -125,18 +129,49 @@ RFC1918 / 回环地址并被拦下。
 用旧默认值（500000 点/美元 ÷ 50000 点/元）折出来的是 10 元/美元，等于按上游成本的
 十倍计费；迁移 0047 把这个默认值改回 1:1，管理员手工调过的汇率则原样保留。
 
-## 三库并行 migration
+## 双库并行 migration
 
-每次 schema 变更**必须**同时落地三份同号 SQL：
+每次 schema 变更**必须**同时落地两份同号 SQL：
 - `migrations/sqlite/NNNN_*.sql` — `INTEGER` + `TEXT DEFAULT (datetime('now'))`
-- `migrations/postgres/NNNN_*.sql` — `BIGSERIAL / BOOLEAN / TIMESTAMPTZ DEFAULT NOW()`
-- `migrations/mysql/NNNN_*.sql` — `BIGINT AUTO_INCREMENT / TINYINT(1) / DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3) ENGINE=InnoDB utf8mb4_unicode_ci`
+- `migrations/postgres/NNNN_*.sql` — `BIGSERIAL` + `TEXT DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')`
 
-并把文件名追加到 `src/db.rs` 三个 `MIGRATIONS_*` 数组。
+并把文件名追加到 `src/db.rs` 的两个 `*_MIGRATIONS` 数组。
+
+**Postgres 侧不要用 `TIMESTAMPTZ`、`BOOLEAN`、`NUMERIC`。** 连接池是 `sqlx::Any`，
+它的类型表只有 bool / 整数 / 浮点 / text / blob；`timestamptz` 这类列是**值**层面
+解不出来，一张表里有一个就整表读不出任何一行，跟 SQL 写得对不对无关。所以时间统一存
+`YYYY-MM-DD HH:MM:SS`（UTC）文本、布尔存 0/1 整数——和 SQLite 逐字节一致，
+因此字典序比较、`substr` 取日期、Rust 侧解析两边同一套代码。
+`db::tests::postgres_migrations_avoid_types_the_any_driver_cannot_decode` 会守住这条。
+
+同理，`SUM()` 在 Postgres 上会升成 `numeric`，一律写
+`CAST(COALESCE(SUM(x), 0) AS BIGINT)`。
 
 跨方言 SQL 助手：
 - `db::q(kind, sql)` — Postgres 自动 `?` → `$1..$N`
-- `db::bool_as_int(kind, col)` / `db::bool_true(kind)` — bool 列读 / 写
+- `db::now_expr(kind)` — 两边都产出同格式 UTC 文本
+- `db::day_bucket(col)` / `db::ci_eq(kind, col)`
+
+MySQL 曾经也在列表里，但 `Any` 把 `MEDIUMTEXT` 当成 BLOB、`TINYINT` 直接不支持，
+而 `system_prompt` / `content` / `graph_json` 全是 `MEDIUMTEXT`；它连启动都过不去，
+说明没有实际用户，因此整套移除，不留「能选但一定坏」的选项。
+
+## 切换数据库后端
+
+`yunova db-copy` 把一个已装好的库整体搬到另一个后端，SQLite → PostgreSQL 是主要用途：
+
+```bash
+yunova db-copy --from sqlite:///data/yunova.db \
+               --to   postgres://user:pass@host:5432/yunova
+```
+
+它在目标库跑完 migration，按外键拓扑序逐表整行复制（`users.invited_by` 自引用留到
+第二遍补），最后把 Postgres 的 id sequence 推到 `MAX(id)`，新插入才不会撞上已复制的行。
+源库只读不改，配置文件也不动——验证完再把 `YUNOVA_DATABASE_URL` 或 `yunova.toml`
+指向新库。目标库非空时默认拒绝执行（确认无误才加 `--allow-nonempty`）。
+
+源库里出现 `TABLE_ORDER` 不认识的表时会直接报错而不是静默跳过，所以新增表要同时更新
+`src/db_copy.rs` 里的那份列表。
 
 ## 本地开发
 

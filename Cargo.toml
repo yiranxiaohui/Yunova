@@ -31,7 +31,7 @@ futures-util = "0.3"
 async-trait = "0.1"
 async-stream = "0.3"
 tokio-stream = "0.1"
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "mysql", "postgres", "chrono", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls", "any", "sqlite", "postgres", "chrono", "macros"] }
 toml = "0.8"
 argon2 = "0.5"
 rand = "0.8"

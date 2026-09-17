@@ -160,9 +160,12 @@ async fn get_my_invite(
         .unwrap_or((0,));
 
     // Sum of credits earned via invite rewards (positive deltas with reason starting "invite_reward_inviter").
+    // Table was `credit_ledger` until migration 38 renamed it to
+    // `balance_ledger`; the old name was left here, so this query errored and
+    // the `unwrap_or` below silently reported 0 earned to every inviter.
     let sum_sql = db::q(
         installed.kind,
-        "SELECT COALESCE(SUM(delta), 0) FROM credit_ledger
+        "SELECT CAST(COALESCE(SUM(delta), 0) AS BIGINT) FROM balance_ledger
          WHERE user_id = ? AND reason LIKE 'invite_reward_inviter%'",
     );
     let (total_earned,): (i64,) = sqlx::query_as(&sum_sql)

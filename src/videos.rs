@@ -453,10 +453,9 @@ pub(crate) async fn refund_job(
     if cost <= 0 {
         return;
     }
-    let bt = db::bool_true(kind);
     let sql = db::q(
         kind,
-        &format!("UPDATE video_jobs SET refunded = {bt} WHERE id = ? AND refunded <> {bt}"),
+        "UPDATE video_jobs SET refunded = 1 WHERE id = ? AND refunded <> 1",
     );
     let n = sqlx::query(&sql)
         .bind(job_id)
@@ -494,47 +493,25 @@ async fn insert_job(
     channel_id: Option<i64>,
     cost: i64,
 ) -> Result<i64, sqlx::Error> {
-    let returning = db::returning_id(kind);
     let sql = db::q(
         kind,
-        &format!(
-            "INSERT INTO video_jobs \
-             (token, user_id, model, prompt, seconds, size, input_image_path, channel_id, cost_quota, status) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending'){returning}"
-        ),
+        "INSERT INTO video_jobs \
+         (token, user_id, model, prompt, seconds, size, input_image_path, channel_id, cost_quota, status) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending') RETURNING id",
     );
-    match kind {
-        DbKind::Postgres | DbKind::Sqlite => {
-            let row: (i64,) = sqlx::query_as(&sql)
-                .bind(token)
-                .bind(user_id)
-                .bind(model)
-                .bind(prompt)
-                .bind(seconds)
-                .bind(size)
-                .bind(input_image_path)
-                .bind(channel_id)
-                .bind(cost)
-                .fetch_one(pool)
-                .await?;
-            Ok(row.0)
-        }
-        DbKind::Mysql => {
-            let r = sqlx::query(&sql)
-                .bind(token)
-                .bind(user_id)
-                .bind(model)
-                .bind(prompt)
-                .bind(seconds)
-                .bind(size)
-                .bind(input_image_path)
-                .bind(channel_id)
-                .bind(cost)
-                .execute(pool)
-                .await?;
-            Ok(r.last_insert_id().unwrap_or(0))
-        }
-    }
+    let row: (i64,) = sqlx::query_as(&sql)
+        .bind(token)
+        .bind(user_id)
+        .bind(model)
+        .bind(prompt)
+        .bind(seconds)
+        .bind(size)
+        .bind(input_image_path)
+        .bind(channel_id)
+        .bind(cost)
+        .fetch_one(pool)
+        .await?;
+    Ok(row.0)
 }
 
 async fn mark_job_failed(pool: &Pool, kind: DbKind, job_id: i64, error: &str) {
@@ -845,23 +822,29 @@ async fn create_job(
 // lazy-poll advancement
 // ---------------------------------------------------------------------------
 
-/// SQL fragment for "3 seconds ago" in the given dialect's datetime domain.
+/// SQL fragment for "3 seconds ago" as a stored-format timestamp string.
+///
+/// Timestamps are TEXT on both backends, so this has to yield text as well —
+/// a bare `now() - interval '3 seconds'` would be a `timestamptz` and
+/// Postgres refuses to compare that against a text column.
 fn three_seconds_ago_expr(kind: DbKind) -> &'static str {
     match kind {
         DbKind::Sqlite => "datetime('now','-3 seconds')",
-        DbKind::Mysql => "DATE_SUB(NOW(), INTERVAL 3 SECOND)",
-        DbKind::Postgres => "now() - interval '3 seconds'",
+        DbKind::Postgres => {
+            "to_char(now() AT TIME ZONE 'UTC' - interval '3 seconds', 'YYYY-MM-DD HH24:MI:SS')"
+        }
     }
 }
 
-/// SQL fragment for "N minutes ago" in the given dialect's datetime domain.
+/// SQL fragment for "N minutes ago", in the same stored text format.
 /// `n` is a validated caller-controlled literal (never user input), so
 /// interpolating it directly into the SQL string is safe.
 pub(crate) fn minutes_ago_expr(kind: DbKind, n: i64) -> String {
     match kind {
         DbKind::Sqlite => format!("datetime('now','-{n} minutes')"),
-        DbKind::Mysql => format!("DATE_SUB(NOW(), INTERVAL {n} MINUTE)"),
-        DbKind::Postgres => format!("now() - interval '{n} minutes'"),
+        DbKind::Postgres => format!(
+            "to_char(now() AT TIME ZONE 'UTC' - interval '{n} minutes', 'YYYY-MM-DD HH24:MI:SS')"
+        ),
     }
 }
 
@@ -881,9 +864,8 @@ pub(crate) async fn channel_by_id(
 }
 
 // Named struct (rather than a tuple) — sqlx's tuple `FromRow` impls only go
-// up to ~16 elements and we have 21 columns. `refunded`/`polling` are read
-// via `db::bool_as_int` so they decode as i64 across dialects (see db.rs);
-// converted to bool right after fetch.
+// up to ~16 elements and we have 21 columns. `refunded`/`polling` are stored
+// as 0/1 integers on both backends and converted to bool right after fetch.
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct JobRowRaw {
     id: i64,
@@ -967,13 +949,7 @@ impl From<JobRowRaw> for JobRow {
 
 const JOB_COLS: &str = "id, user_id, token, model, prompt, seconds, size, input_image_path, \
      upstream_video_id, channel_id, cost_quota, status, progress, video_path, error, \
-     __REFUNDED__, download_retries, __POLLING__, last_polled_at, created_at, finished_at";
-
-fn job_cols(kind: DbKind) -> String {
-    JOB_COLS
-        .replace("__REFUNDED__", &db::bool_as_int(kind, "refunded"))
-        .replace("__POLLING__", &db::bool_as_int(kind, "polling"))
-}
+     refunded, download_retries, polling, last_polled_at, created_at, finished_at";
 
 #[derive(Serialize)]
 struct JobView {
@@ -1015,7 +991,7 @@ impl From<&JobRow> for JobView {
 }
 
 async fn fetch_job(pool: &Pool, kind: DbKind, token: &str) -> Option<JobRow> {
-    let cols = job_cols(kind);
+    let cols = JOB_COLS;
     let sql = db::q(
         kind,
         &format!("SELECT {cols} FROM video_jobs WHERE token = ?"),
@@ -1029,14 +1005,9 @@ async fn fetch_job(pool: &Pool, kind: DbKind, token: &str) -> Option<JobRow> {
 }
 
 async fn release_lock(pool: &Pool, kind: DbKind, token: &str) {
-    let bf = if matches!(kind, DbKind::Sqlite | DbKind::Mysql) {
-        "0"
-    } else {
-        "FALSE"
-    };
     let sql = db::q(
         kind,
-        &format!("UPDATE video_jobs SET polling = {bf} WHERE token = ?"),
+        "UPDATE video_jobs SET polling = 0 WHERE token = ?",
     );
     let _ = sqlx::query(&sql).bind(token).execute(pool).await;
 }
@@ -1059,13 +1030,12 @@ pub async fn advance_job(
         return;
     }
 
-    let bt = db::bool_true(kind);
     let now = db::now_expr(kind);
     let lock_sql = db::q(
         kind,
         &format!(
-            "UPDATE video_jobs SET polling = {bt}, last_polled_at = {now} \
-             WHERE token = ? AND polling <> {bt} \
+            "UPDATE video_jobs SET polling = 1, last_polled_at = {now} \
+             WHERE token = ? AND polling <> 1 \
                AND (last_polled_at IS NULL OR last_polled_at < {})",
             three_seconds_ago_expr(kind)
         ),
@@ -1097,19 +1067,13 @@ pub async fn advance_job(
 /// 1) repair hung polling locks, 2) time out + refund stale jobs (>2h),
 /// 3) advance orphaned jobs nobody is actively polling.
 pub async fn sweep(http: &reqwest::Client, pool: &Pool, kind: DbKind, storage: &MediaStorage) {
-    let bt = db::bool_true(kind);
-    let bf = if matches!(kind, DbKind::Sqlite | DbKind::Mysql) {
-        "0"
-    } else {
-        "FALSE"
-    };
 
     // 1. Repair hung polling locks (crashed mid-poll > 5 min ago).
     let sql = db::q(
         kind,
         &format!(
-            "UPDATE video_jobs SET polling = {bf} \
-             WHERE polling = {bt} AND last_polled_at < {}",
+            "UPDATE video_jobs SET polling = 0 \
+             WHERE polling = 1 AND last_polled_at < {}",
             minutes_ago_expr(kind, 5)
         ),
     );
@@ -1510,7 +1474,7 @@ async fn list_jobs(
     let page = q.page.max(0);
     let offset = page * 24;
 
-    let cols = job_cols(kind);
+    let cols = JOB_COLS;
     let sql = db::q(
         kind,
         &format!(

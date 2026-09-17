@@ -3,8 +3,8 @@ CREATE TABLE video_editor_projects (
     user_id       BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name          TEXT NOT NULL,
     timeline_json TEXT NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at    TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    updated_at    TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 CREATE INDEX idx_video_editor_projects_user_updated
     ON video_editor_projects(user_id, updated_at DESC);
@@ -19,9 +19,9 @@ CREATE TABLE video_editor_exports (
     progress      INTEGER NOT NULL DEFAULT 0,
     video_path    TEXT,
     error         TEXT,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    started_at    TIMESTAMPTZ,
-    finished_at   TIMESTAMPTZ
+    created_at    TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    started_at    TEXT,
+    finished_at   TEXT
 );
 CREATE INDEX idx_video_editor_exports_user_created
     ON video_editor_exports(user_id, created_at DESC);
@@ -36,9 +36,9 @@ CREATE TABLE media_library_assets (
     path          TEXT NOT NULL,
     metadata_json TEXT,
     source        TEXT NOT NULL DEFAULT 'upload',
-    is_public     BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    is_public     INT NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    updated_at    TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 CREATE INDEX idx_media_library_assets_user_created
     ON media_library_assets(user_id, created_at DESC);

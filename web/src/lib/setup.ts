@@ -9,7 +9,7 @@ export type ConnectionForm =
       sqlite_path: string
     }
   | {
-      kind: "mysql" | "postgres"
+      kind: "postgres"
       host: string
       port: number
       user: string

@@ -20,7 +20,8 @@ type Props = {
 const PAGE_SIZE = 50 // matches the backend default; if backend changes, "load more" still works
 
 function formatTime(s: string): string {
-  // Backend writes either "YYYY-MM-DD HH:MM:SS" (SQLite/MySQL) or ISO (Postgres).
+  // Backend writes "YYYY-MM-DD HH:MM:SS" (UTC) on both backends; older rows
+  // may still carry an ISO string.
   // Parse both, fall back to raw on error.
   const candidate = s.includes("T") ? s : s.replace(" ", "T")
   const withZ = candidate.endsWith("Z") ? candidate : `${candidate}Z`

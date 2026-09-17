@@ -400,29 +400,18 @@ async fn save_project(
         };
     }
 
-    let returning = db::returning_id(installed.kind);
     let sql = db::q(
         installed.kind,
-        &format!(
-            "INSERT INTO video_editor_projects (user_id, name, timeline_json) VALUES (?, ?, ?){returning}"
-        ),
+        "INSERT INTO video_editor_projects (user_id, name, timeline_json) \
+         VALUES (?, ?, ?) RETURNING id",
     );
-    let inserted = match installed.kind {
-        db::DbKind::Sqlite | db::DbKind::Postgres => sqlx::query_as::<_, (i64,)>(&sql)
-            .bind(user.id)
-            .bind(&name)
-            .bind(&timeline_json)
-            .fetch_one(&installed.pool)
-            .await
-            .map(|row| row.0),
-        db::DbKind::Mysql => sqlx::query(&sql)
-            .bind(user.id)
-            .bind(&name)
-            .bind(&timeline_json)
-            .execute(&installed.pool)
-            .await
-            .map(|result| result.last_insert_id().unwrap_or(0)),
-    };
+    let inserted = sqlx::query_as::<_, (i64,)>(&sql)
+        .bind(user.id)
+        .bind(&name)
+        .bind(&timeline_json)
+        .fetch_one(&installed.pool)
+        .await
+        .map(|row| row.0);
     match inserted {
         Ok(id) => Json(json!({ "id": id })).into_response(),
         Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
@@ -534,28 +523,22 @@ async fn list_assets(
     let mut assets = Vec::new();
     let mut seen = HashSet::new();
 
-    let public_col = db::bool_as_int(installed.kind, "a.is_public");
-    let public_true = db::bool_true(installed.kind);
     let library_sql = if public {
         db::q(
             installed.kind,
-            &format!(
-                "SELECT a.id, a.title, a.kind, a.path, a.metadata_json, a.source, \
-                 {public_col}, a.created_at, u.username AS author \
+            "SELECT a.id, a.title, a.kind, a.path, a.metadata_json, a.source, \
+                 a.is_public, a.created_at, u.username AS author \
                  FROM media_library_assets a JOIN users u ON u.id = a.user_id \
-                 WHERE a.is_public = {public_true} \
-                 ORDER BY a.created_at DESC, a.id DESC LIMIT 120"
-            ),
+                 WHERE a.is_public = 1 \
+                 ORDER BY a.created_at DESC, a.id DESC LIMIT 120",
         )
     } else {
         db::q(
             installed.kind,
-            &format!(
-                "SELECT a.id, a.title, a.kind, a.path, a.metadata_json, a.source, \
-                 {public_col}, a.created_at, u.username AS author \
+            "SELECT a.id, a.title, a.kind, a.path, a.metadata_json, a.source, \
+                 a.is_public, a.created_at, u.username AS author \
                  FROM media_library_assets a JOIN users u ON u.id = a.user_id \
-                 WHERE a.user_id = ? ORDER BY a.created_at DESC, a.id DESC LIMIT 120"
-            ),
+                 WHERE a.user_id = ? ORDER BY a.created_at DESC, a.id DESC LIMIT 120",
         )
     };
     let library_rows = if public {
@@ -784,36 +767,22 @@ async fn insert_library_asset(
     metadata_json: &str,
     source: &str,
 ) -> Result<i64, sqlx::Error> {
-    let returning = db::returning_id(installed.kind);
     let sql = db::q(
         installed.kind,
-        &format!(
-            "INSERT INTO media_library_assets \
-             (user_id, title, kind, path, metadata_json, source) VALUES (?, ?, ?, ?, ?, ?){returning}"
-        ),
+        "INSERT INTO media_library_assets \
+         (user_id, title, kind, path, metadata_json, source) \
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
     );
-    match installed.kind {
-        db::DbKind::Sqlite | db::DbKind::Postgres => sqlx::query_as::<_, (i64,)>(&sql)
-            .bind(user_id)
-            .bind(title)
-            .bind(kind)
-            .bind(path)
-            .bind(metadata_json)
-            .bind(source)
-            .fetch_one(&installed.pool)
-            .await
-            .map(|row| row.0),
-        db::DbKind::Mysql => sqlx::query(&sql)
-            .bind(user_id)
-            .bind(title)
-            .bind(kind)
-            .bind(path)
-            .bind(metadata_json)
-            .bind(source)
-            .execute(&installed.pool)
-            .await
-            .map(|result| result.last_insert_id().unwrap_or(0)),
-    }
+    sqlx::query_as::<_, (i64,)>(&sql)
+        .bind(user_id)
+        .bind(title)
+        .bind(kind)
+        .bind(path)
+        .bind(metadata_json)
+        .bind(source)
+        .fetch_one(&installed.pool)
+        .await
+        .map(|row| row.0)
 }
 
 async fn upload_asset(

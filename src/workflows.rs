@@ -415,27 +415,17 @@ async fn save_workflow(
         };
     }
 
-    let returning = db::returning_id(installed.kind);
     let sql = db::q(
         installed.kind,
-        &format!("INSERT INTO workflows (user_id, name, graph_json) VALUES (?, ?, ?){returning}"),
+        "INSERT INTO workflows (user_id, name, graph_json) VALUES (?, ?, ?) RETURNING id",
     );
-    let id = match installed.kind {
-        db::DbKind::Sqlite | db::DbKind::Postgres => sqlx::query_as::<_, (i64,)>(&sql)
-            .bind(user.id)
-            .bind(name)
-            .bind(&graph_json)
-            .fetch_one(&installed.pool)
-            .await
-            .map(|row| row.0),
-        db::DbKind::Mysql => sqlx::query(&sql)
-            .bind(user.id)
-            .bind(name)
-            .bind(&graph_json)
-            .execute(&installed.pool)
-            .await
-            .map(|result| result.last_insert_id().unwrap_or(0)),
-    };
+    let id = sqlx::query_as::<_, (i64,)>(&sql)
+        .bind(user.id)
+        .bind(name)
+        .bind(&graph_json)
+        .fetch_one(&installed.pool)
+        .await
+        .map(|row| row.0);
     match id {
         Ok(id) => Json(SaveWorkflowResp { id }).into_response(),
         Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error.to_string()),
@@ -734,34 +724,20 @@ async fn insert_run(
     name: &str,
     graph_json: &str,
 ) -> Result<i64, sqlx::Error> {
-    let returning = db::returning_id(kind);
     let sql = db::q(
         kind,
-        &format!(
-            "INSERT INTO workflow_runs (token, workflow_id, user_id, name, graph_json, status) \
-             VALUES (?, ?, ?, ?, ?, 'running'){returning}"
-        ),
+        "INSERT INTO workflow_runs (token, workflow_id, user_id, name, graph_json, status) \
+         VALUES (?, ?, ?, ?, ?, 'running') RETURNING id",
     );
-    match kind {
-        db::DbKind::Sqlite | db::DbKind::Postgres => sqlx::query_as::<_, (i64,)>(&sql)
-            .bind(token)
-            .bind(workflow_id)
-            .bind(user_id)
-            .bind(name)
-            .bind(graph_json)
-            .fetch_one(pool)
-            .await
-            .map(|row| row.0),
-        db::DbKind::Mysql => sqlx::query(&sql)
-            .bind(token)
-            .bind(workflow_id)
-            .bind(user_id)
-            .bind(name)
-            .bind(graph_json)
-            .execute(pool)
-            .await
-            .map(|result| result.last_insert_id().unwrap_or(0)),
-    }
+    sqlx::query_as::<_, (i64,)>(&sql)
+        .bind(token)
+        .bind(workflow_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(graph_json)
+        .fetch_one(pool)
+        .await
+        .map(|row| row.0)
 }
 
 #[derive(Serialize)]

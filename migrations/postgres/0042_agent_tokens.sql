@@ -11,9 +11,9 @@ CREATE TABLE agent_tokens (
     name         TEXT NOT NULL,
     token_hash   TEXT NOT NULL UNIQUE,
     prefix       TEXT NOT NULL,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_used_at TIMESTAMPTZ,
-    revoked      BOOLEAN NOT NULL DEFAULT FALSE
+    created_at   TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    last_used_at TEXT,
+    revoked      INT NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_agent_tokens_user_created
     ON agent_tokens(user_id, created_at DESC);

@@ -141,12 +141,9 @@ async fn count_user_prompts(pool: &Pool, kind: DbKind, user_id: i64) -> Result<i
 }
 
 async fn count_user_public(pool: &Pool, kind: DbKind, user_id: i64) -> Result<i64, Response> {
-    let public_true = db::bool_true(kind);
     let sql = db::q(
         kind,
-        &format!(
-            "SELECT COUNT(*) FROM prompts WHERE user_id = ? AND is_public = {public_true}"
-        ),
+        "SELECT COUNT(*) FROM prompts WHERE user_id = ? AND is_public = 1",
     );
     let (n,): (i64,) = sqlx::query_as(&sql)
         .bind(user_id)
@@ -175,46 +172,18 @@ async fn insert_prompt(
         kind,
         "INSERT INTO prompts (user_id, name, content) VALUES (?, ?, ?)",
     );
-    let id = match kind {
-        DbKind::Sqlite | DbKind::Postgres => {
-            let row: (i64,) = sqlx::query_as(&format!("{base_insert} RETURNING id"))
-                .bind(user_id)
-                .bind(name)
-                .bind(content)
-                .fetch_one(pool)
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            row.0
-        }
-        DbKind::Mysql => {
-            let mut tx = pool
-                .begin()
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            sqlx::query(&base_insert)
-                .bind(user_id)
-                .bind(name)
-                .bind(content)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            let (id,): (i64,) = sqlx::query_as("SELECT LAST_INSERT_ID()")
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            tx.commit()
-                .await
-                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            id
-        }
-    };
+    let row: (i64,) = sqlx::query_as(&format!("{base_insert} RETURNING id"))
+        .bind(user_id)
+        .bind(name)
+        .bind(content)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let id = row.0;
 
-    let pub_col = db::bool_as_int(kind, "is_public");
     let sel_sql = db::q(
         kind,
-        &format!(
-            "SELECT id, name, content, {pub_col}, created_at, updated_at FROM prompts WHERE id = ?"
-        ),
+        "SELECT id, name, content, is_public, created_at, updated_at FROM prompts WHERE id = ?",
     );
     let row: Prompt = sqlx::query_as(&sel_sql)
         .bind(id)
@@ -228,13 +197,10 @@ async fn list_prompts(
     Extension(installed): Extension<InstalledState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
-    let pub_col = db::bool_as_int(installed.kind, "is_public");
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT id, name, content, {pub_col}, created_at, updated_at FROM prompts
-             WHERE user_id = ? ORDER BY updated_at DESC"
-        ),
+        "SELECT id, name, content, is_public, created_at, updated_at FROM prompts
+             WHERE user_id = ? ORDER BY updated_at DESC",
     );
     let rows: Result<Vec<Prompt>, _> = sqlx::query_as(&sql)
         .bind(user.id)
@@ -288,10 +254,9 @@ async fn update_prompt(
     }
 
     if let Some(true) = body.is_public {
-        let pub_col = db::bool_as_int(installed.kind, "is_public");
         let sel = db::q(
             installed.kind,
-            &format!("SELECT {pub_col} FROM prompts WHERE id = ? AND user_id = ?"),
+            "SELECT is_public FROM prompts WHERE id = ? AND user_id = ?",
         );
         let current_is_public: Option<(i64,)> = sqlx::query_as(&sel)
             .bind(id)
@@ -417,7 +382,6 @@ async fn list_public(
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
-    let public_true = db::bool_true(installed.kind);
     let order_by = match q.sort.as_deref() {
         Some("new") => "p.created_at DESC, p.id DESC",
         _ => "p.clone_count DESC, p.created_at DESC, p.id DESC",
@@ -430,7 +394,7 @@ async fn list_public(
             &format!(
                 "SELECT p.id, p.name, p.content, u.username AS author_username, p.created_at, p.clone_count
                  FROM prompts p JOIN users u ON u.id = p.user_id
-                 WHERE p.is_public = {public_true} AND (p.name LIKE ? OR p.content LIKE ?)
+                 WHERE p.is_public = 1 AND (p.name LIKE ? OR p.content LIKE ?)
                  ORDER BY {order_by}
                  LIMIT ? OFFSET ?"
             ),
@@ -448,7 +412,7 @@ async fn list_public(
             &format!(
                 "SELECT p.id, p.name, p.content, u.username AS author_username, p.created_at, p.clone_count
                  FROM prompts p JOIN users u ON u.id = p.user_id
-                 WHERE p.is_public = {public_true}
+                 WHERE p.is_public = 1
                  ORDER BY {order_by}
                  LIMIT ? OFFSET ?"
             ),
@@ -470,12 +434,9 @@ async fn clone_public(
     Extension(user): Extension<CurrentUser>,
     Path(id): Path<i64>,
 ) -> Response {
-    let public_true = db::bool_true(installed.kind);
     let sel = db::q(
         installed.kind,
-        &format!(
-            "SELECT name, content, user_id FROM prompts WHERE id = ? AND is_public = {public_true}"
-        ),
+        "SELECT name, content, user_id FROM prompts WHERE id = ? AND is_public = 1",
     );
     let row: Option<(String, String, i64)> = match sqlx::query_as(&sel)
         .bind(id)

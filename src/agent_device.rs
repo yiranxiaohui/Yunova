@@ -474,13 +474,10 @@ async fn list_devices(
     Extension(installed): Extension<InstalledState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
-    let revoked_col = db::bool_as_int(installed.kind, "revoked");
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT id, name, platform, last_seen_at, {revoked_col} \
-             FROM agent_devices WHERE user_id = ? ORDER BY id DESC"
-        ),
+        "SELECT id, name, platform, last_seen_at, revoked \
+             FROM agent_devices WHERE user_id = ? ORDER BY id DESC",
     );
     let rows: Vec<DeviceRow> = sqlx::query_as(&sql)
         .bind(user.id)
@@ -592,12 +589,9 @@ async fn device_for_token(pool: &Pool, kind: DbKind, token: &str) -> Option<(i64
         return None;
     }
     let hash = crate::auth::token_hash(token);
-    let revoked_col = db::bool_as_int(kind, "revoked");
     let sql = db::q(
         kind,
-        &format!(
-            "SELECT id, user_id, {revoked_col} FROM agent_devices WHERE token_hash = ?"
-        ),
+        "SELECT id, user_id, revoked FROM agent_devices WHERE token_hash = ?",
     );
     let row: Option<(i64, i64, i64)> = sqlx::query_as(&sql)
         .bind(&hash)
