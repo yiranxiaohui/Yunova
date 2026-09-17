@@ -276,6 +276,28 @@ summary:focus-visible {
   font-weight: 400;
 }
 
+/* Inline code in the hints, so `/login yunova` reads as something to type
+   rather than as prose. */
+code {
+  padding: 1px 5px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* The resolved runtime path. It can be long and must not widen the window,
+   which on a fixed-width panel would push every control off-screen. */
+#runtimePath:not(:empty) {
+  overflow-wrap: anywhere;
+  font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+button[disabled] {
+  opacity: 0.6;
+  cursor: default;
+}
+
 .log {
   margin: 0;
   max-height: 220px;

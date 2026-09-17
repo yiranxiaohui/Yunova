@@ -8,6 +8,7 @@ mod agent_session;
 mod agent_token;
 mod auth;
 mod channels;
+mod cli_auth;
 mod conversations;
 mod db;
 mod db_copy;
@@ -507,6 +508,45 @@ async fn require_auth(
     let Some((id, _)) = auth::user_for_token(&installed.pool, installed.kind, c.value()).await
     else {
         return (StatusCode::UNAUTHORIZED, "session expired").into_response();
+    };
+    req.extensions_mut().insert(CurrentUser { id });
+    req.extensions_mut().insert(installed);
+    next.run(req).await
+}
+
+/// Authenticate a browser session *or* an agent token.
+///
+/// The protected router is cookie-only, which is right for the web UI and
+/// wrong for a CLI: `pi` holds an agent token and no cookie jar. The proxy
+/// routes already accept both, but they do it through `optional_auth`, which
+/// also lets anonymous BYOK callers through — not acceptable for an endpoint
+/// that reports what an account may use.
+///
+/// So this is the strict variant: one of the two credentials must resolve to a
+/// user, or the request is refused.
+async fn require_user_or_agent(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    mut req: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let installed = match state.require_installed().await {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let mut user_id = match jar.get(auth::SESSION_COOKIE) {
+        Some(c) => auth::user_for_token(&installed.pool, installed.kind, c.value())
+            .await
+            .map(|(id, _)| id),
+        None => None,
+    };
+    if user_id.is_none()
+        && let Some(token) = agent_token::token_from_headers(req.headers())
+    {
+        user_id = agent_token::user_for_token(&installed.pool, installed.kind, &token).await;
+    }
+    let Some(id) = user_id else {
+        return (StatusCode::UNAUTHORIZED, "login required").into_response();
     };
     req.extensions_mut().insert(CurrentUser { id });
     req.extensions_mut().insert(installed);
@@ -1220,6 +1260,7 @@ fn build_router(state: AppState) -> Router {
         .merge(agent_api::routes())
         .merge(agent_device::routes())
         .merge(agent_token::routes())
+        .merge(cli_auth::routes())
         .merge(quota::user_routes())
         .merge(quota::admin_routes())
         .merge(channels::admin_routes())
@@ -1253,6 +1294,17 @@ fn build_router(state: AppState) -> Router {
         .route("/proxy/claude/v1/models", get(proxy_claude_models))
         .route_layer(middleware::from_fn_with_state(state.clone(), optional_auth));
 
+    // Reachable with either a browser session or an agent token. Kept as its
+    // own layer rather than folded into `protected` (cookie-only, so a CLI
+    // could never call it) or into `proxy` (which also admits anonymous BYOK
+    // callers, which must not see an account's model list).
+    let agent_readable = Router::new()
+        .merge(cli_auth::agent_routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            require_user_or_agent,
+        ));
+
     let public = Router::new()
         .route("/health", get(health))
         .route("/auth/config", get(auth_config))
@@ -1266,11 +1318,15 @@ fn build_router(state: AppState) -> Router {
         .merge(images::public_routes())
         .merge(sharing::public_routes())
         .merge(agent_device::public_routes())
+        .merge(cli_auth::public_routes())
         .merge(videos::public_routes())
         .merge(video_editor::public_routes());
 
     Router::new()
-        .nest("/api", public.merge(proxy).merge(protected))
+        .nest(
+            "/api",
+            public.merge(proxy).merge(agent_readable).merge(protected),
+        )
         .layer(DefaultBodyLimit::max(1024 * 1024 * 1024))
         .with_state(state)
         .fallback(static_handler)

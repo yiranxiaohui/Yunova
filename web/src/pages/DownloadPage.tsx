@@ -17,6 +17,7 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import {
   DESKTOP_BUILDS,
+  DESKTOP_REPO,
   OS_LABEL,
   RELEASES_URL,
   assetName,
@@ -47,6 +48,7 @@ export default function DownloadPage() {
   const [release, setRelease] = useState<ReleaseInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [copied, setCopied] = useState(false)
+  const [copiedCli, setCopiedCli] = useState(false)
   const [macCopied, setMacCopied] = useState(false)
 
   const os = useMemo(() => guessOs(), [])
@@ -78,6 +80,14 @@ export default function DownloadPage() {
 YUNOVA_DEVICE_WORKSPACE=/path/to/project
 ./yunova-desktop --headless`
 
+  // What turns `pi` into this platform's CLI: install it, add the provider
+  // package, then `/login yunova` signs in by browser approval rather than by
+  // pasting a token. Built from the current origin so a self-hosted instance
+  // shows its own address instead of the public one.
+  const cliSnippet = `npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+pi install git:github.com/${DESKTOP_REPO}@main
+YUNOVA_BASE_URL=${window.location.origin} pi`
+
   // The builds carry no Apple Developer ID, so macOS quarantines them and
   // offers the "unidentified developer" prompt. Some machines refuse outright
   // instead, and the wording it uses -- "damaged" -- reads as a corrupt
@@ -101,6 +111,16 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
       await navigator.clipboard.writeText(runSnippet)
       setCopied(true)
       setTimeout(() => setCopied(false), 2000)
+    } catch {
+      toast.error("复制失败，请手动选择文本")
+    }
+  }
+
+  const copyCli = async () => {
+    try {
+      await navigator.clipboard.writeText(cliSnippet)
+      setCopiedCli(true)
+      setTimeout(() => setCopiedCli(false), 2000)
     } catch {
       toast.error("复制失败，请手动选择文本")
     }
@@ -380,6 +400,42 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
               不想在自己的电脑上执行？工作模式的「云电脑」跑在隔离容器里，无需安装任何客户端。
             </p>
           </div>
+        </section>
+
+        <section className="mt-10 rounded-2xl border border-border/70 bg-card/60 p-5">
+          <div className="flex items-center gap-2 text-sm font-semibold">
+            <Terminal className="size-4 text-primary" /> 命令行（用 pi 直接调用本站模型）
+          </div>
+          <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+            和 Claude Code、Codex CLI 一样在终端里干活，但模型额度走你的 Yunova 账号。
+            安装后在 pi 里运行{" "}
+            <code className="rounded bg-muted px-1.5 py-0.5 text-[12px]">/login yunova</code>，
+            会弹出一个登录码；在浏览器里确认后，{" "}
+            <code className="rounded bg-muted px-1.5 py-0.5 text-[12px]">/model</code>{" "}
+            里就能选到本站已开放的模型。全程不需要在终端输入密码，也拿不到上游密钥。
+          </p>
+          <div className="mt-4 rounded-xl bg-muted/70 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] text-muted-foreground">安装并登录</span>
+              <Button size="sm" variant="ghost" onClick={() => void copyCli()}>
+                {copiedCli ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                {copiedCli ? "已复制" : "复制"}
+              </Button>
+            </div>
+            <pre className="mt-1.5 overflow-auto text-[11px] leading-relaxed">
+              {cliSnippet}
+            </pre>
+          </div>
+          <p className="mt-3 text-xs text-muted-foreground">
+            已经拿到登录码了？直接去{" "}
+            <Link
+              to="/cli/login"
+              className="text-primary underline-offset-2 hover:underline"
+            >
+              授权页面
+            </Link>
+            。授权可随时在「Agent 令牌」里撤销。
+          </p>
         </section>
 
         <p className="mt-8 text-center text-xs text-muted-foreground">

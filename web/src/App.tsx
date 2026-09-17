@@ -19,6 +19,8 @@ const VideoEditorPage = lazy(() => import("@/pages/VideoEditorPage"))
 // to be in the main bundle.
 const DownloadPage = lazy(() => import("@/pages/DownloadPage"))
 const MediaLibraryPage = lazy(() => import("@/pages/MediaLibraryPage"))
+// Approving a CLI login is a once-per-machine detour, like the download page.
+const CliLoginPage = lazy(() => import("@/pages/CliLoginPage"))
 const AgentTaskPage = lazy(() => import("@/pages/AgentTaskPage"))
 
 function Loading() {
@@ -233,6 +235,21 @@ export default function App() {
                 <Suspense fallback={<Loading />}>
                   <DownloadPage />
                 </Suspense>
+              }
+            />
+
+            {/* Approving a CLI sign-in requires an authenticated session:
+                that requirement is what makes the short user code safe, since
+                knowing a code is useless without an account to approve it
+                with. */}
+            <Route
+              path="/cli/login"
+              element={
+                <Protected>
+                  <Suspense fallback={<Loading />}>
+                    <CliLoginPage />
+                  </Suspense>
+                </Protected>
               }
             />
 

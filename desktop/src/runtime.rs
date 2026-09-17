@@ -106,7 +106,18 @@ impl RuntimeManager {
             .await
             .map_err(|e| format!("无法创建工作目录: {e}"))?;
 
-        let mut cmd = Command::new(&self.config.program);
+        // Resolved rather than spawned by name: a GUI app inherits a minimal
+        // `PATH`, so a runtime the user installed in their terminal is
+        // invisible here unless the known install prefixes are searched too.
+        // Without this the app reports "启动 pi 失败" on a machine where `pi`
+        // works perfectly in a shell.
+        let program = crate::runtime_install::resolve(&self.config.program).ok_or_else(|| {
+            format!(
+                "未找到运行时 {}，请在「本机设置」里安装 pi 后重试",
+                self.config.program
+            )
+        })?;
+        let mut cmd = Command::new(&program);
         cmd.arg("--mode")
             .arg("rpc")
             .arg("--no-session")
@@ -433,6 +444,10 @@ mod tests {
             .await
             .expect_err("a missing runtime must fail");
         assert!(err.contains("yunova-no-such-runtime"), "got: {err}");
+        // And it must say what to do about it: "failed to spawn" sends the
+        // user to a terminal, while naming the install step keeps the fix
+        // inside the app.
+        assert!(err.contains("安装"), "got: {err}");
 
         tokio::fs::remove_dir_all(&dir).await.ok();
     }

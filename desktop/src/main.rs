@@ -34,6 +34,7 @@ mod proto;
 mod runtime;
 #[path = "../../src/runtime_env.rs"]
 mod runtime_env;
+mod runtime_install;
 mod settings;
 #[cfg(not(target_os = "android"))]
 mod shell;

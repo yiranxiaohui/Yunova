@@ -1,0 +1,11 @@
+{
+  "name": "@yunova/pi-provider",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Yunova 平台 provider：让 pi 用 /login yunova 登录并直接调用平台模型",
+  "type": "module",
+  "keywords": ["pi-package", "yunova"],
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}

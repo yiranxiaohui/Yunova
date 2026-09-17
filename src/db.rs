@@ -107,6 +107,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (45, include_str!("../migrations/sqlite/0045_agent_token_expiry.sql")),
     (46, include_str!("../migrations/sqlite/0046_device_fingerprint.sql")),
     (47, include_str!("../migrations/sqlite/0047_usd_parity_rate.sql")),
+    (49, include_str!("../migrations/sqlite/0049_cli_device_codes.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -156,6 +157,7 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     // Converts a database created before the types were corrected to what
     // `sqlx::Any` can decode. No-op on a fresh install.
     (48, include_str!("../migrations/postgres/0048_any_compatible_domain.sql")),
+    (49, include_str!("../migrations/postgres/0049_cli_device_codes.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
@@ -1058,6 +1060,72 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((sessions, entries), (0, 0));
+
+        pool.close().await;
+    }
+
+    /// A CLI login code must be usable exactly once and must not outlive its
+    /// deadline, because the token it yields is a spending credential handed
+    /// to a machine the platform does not control.
+    #[tokio::test]
+    async fn a_cli_login_code_is_single_use_and_bound_to_one_account() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'a', 'x')")
+            .await
+            .unwrap();
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (2, 'b', 'x')")
+            .await
+            .unwrap();
+        pool.execute(
+            "INSERT INTO cli_device_codes (user_code, device_hash, client_name, expires_at) \
+             VALUES ('ACDE-FGHJ', 'hash', 'pi', '2999-01-01T00:00:00Z')",
+        )
+        .await
+        .unwrap();
+
+        // The approval guard is `user_id IS NULL`, so the first account to
+        // claim a code owns it and a second cannot re-point it at itself.
+        let claim = "UPDATE cli_device_codes SET user_id = ?, approved_at = 'now' \
+                     WHERE user_code = 'ACDE-FGHJ' AND user_id IS NULL";
+        let first = sqlx::query(claim).bind(1i64).execute(&pool).await.unwrap();
+        assert_eq!(first.rows_affected(), 1);
+        let second = sqlx::query(claim).bind(2i64).execute(&pool).await.unwrap();
+        assert_eq!(
+            second.rows_affected(),
+            0,
+            "an approved code must not be transferable to another account"
+        );
+
+        // And the consume guard is `consumed_at IS NULL`, so two polls racing
+        // cannot both walk away with a token.
+        let consume = "UPDATE cli_device_codes SET consumed_at = 'now' \
+                       WHERE user_code = 'ACDE-FGHJ' AND consumed_at IS NULL";
+        assert_eq!(
+            pool.execute(consume).await.unwrap().rows_affected(),
+            1,
+            "the first poll collects the token"
+        );
+        assert_eq!(
+            pool.execute(consume).await.unwrap().rows_affected(),
+            0,
+            "a replayed device code must yield nothing"
+        );
+
+        // Deleting the account takes its pending codes with it, so a removed
+        // user cannot leave an approval behind that still mints tokens.
+        pool.execute("DELETE FROM users WHERE id = 1").await.unwrap();
+        let (left,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM cli_device_codes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0);
 
         pool.close().await;
     }

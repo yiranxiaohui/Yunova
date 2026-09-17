@@ -90,10 +90,45 @@ function appendLog(line) {
   if (atBottom) log.scrollTop = log.scrollHeight
 }
 
+// The runtime section. Rendered from one status object rather than from
+// several booleans so the panel cannot show "installed" and an install button
+// at the same time.
+function renderRuntime(runtime) {
+  const version = el("runtimeVersion")
+  const path = el("runtimePath")
+  const install = el("installRuntime")
+  const missing = el("runtimeMissing")
+
+  version.textContent = runtime.installed ? `· ${runtime.version}` : ""
+  // The resolved path matters on a machine with several installs: it answers
+  // "which one will actually run", which is otherwise unknowable from here.
+  path.textContent = runtime.path ? runtime.path : ""
+  missing.hidden = runtime.installed
+
+  const manager = runtime.installers[0]
+  if (!manager) {
+    // Nothing to install with. Saying so is better than offering a button that
+    // can only fail: the user needs Node first, and that is not something this
+    // app should try to install behind their back.
+    install.hidden = true
+    if (!runtime.installed) {
+      missing.textContent =
+        "未找到可用运行时，也没有找到 npm / bun / pnpm。请先安装 Node.js 或 Bun。"
+    }
+    return
+  }
+  install.hidden = false
+  install.textContent = runtime.installed
+    ? `用 ${manager} 更新运行时`
+    : `用 ${manager} 安装运行时`
+  install.dataset.manager = manager
+}
+
 async function refresh() {
   const snap = await invoke("snapshot")
   renderStatus(snap.status, snap.active_sessions)
   renderSettings(snap.settings)
+  renderRuntime(snap.runtime)
   el("log").textContent = snap.log.join("\n")
   el("log").scrollTop = el("log").scrollHeight
   el("boundAs").textContent = snap.bound_as
@@ -189,6 +224,35 @@ el("password").addEventListener("keydown", (e) => {
 })
 
 el("openSite").addEventListener("click", () => invoke("show_site"))
+
+el("installRuntime").addEventListener("click", async (e) => {
+  const button = e.currentTarget
+  const manager = button.dataset.manager
+  if (!manager) return
+  const label = button.textContent
+  // Disabled while it runs: an npm install takes tens of seconds, and a button
+  // that still looks clickable invites a second concurrent install.
+  button.disabled = true
+  button.textContent = "正在安装…"
+  el("runtimeError").hidden = true
+  try {
+    renderRuntime(await invoke("install_runtime", { manager }))
+  } catch (err) {
+    const box = el("runtimeError")
+    box.textContent = typeof err === "string" ? err : (err?.message ?? String(err))
+    box.hidden = false
+  } finally {
+    button.disabled = false
+    button.textContent = label
+  }
+})
+
+el("checkRuntime").addEventListener("click", async () => {
+  // The user may have installed it in a terminal while this window was open,
+  // so re-checking must be possible without restarting the app.
+  el("runtimeError").hidden = true
+  renderRuntime(await invoke("check_runtime"))
+})
 // Signing in on the site is the normal way to bind this machine, so the
 // sign-in card points there first and keeps the password form folded away.
 el("openSiteLogin").addEventListener("click", () => invoke("show_site"))

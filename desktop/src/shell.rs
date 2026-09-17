@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::{TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_notification::NotificationExt;
@@ -35,6 +35,7 @@ use tokio::sync::Mutex;
 use crate::connector::{Connector, ConnectorConfig, Host, Status, bound_account};
 use crate::endpoint::{SESSION_COOKIE, site_origin};
 use crate::identity::Login;
+use crate::runtime_install::{self, RuntimeStatus};
 use crate::settings::{Settings, settings_path};
 
 /// Label of the webview showing the server's own UI.
@@ -71,6 +72,11 @@ pub struct Snapshot {
     active_sessions: usize,
     log: Vec<String>,
     site_url: String,
+    /// Whether the agent runtime is present, and where. The app can execute
+    /// tasks locally only if this exists, so it belongs in the same snapshot
+    /// as the connection state rather than behind a second call the panel
+    /// might forget to make.
+    runtime: RuntimeStatus,
 }
 
 /// The [`Host`] implementation that turns connector events into window events,
@@ -189,8 +195,59 @@ async fn snapshot(state: State<'_, AppState>) -> Result<Snapshot, String> {
         active_sessions: state.connector.active_sessions().await,
         log: state.log.lock().await.clone(),
         site_url: site_origin(&settings.site_url),
+        runtime: runtime_install::status(&settings.program).await,
         settings,
     })
+}
+
+/// Install or update the agent runtime with the user's chosen package manager.
+///
+/// The app can do this because it is a desktop app: the alternative is telling
+/// someone who installed a GUI application to open a terminal and run an npm
+/// command, which is where most people stop.
+#[tauri::command]
+async fn install_runtime(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    manager: String,
+) -> Result<RuntimeStatus, String> {
+    let _ = app.emit("connector://log", &format!("正在用 {manager} 安装运行时…"));
+    let output = runtime_install::install(&manager).await?;
+    if !output.is_empty() {
+        // The installer's own output is the only useful record of what it did,
+        // and it is what makes a later failure diagnosable.
+        for line in output
+            .lines()
+            .rev()
+            .take(5)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
+            let _ = app.emit("connector://log", &line.to_string());
+        }
+    }
+    let settings = state.settings.lock().await.clone();
+    let status = runtime_install::status(&settings.program).await;
+    let _ = app.emit(
+        "connector://log",
+        &match status.version.as_deref() {
+            Some(v) => format!("运行时已就绪：{v}"),
+            None => "安装已结束，但仍未找到可用的运行时".to_string(),
+        },
+    );
+    Ok(status)
+}
+
+/// Re-check the runtime without installing anything.
+///
+/// Needed because the user may install it themselves in a terminal while the
+/// app is open, and an app that only looks once would keep claiming it is
+/// missing.
+#[tauri::command]
+async fn check_runtime(state: State<'_, AppState>) -> Result<RuntimeStatus, String> {
+    let settings = state.settings.lock().await.clone();
+    Ok(runtime_install::status(&settings.program).await)
 }
 
 /// Persist settings and, when already connected, reconnect so the change is
@@ -362,6 +419,148 @@ fn open_site(app: &AppHandle, settings: &Settings) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Navigate the site window to a path on the configured origin.
+///
+/// How the app's own menu drives the product without reimplementing it: the
+/// page is the server's, so "new chat" is a navigation rather than a feature
+/// this client has to own and keep in step with releases.
+///
+/// The URL is JSON-encoded because it is built from a user-supplied origin; a
+/// stray quote would otherwise terminate the string literal and execute as
+/// script in the window that is deliberately denied IPC.
+fn navigate_site(app: &AppHandle, path: &str) {
+    let app = app.clone();
+    let path = path.to_string();
+    tauri::async_runtime::spawn(async move {
+        let settings = app.state::<AppState>().settings.lock().await.clone();
+        if open_site(&app, &settings).is_err() {
+            return;
+        }
+        if let Some(win) = app.get_webview_window(SITE_WINDOW) {
+            let target = format!("{}{path}", site_origin(&settings.site_url));
+            let encoded = serde_json::to_string(&target).unwrap_or_else(|_| "\"\"".into());
+            let _ = win.eval(format!("window.location.assign({encoded})"));
+        }
+    });
+}
+
+/// The application menu.
+///
+/// A desktop app is expected to have one: it is where the keyboard shortcuts
+/// are discovered, and on macOS its absence is what makes a window feel like a
+/// web page in a frame rather than an installed application. The entries stay
+/// deliberately thin — they open windows and navigate the site — because the
+/// product itself lives in the page and duplicating its features here would
+/// mean maintaining two versions of each.
+fn build_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let new_chat = MenuItem::with_id(app, "new-chat", "新建对话", true, Some("CmdOrCtrl+N"))?;
+    let new_task = MenuItem::with_id(
+        app,
+        "new-task",
+        "新建工作任务",
+        true,
+        Some("CmdOrCtrl+Shift+N"),
+    )?;
+    let home = MenuItem::with_id(app, "home", "回到首页", true, Some("CmdOrCtrl+0"))?;
+    let panel = MenuItem::with_id(app, "panel", "本机设置…", true, Some("CmdOrCtrl+,"))?;
+    let reload = MenuItem::with_id(app, "reload", "重新载入", true, Some("CmdOrCtrl+R"))?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        "退出（停止本机任务）",
+        true,
+        Some("CmdOrCtrl+Q"),
+    )?;
+
+    let file = Submenu::with_items(
+        app,
+        "Yunova",
+        true,
+        &[
+            &new_chat,
+            &new_task,
+            &home,
+            &PredefinedMenuItem::separator(app)?,
+            &panel,
+            &reload,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+
+    // Copy/paste must be present as real menu items, not just as key handling:
+    // on macOS the system only delivers the standard editing shortcuts to a
+    // webview when the menu declares them, so without this block the user
+    // cannot paste into the page at all.
+    let edit = Submenu::with_items(
+        app,
+        "编辑",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, None)?,
+            &PredefinedMenuItem::redo(app, None)?,
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::cut(app, None)?,
+            &PredefinedMenuItem::copy(app, None)?,
+            &PredefinedMenuItem::paste(app, None)?,
+            &PredefinedMenuItem::select_all(app, None)?,
+        ],
+    )?;
+
+    let window = Submenu::with_items(
+        app,
+        "窗口",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            &PredefinedMenuItem::fullscreen(app, None)?,
+        ],
+    )?;
+
+    Menu::with_items(app, &[&file, &edit, &window])
+}
+
+/// Route a menu click. Shared with the tray so one id means one behaviour.
+fn on_menu(app: &AppHandle, id: &str) {
+    match id {
+        "new-chat" => navigate_site(app, "/"),
+        "new-task" => navigate_site(app, "/t"),
+        "home" => navigate_site(app, "/"),
+        "panel" => {
+            let _ = show_panel(app);
+        }
+        "reload" => {
+            if let Some(win) = app.get_webview_window(SITE_WINDOW) {
+                let _ = win.eval("window.location.reload()");
+            }
+        }
+        "open" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let settings = app.state::<AppState>().settings.lock().await.clone();
+                let _ = if settings.is_configured() {
+                    open_site(&app, &settings)
+                } else {
+                    show_panel(&app)
+                };
+            });
+        }
+        "quit" => {
+            // Explicit: the user is told this stops local tasks, so honour it
+            // immediately rather than leaving runtimes behind.
+            let state = app.state::<AppState>();
+            let connector = Arc::clone(&state.connector);
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                connector.stop().await;
+                app.exit(0);
+            });
+        }
+        _ => {}
+    }
+}
+
 /// Show the local control panel: the part that is genuinely this app's, and
 /// the only surface allowed to touch local settings.
 fn show_panel(app: &AppHandle) -> tauri::Result<()> {
@@ -420,6 +619,8 @@ pub fn run() {
             pick_workspace,
             show_site,
             open_panel,
+            install_runtime,
+            check_runtime,
         ])
         .setup(move |app| {
             let handle = app.handle().clone();
@@ -446,6 +647,14 @@ pub fn run() {
             });
 
             build_tray(&handle)?;
+
+            // The menu is what makes this an application rather than a page in
+            // a frame: it is where the shortcuts are discoverable, and on
+            // macOS the standard editing shortcuts only reach the webview when
+            // a menu declares them.
+            let menu = build_menu(&handle)?;
+            app.set_menu(menu)?;
+            app.on_menu_event(|app, event| on_menu(app, event.id().as_ref()));
 
             // The site opens first and the connector follows, with no address
             // to type and no button to press: the app knows its own site, and
@@ -587,9 +796,10 @@ async fn watch_site_login(app: AppHandle, paused: Arc<AtomicBool>) {
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "打开 Yunova", true, None::<&str>)?;
+    let new_task = MenuItem::with_id(app, "new-task", "新建工作任务", true, None::<&str>)?;
     let panel = MenuItem::with_id(app, "panel", "本机设置…", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "退出（停止本机任务）", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &panel, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &new_task, &panel, &quit])?;
 
     TrayIconBuilder::with_id("yunova")
         .icon(app.default_window_icon().cloned().ok_or_else(|| {
@@ -600,34 +810,9 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
         // The menu must not also fire on a left click, or the click-to-open
         // gesture below never reaches us on Windows.
         .show_menu_on_left_click(false)
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            "open" => {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    let settings = app.state::<AppState>().settings.lock().await.clone();
-                    let _ = if settings.is_configured() {
-                        open_site(&app, &settings)
-                    } else {
-                        show_panel(&app)
-                    };
-                });
-            }
-            "panel" => {
-                let _ = show_panel(app);
-            }
-            "quit" => {
-                // Explicit: the user is told this stops local tasks, so honour
-                // it immediately rather than leaving runtimes behind.
-                let state = app.state::<AppState>();
-                let connector = Arc::clone(&state.connector);
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    connector.stop().await;
-                    app.exit(0);
-                });
-            }
-            _ => {}
-        })
+        // Same handler as the application menu, so one id cannot come to mean
+        // two different things depending on where it was clicked.
+        .on_menu_event(|app, event| on_menu(app, event.id().as_ref()))
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click { button, .. } = event
                 && button == tauri::tray::MouseButton::Left

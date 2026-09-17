@@ -108,6 +108,23 @@
         </p>
       </section>
 
+      <section class="card" id="runtimeCard">
+        <h2>本机运行时 <span class="count" id="runtimeVersion"></span></h2>
+        <p class="hint">
+          让任务在这台电脑上执行需要 pi 运行时。装好后在终端里运行
+          <code>pi</code>，再用 <code>/login yunova</code> 即可直接调用本站模型。
+        </p>
+        <p class="hint" id="runtimePath"></p>
+        <div class="row">
+          <button class="primary" id="installRuntime" hidden></button>
+          <button class="ghost" id="checkRuntime">重新检测</button>
+        </div>
+        <p class="warn" id="runtimeMissing" hidden>
+          未找到可用运行时，本机暂时无法执行任务。
+        </p>
+        <p class="error" id="runtimeError" hidden></p>
+      </section>
+
       <section class="card">
         <h2>运行日志 <span class="count" id="sessions"></span></h2>
         <pre id="log" class="log"></pre>
