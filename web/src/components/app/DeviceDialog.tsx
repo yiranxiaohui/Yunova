@@ -102,9 +102,13 @@ export function DeviceDialog({
     }
   }
 
-  const runSnippet = `YUNOVA_DEVICE_URL=${window.location.origin}
-YUNOVA_DEVICE_WORKSPACE=<Agent 可操作的目录>
-./yunova-desktop`
+  // The desktop app needs none of this: it knows its own address and binds
+  // itself from the sign-in in its own window. What is left here is the
+  // headless case — a server or a container with no window to sign in from —
+  // which is the only place an address and an account still have to be given.
+  const runSnippet = `YUNOVA_DEVICE_WORKSPACE=<Agent 可操作的目录> \\
+YUNOVA_DEVICE_URL=${window.location.origin} \\
+./yunova-desktop --headless`
 
   const copy = async () => {
     try {
@@ -124,8 +128,8 @@ YUNOVA_DEVICE_WORKSPACE=<Agent 可操作的目录>
         <DialogHeader>
           <DialogTitle>本地电脑</DialogTitle>
           <DialogDescription>
-            在自己的电脑上运行桌面客户端并登录本账号，这台机器会自动出现在下面的列表里。
-            还没有客户端？
+            在自己的电脑上安装并打开桌面客户端，在它的窗口里登录本账号，这台机器就会
+            自动出现在下面的列表里——不用填地址，也不用配对码。还没有客户端？
             <a
               href="/download"
               target="_blank"
@@ -142,7 +146,7 @@ YUNOVA_DEVICE_WORKSPACE=<Agent 可操作的目录>
           <div className="rounded-lg border border-border bg-muted/50 p-3">
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs text-muted-foreground">
-                在目标电脑上运行，然后按提示登录：
+                没有桌面环境的机器（服务器、容器）用无界面模式：
               </span>
               <Button size="sm" variant="ghost" onClick={() => void copy()}>
                 {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}

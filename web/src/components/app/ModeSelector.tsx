@@ -249,7 +249,7 @@ function TargetPicker({
         ))}
         {devices.length === 0 && (
           <div className="px-2 py-1.5 text-xs text-muted-foreground">
-            暂无本地电脑：在那台电脑上运行桌面客户端并登录本账号即可
+            暂无本地电脑：在那台电脑上打开桌面客户端并登录本账号即可
           </div>
         )}
       </SelectContent>

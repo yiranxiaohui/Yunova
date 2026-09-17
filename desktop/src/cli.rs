@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::connector::{Connector, ConnectorConfig, Host, Status};
-use crate::endpoint::hostname;
+use crate::endpoint::{default_site_url, hostname};
 use crate::identity::{Login, prompt_login};
 use crate::runtime_env;
 
@@ -54,19 +54,15 @@ impl Host for TerminalHost {
 }
 
 pub fn run() {
-    let Ok(raw) = runtime_env::var("YUNOVA_DEVICE_URL") else {
-        eprintln!(
-            "无界面模式需要环境变量 YUNOVA_DEVICE_URL（站点地址，如 https://yunnet.top）\n\
-             首次运行会提示登录 Yunova 账号，登录后自动绑定本机\n\
-             可选 YUNOVA_USERNAME、YUNOVA_PASSWORD（无人值守启动，免交互登录）\n\
-             可选 YUNOVA_DEVICE_WORKSPACE（Agent 可操作的目录，默认当前目录）\n\
-             可选 YUNOVA_DEVICE_NAME、YUNOVA_PI_BIN\n\
-             可选 YUNOVA_DEVICE_AUTO_APPROVE=1（放开审批，谨慎使用）\n\
-             \n\
-             不带 --headless 运行可打开桌面应用。"
-        );
-        std::process::exit(2);
-    };
+    // The address is the product's own, so a headless run needs no
+    // configuration either; `YUNOVA_DEVICE_URL` remains for self-hosted
+    // instances. There is no window here to read a session from, so this path
+    // still signs in with an account.
+    let raw = runtime_env::var("YUNOVA_DEVICE_URL")
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default_site_url().to_string());
 
     // The workspace bounds what the agent can reach. Defaulting to the current
     // directory rather than $HOME keeps an unconfigured run from exposing

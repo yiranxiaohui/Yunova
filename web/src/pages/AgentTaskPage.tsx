@@ -653,7 +653,7 @@ export default function AgentTaskPage() {
               <p className="mt-1.5 text-center text-[10px] tracking-wide text-muted-foreground/80">
                 {target === "cloud"
                   ? "云电脑在隔离容器中运行，仅按 token 计费，不额外收取机时。"
-                  : "本地电脑任务在你自己的机器上执行，需要桌面客户端登录同一账号并保持在线。"}
+                  : "本地电脑任务在你自己的机器上执行，需要那台电脑上的桌面客户端登录同一账号并保持打开。"}
               </p>
             )}
           </div>

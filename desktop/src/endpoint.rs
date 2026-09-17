@@ -7,6 +7,29 @@
 
 use serde_json::Value;
 
+/// The site this client belongs to.
+///
+/// Baked in rather than asked for: this is a product with one address, and a
+/// first-run screen demanding a URL the user has no reason to know is how the
+/// app ends up looking broken ("本地电脑未在线") on a perfectly good install.
+/// It stays *overridable* — a self-hosted build can bake its own address, and
+/// the settings file and `YUNOVA_DEVICE_URL` still win at runtime — so nothing
+/// is lost by having an answer by default.
+pub fn default_site_url() -> &'static str {
+    match option_env!("YUNOVA_DEFAULT_SITE_URL") {
+        Some(v) if !v.is_empty() => v,
+        _ => "https://chat.yunnet.top",
+    }
+}
+
+/// Name of the site's session cookie.
+///
+/// The desktop app reads it out of its own site webview to bind this machine
+/// without asking for a password the user already typed in that window. Kept
+/// in step with the server's `auth::SESSION_COOKIE` by
+/// `tests/session_cookie_single_source.rs`.
+pub const SESSION_COOKIE: &str = "nc_session";
+
 /// Accept a site address and derive the device WebSocket endpoint.
 ///
 /// Users paste what they see in the browser, so the bare origin must work:
@@ -128,6 +151,25 @@ pub fn platform() -> &'static str {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_built_in_site_address_is_usable_without_configuration() {
+        // The whole point of the default is that a fresh install can connect,
+        // so it has to survive the same derivation the user's own input does.
+        let url = default_site_url();
+        assert!(
+            url.starts_with("https://"),
+            "the shipped default must not downgrade the session cookie: {url}"
+        );
+        assert_eq!(
+            device_endpoint(url),
+            format!(
+                "wss://{}/api/agent/devices/connect",
+                &url["https://".len()..]
+            )
+        );
+        assert_eq!(site_origin(url), url);
+    }
 
     #[test]
     fn a_bare_site_address_becomes_a_secure_endpoint() {

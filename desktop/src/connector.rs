@@ -85,6 +85,17 @@ pub trait Host: Send + Sync + 'static {
     /// An agent on this machine is blocked waiting for a human. Worth
     /// interrupting for: a task nobody knows is waiting never finishes.
     fn attention(&self, title: String, body: String);
+    /// Obtain the site's own session token, when the host has a signed-in
+    /// view of the site to read one from.
+    ///
+    /// This is what lets the desktop app bind this machine without a second
+    /// sign-in: the user already authenticated in the window, so asking for
+    /// the password again is a step that exists only because the connector
+    /// could not see it. A headless host has no window and returns `None`.
+    fn session_token(&self) -> Option<String> {
+        None
+    }
+
     /// Obtain account credentials. A terminal can ask; a window cannot ask
     /// from inside the connection loop, so it declines and lets its own UI
     /// drive the sign-in instead.
@@ -99,6 +110,8 @@ pub trait Host: Send + Sync + 'static {
 /// How this connection intends to authenticate.
 enum Attach {
     Token(String),
+    /// The site's browser session, read from the app's own signed-in window.
+    Session(String),
     Login(Login),
 }
 
@@ -235,21 +248,28 @@ impl Connector {
             let attach = match (pending_login.take(), &credential) {
                 (Some(login), _) => Attach::Login(login),
                 (None, Some(c)) => Attach::Token(c.token.clone()),
-                (None, None) => match self.host.login() {
-                    Ok(login) => Attach::Login(login),
-                    Err(reason) => {
-                        // Nothing to connect with, and guessing is not an
-                        // option: stop rather than spin against a server that
-                        // will refuse every attempt.
-                        self.set_status(Status::NeedsLogin {
-                            reason: (!reason.trim().is_empty()).then_some(reason),
-                        })
-                        .await;
-                        return;
-                    }
+                // No device token yet. Before troubling the user, look for a
+                // signed-in site window: that is the normal first run of the
+                // desktop app, and it is the whole reason the machine appears
+                // in the device list on its own.
+                (None, None) => match self.host.session_token() {
+                    Some(session) => Attach::Session(session),
+                    None => match self.host.login() {
+                        Ok(login) => Attach::Login(login),
+                        Err(reason) => {
+                            // Nothing to connect with, and guessing is not an
+                            // option: stop rather than spin against a server
+                            // that will refuse every attempt.
+                            self.set_status(Status::NeedsLogin {
+                                reason: (!reason.trim().is_empty()).then_some(reason),
+                            })
+                            .await;
+                            return;
+                        }
+                    },
                 },
             };
-            let signing_in = matches!(attach, Attach::Login(_));
+            let signing_in = matches!(attach, Attach::Login(_) | Attach::Session(_));
 
             self.set_status(Status::Connecting).await;
             match run_once(
@@ -343,9 +363,12 @@ async fn run_once(
     // Credentials cross this socket, so refuse to send a password in the
     // clear. Plain HTTP stays usable for local development and for an
     // already-issued token, but a password is not worth the same latitude.
-    if matches!(attach, Attach::Login(_)) && !url.starts_with("wss://") && !is_loopback(url) {
+    if matches!(attach, Attach::Login(_) | Attach::Session(_))
+        && !url.starts_with("wss://")
+        && !is_loopback(url)
+    {
         return Err(Failure::Misconfigured(
-            "拒绝在非加密连接上发送密码，请将站点地址改为 https://".into(),
+            "拒绝在非加密连接上发送凭据，请将站点地址改为 https://".into(),
         ));
     }
 
@@ -360,6 +383,12 @@ async fn run_once(
             token,
             name: config.name.clone(),
             platform: Some(platform().to_string()),
+        },
+        Attach::Session(session) => ToServer::Attach {
+            session,
+            name: config.name.clone(),
+            platform: Some(platform().to_string()),
+            fingerprint: Some(fingerprint(&config.name)),
         },
         Attach::Login(login) => {
             signed_in_as = login.username.clone();
@@ -442,7 +471,11 @@ async fn run_once(
             continue;
         };
         match parsed {
-            FromServer::HelloOk { device_id, token } => {
+            FromServer::HelloOk {
+                device_id,
+                token,
+                username: bound_as,
+            } => {
                 // A token arrives only right after a sign-in, and it is stored
                 // immediately rather than when the socket closes: a client
                 // killed while connected would otherwise lose the credential
@@ -450,8 +483,14 @@ async fn run_once(
                 let username = match token {
                     Some(token) => {
                         let cred = Credential {
+                            // The server's answer wins: attaching through the
+                            // site's session never involved a username here,
+                            // so this is the only place it can come from.
+                            username: bound_as
+                                .map(|u| u.trim().to_string())
+                                .filter(|u| !u.is_empty())
+                                .unwrap_or_else(|| signed_in_as.clone()),
                             token,
-                            username: signed_in_as.clone(),
                             device_id,
                         };
                         match save_credential(cred_path, &cred) {
@@ -611,6 +650,121 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[tokio::test]
+    async fn a_signed_in_window_attaches_without_asking_for_a_password() {
+        // The point of the whole automatic path: with a session available the
+        // connector must try it rather than parking in NeedsLogin, which is
+        // what left a freshly installed app showing "本地电脑（离线）".
+        struct Windowed {
+            seen: std::sync::Mutex<Vec<Status>>,
+            asked_for_password: std::sync::atomic::AtomicBool,
+        }
+        impl Host for Windowed {
+            fn status(&self, status: Status) {
+                self.seen.lock().unwrap().push(status);
+            }
+            fn log(&self, _line: String) {}
+            fn attention(&self, _title: String, _body: String) {}
+            fn session_token(&self) -> Option<String> {
+                Some("nc_session_value".into())
+            }
+            fn login(&self) -> Result<Login, String> {
+                self.asked_for_password
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Err(String::new())
+            }
+        }
+
+        let host = Arc::new(Windowed {
+            seen: std::sync::Mutex::new(Vec::new()),
+            asked_for_password: std::sync::atomic::AtomicBool::new(false),
+        });
+        let connector = Connector::new(Arc::clone(&host) as Arc<dyn Host>);
+        let dir = std::env::temp_dir().join(format!("yunova-session-{}", std::process::id()));
+        connector
+            .start(
+                ConnectorConfig {
+                    // Unresolvable on purpose: the assertion is about which
+                    // credential the loop reaches for, not about reaching a
+                    // server.
+                    site_url: "https://example.invalid".into(),
+                    name: "laptop".into(),
+                    workspace: dir.clone(),
+                    state_dir: dir.clone(),
+                    program: "pi".into(),
+                    auto_approve: false,
+                    config_dir: Some(dir.clone()),
+                },
+                None,
+            )
+            .await;
+
+        // It must reach the transport rather than give up, so wait for a
+        // Connecting/Error rather than for the task to end.
+        let mut tried = false;
+        for _ in 0..80 {
+            if host
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| matches!(s, Status::Connecting))
+            {
+                tried = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        connector.stop().await;
+        assert!(tried, "a session in the window must be tried");
+        assert!(
+            !host
+                .asked_for_password
+                .load(std::sync::atomic::Ordering::SeqCst),
+            "the user already signed in on the site; asking again is the step this removes"
+        );
+        assert!(
+            !host
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|s| matches!(s, Status::NeedsLogin { .. })),
+            "a usable session must not be reported as a missing login"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_session_is_never_sent_over_plain_http() {
+        // It buys the same access a password does, so it gets the same rule:
+        // the check lives in `run_once`, and this asserts the classification
+        // it depends on rather than reaching a socket.
+        assert!(!is_loopback("ws://yunnet.top/api/agent/devices/connect"));
+        assert!(is_loopback("ws://127.0.0.1:3000/api/agent/devices/connect"));
+    }
+
+    #[test]
+    fn the_attach_frame_proves_the_machine_with_the_sites_session() {
+        let text = serde_json::to_string(&ToServer::Attach {
+            session: "nc_session_value".into(),
+            name: "laptop".into(),
+            platform: Some("linux".into()),
+            fingerprint: Some("fp123".into()),
+        })
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["type"], "attach");
+        assert_eq!(v["session"], "nc_session_value");
+        // Same rebinding rule as a password login: re-running the app must not
+        // add a second entry to the user's device list.
+        assert_eq!(v["fingerprint"], "fp123");
+        assert!(
+            v.get("password").is_none(),
+            "this path exists precisely so no password is involved"
+        );
+    }
+
     #[test]
     fn the_hello_frame_matches_the_servers_wire_format() {
         let text = serde_json::to_string(&ToServer::Hello {
@@ -650,17 +804,31 @@ mod tests {
         // ordinary reconnect would fail to parse.
         let ok: FromServer = serde_json::from_str(r#"{"type":"hello_ok","device_id":3}"#).unwrap();
         match ok {
-            FromServer::HelloOk { device_id, token } => {
+            FromServer::HelloOk {
+                device_id,
+                token,
+                username,
+            } => {
                 assert_eq!(device_id, 3);
                 assert!(token.is_none());
+                assert!(username.is_none());
             }
             other => panic!("expected hello_ok, got {other:?}"),
         }
 
-        let fresh: FromServer =
-            serde_json::from_str(r#"{"type":"hello_ok","device_id":3,"token":"ynd_new"}"#).unwrap();
+        let fresh: FromServer = serde_json::from_str(
+            r#"{"type":"hello_ok","device_id":3,"token":"ynd_new","username":"orca"}"#,
+        )
+        .unwrap();
         match fresh {
-            FromServer::HelloOk { token, .. } => assert_eq!(token.as_deref(), Some("ynd_new")),
+            FromServer::HelloOk {
+                token, username, ..
+            } => {
+                assert_eq!(token.as_deref(), Some("ynd_new"));
+                // The automatic attach never typed a username, so the panel
+                // can only name the account if the server says it.
+                assert_eq!(username.as_deref(), Some("orca"));
+            }
             other => panic!("expected hello_ok, got {other:?}"),
         }
     }

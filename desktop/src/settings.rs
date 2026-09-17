@@ -15,14 +15,15 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::endpoint::hostname;
+use crate::endpoint::{default_site_url, hostname};
 use crate::runtime_env;
 
 /// User-visible configuration of the local execution target.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
-    /// Site address, e.g. `https://yunnet.top`. Empty until first configured.
-    #[serde(default)]
+    /// Site address, e.g. `https://chat.yunnet.top`. Defaults to the address
+    /// this client was built for, so a fresh install connects on its own.
+    #[serde(default = "default_site")]
     pub site_url: String,
     /// Name shown in the device list.
     #[serde(default = "hostname")]
@@ -45,6 +46,10 @@ fn yes() -> bool {
     true
 }
 
+fn default_site() -> String {
+    default_site_url().to_string()
+}
+
 fn default_program() -> String {
     "pi".to_string()
 }
@@ -52,7 +57,10 @@ fn default_program() -> String {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            site_url: String::new(),
+            // Not empty: an app that has to be told its own address cannot
+            // connect by itself, and "本地电脑未在线" with a blank settings
+            // form is the worst possible first run.
+            site_url: default_site(),
             name: hostname(),
             // Never `$HOME`: an unconfigured app must not hand an agent
             // everything the user owns just because nobody narrowed it.
@@ -122,6 +130,11 @@ impl Settings {
         if settings.name.trim().is_empty() {
             settings.name = hostname();
         }
+        // A settings file written before the address had a default, or one a
+        // user cleared, must not leave the app unable to reach its own site.
+        if settings.site_url.trim().is_empty() {
+            settings.site_url = default_site();
+        }
         if settings.workspace.trim().is_empty() {
             settings.workspace = default_workspace().to_string_lossy().into_owned();
         }
@@ -133,7 +146,14 @@ impl Settings {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("无法创建配置目录 {}: {e}", parent.display()))?;
         }
-        let body = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        // Clearing the address field is read as "go back to the built-in
+        // site", not as "disconnect this app permanently": the latter has a
+        // switch of its own, and a blank required field is not a setting.
+        let mut out = self.clone();
+        if out.site_url.trim().is_empty() {
+            out.site_url = default_site();
+        }
+        let body = serde_json::to_string_pretty(&out).map_err(|e| e.to_string())?;
         std::fs::write(path, body).map_err(|e| format!("无法写入 {}: {e}", path.display()))
     }
 
@@ -198,6 +218,20 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_install_already_knows_where_to_connect() {
+        // The address is the app's own, not a fact the user is expected to
+        // supply; without this the first run shows a settings form and the
+        // device list stays empty.
+        let s = Settings::default();
+        assert_eq!(s.site_url, default_site_url());
+        assert!(s.is_configured(), "a default install must be connectable");
+        assert!(
+            s.connect_on_launch,
+            "attaching must not require pressing a button"
+        );
+    }
+
+    #[test]
     fn an_unconfigured_app_does_not_expose_the_home_directory() {
         // The workspace is the only thing bounding what a prompt from a phone
         // can reach, so its default must actually bound something.
@@ -210,25 +244,49 @@ mod tests {
             assert_ne!(s.workspace_path(), home);
             assert!(s.workspace_path().starts_with(&home));
         }
-        assert!(!s.is_configured(), "no server means nothing to connect to");
     }
 
     #[test]
     fn settings_survive_a_round_trip() {
         let dir = temp("roundtrip");
         let path = dir.join("settings.json");
-        let mut s = Settings::default();
-        s.site_url = "https://yunnet.top".into();
-        s.name = "laptop".into();
-        s.auto_approve = true;
+        let s = Settings {
+            site_url: "https://self.hosted.example".into(),
+            name: "laptop".into(),
+            auto_approve: true,
+            ..Default::default()
+        };
         s.save(&path).unwrap();
 
         let back = Settings::load(&path);
-        assert_eq!(back.site_url, "https://yunnet.top");
+        // A self-hosted address must survive: the built-in default is a
+        // starting point, not a lock.
+        if runtime_env::var("YUNOVA_DEVICE_URL").is_err() {
+            assert_eq!(back.site_url, "https://self.hosted.example");
+        }
         assert_eq!(back.name, "laptop");
         assert!(back.auto_approve);
         assert!(back.is_configured());
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_cleared_address_falls_back_to_the_built_in_site() {
+        // Otherwise emptying the field would leave an app that can never
+        // reconnect, with no hint of how to get back.
+        let dir = temp("cleared");
+        let path = dir.join("settings.json");
+        let s = Settings {
+            site_url: "   ".into(),
+            ..Default::default()
+        };
+        s.save(&path).unwrap();
+        let back = Settings::load(&path);
+        if runtime_env::var("YUNOVA_DEVICE_URL").is_err() {
+            assert_eq!(back.site_url, default_site_url());
+        }
+        assert!(back.is_configured());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -241,7 +299,9 @@ mod tests {
         let path = dir.join("settings.json");
         std::fs::write(&path, "not json").unwrap();
         let s = Settings::load(&path);
-        assert_eq!(s.site_url, "");
+        if runtime_env::var("YUNOVA_DEVICE_URL").is_err() {
+            assert_eq!(s.site_url, default_site_url());
+        }
         assert!(!s.auto_approve);
         std::fs::remove_dir_all(&dir).ok();
     }

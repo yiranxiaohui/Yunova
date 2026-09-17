@@ -78,6 +78,25 @@ pub enum FromDevice {
         #[serde(default)]
         fingerprint: Option<String>,
     },
+    /// First frame from the desktop app when the site window it embeds is
+    /// already signed in: the browser session token stands in for the
+    /// password.
+    ///
+    /// This is what makes the app attach by itself. The alternative — asking
+    /// for the account password a second time, in a second window, after the
+    /// user already signed in to the page — is why a freshly installed client
+    /// used to sit there while the web UI reported the machine as offline.
+    /// The session token is strictly weaker than the password: it is already
+    /// in that webview, it expires, and revoking the session revokes this
+    /// path with it.
+    Attach {
+        session: String,
+        name: String,
+        #[serde(default)]
+        platform: Option<String>,
+        #[serde(default)]
+        fingerprint: Option<String>,
+    },
     /// Keeps the connection warm and refreshes `last_seen_at`.
     Heartbeat,
     /// One JSONL record from the local runtime's stdout, verbatim.
@@ -103,6 +122,12 @@ pub enum ToDevice {
         /// on every login, so whatever was on that disk before stops working.
         #[serde(skip_serializing_if = "Option::is_none")]
         token: Option<String>,
+        /// Which account this machine is bound to. Sent with a freshly minted
+        /// token because the client may not know it: attaching through the
+        /// site's session never asks for a username, and a panel that then
+        /// says "已绑定" with no name reads as a half-finished bind.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        username: Option<String>,
     },
     Error {
         message: String,
@@ -591,9 +616,12 @@ async fn device_for_token(pool: &Pool, kind: DbKind, token: &str) -> Option<(i64
 struct Attached {
     device_id: i64,
     user_id: i64,
-    /// Set when the handshake was a password login, so the client can store a
-    /// token and stop holding the password.
+    /// Set when the handshake minted one, so the client can store a token and
+    /// stop holding whatever credential it arrived with.
     issued_token: Option<String>,
+    /// The account name, reported alongside a freshly minted token because a
+    /// client that attached through the site's session never typed one.
+    username: Option<String>,
 }
 
 /// Authenticate the first frame, binding the machine when it is a login.
@@ -631,6 +659,7 @@ async fn attach(
                     device_id,
                     user_id,
                     issued_token: None,
+                    username: None,
                 },
                 name,
                 platform,
@@ -672,12 +701,56 @@ async fn attach(
                     device_id,
                     user_id,
                     issued_token: Some(token),
+                    username: Some(username.trim().to_string()),
                 },
                 clean,
                 platform,
             ))
         }
-        _ => Err("首帧必须是 hello 或 login".into()),
+        FromDevice::Attach {
+            session,
+            name,
+            platform,
+            fingerprint,
+        } => {
+            // Rate limited like the password door: this is still a path from
+            // an arbitrary socket to a bound device, so guessing at session
+            // tokens must cost the same as guessing at passwords.
+            if !state.auth_limiter.allow(ip).await {
+                return Err("请求过于频繁，请稍后再试".into());
+            }
+            let (user_id, username) =
+                crate::auth::user_for_token(&installed.pool, installed.kind, session.trim())
+                    .await
+                    // Expired or unknown: the client falls back to asking the
+                    // user to sign in, so this must read as "sign in again"
+                    // rather than as a broken install.
+                    .ok_or("登录状态已失效，请在窗口重新登录")?;
+            let clean = clean_name(Some(&name));
+            let (device_id, token, created) = bind_device(
+                installed,
+                user_id,
+                &clean,
+                platform.as_deref(),
+                clean_fingerprint(fingerprint.as_deref()).as_deref(),
+            )
+            .await?;
+            eprintln!(
+                "[agent-device] {} device {device_id} for user {user_id} via web session",
+                if created { "bound new" } else { "rebound" }
+            );
+            Ok((
+                Attached {
+                    device_id,
+                    user_id,
+                    issued_token: Some(token),
+                    username: Some(username),
+                },
+                clean,
+                platform,
+            ))
+        }
+        _ => Err("首帧必须是 hello、attach 或 login".into()),
     }
 }
 
@@ -718,6 +791,7 @@ async fn handle_socket(
         device_id,
         user_id,
         issued_token,
+        username,
     } = attached;
 
     // Record what connected, so the user can tell their machines apart.
@@ -744,6 +818,7 @@ async fn handle_socket(
     let ok = serde_json::to_string(&ToDevice::HelloOk {
         device_id,
         token: issued_token,
+        username,
     })
     .unwrap_or_default();
     if sink.send(Message::Text(ok.into())).await.is_err() {
@@ -822,7 +897,7 @@ async fn handle_socket(
                 eprintln!("[agent-device] device {device_id} session {session_id}: {message}");
                 frame_senders.write().await.remove(&session_id);
             }
-            FromDevice::Hello { .. } | FromDevice::Login { .. } => {
+            FromDevice::Hello { .. } | FromDevice::Attach { .. } | FromDevice::Login { .. } => {
                 // Already handled during the handshake. Re-authenticating on
                 // a live socket is ignored rather than honoured: rebinding
                 // mid-stream would move sessions under the running runtimes.
@@ -862,6 +937,103 @@ pub async fn register_session_frames(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An installed instance backed by an in-memory database.
+    async fn installed() -> InstalledState {
+        crate::db::install_drivers();
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool, DbKind::Sqlite).await.unwrap();
+        InstalledState {
+            pool,
+            kind: DbKind::Sqlite,
+        }
+    }
+
+    async fn user_with_session(installed: &InstalledState) -> (i64, String) {
+        let hash = crate::auth::hash_password("pw").unwrap();
+        sqlx::query(&db::q(
+            installed.kind,
+            "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 0)",
+        ))
+        .bind("orca")
+        .bind(&hash)
+        .execute(&installed.pool)
+        .await
+        .unwrap();
+        let user_id: i64 = sqlx::query_scalar(&db::q(
+            installed.kind,
+            "SELECT id FROM users WHERE username = ?",
+        ))
+        .bind("orca")
+        .fetch_one(&installed.pool)
+        .await
+        .unwrap();
+        let (token, _) = crate::auth::create_session(&installed.pool, installed.kind, user_id)
+            .await
+            .unwrap();
+        (user_id, token)
+    }
+
+    #[tokio::test]
+    async fn a_web_session_identifies_the_account_a_machine_binds_to() {
+        // The desktop app attaches with the session its own window already
+        // holds, so this is the credential path that replaces asking for the
+        // password a second time.
+        let installed = installed().await;
+        let (user_id, session) = user_with_session(&installed).await;
+
+        assert_eq!(
+            crate::auth::user_for_token(&installed.pool, installed.kind, &session)
+                .await
+                .map(|(id, _)| id),
+            Some(user_id)
+        );
+        // An unknown session must resolve to nobody, or the socket would be a
+        // way to attach to an account without any credential at all.
+        assert!(
+            crate::auth::user_for_token(&installed.pool, installed.kind, "not-a-session")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn attaching_on_every_launch_rebinds_one_machine() {
+        // The app now attaches by itself each time it starts, so a device row
+        // per launch would fill the user's list and burn the 20-device cap
+        // within a week.
+        let installed = installed().await;
+        let (user_id, _) = user_with_session(&installed).await;
+
+        let (first, first_token, created) =
+            bind_device(&installed, user_id, "laptop", Some("linux"), Some("fp"))
+                .await
+                .unwrap();
+        assert!(created);
+        let (again, second_token, created_again) =
+            bind_device(&installed, user_id, "laptop", Some("linux"), Some("fp"))
+                .await
+                .unwrap();
+        assert_eq!(first, again, "the same machine must reuse its device row");
+        assert!(!created_again);
+        assert_eq!(live_device_count(&installed, user_id).await, 1);
+        // The token rotates, so whatever was on that disk before stops
+        // working even though the row is reused.
+        assert_ne!(first_token, second_token);
+        assert!(
+            device_for_token(&installed.pool, installed.kind, &first_token)
+                .await
+                .is_none()
+        );
+        assert_eq!(
+            device_for_token(&installed.pool, installed.kind, &second_token).await,
+            Some((again, user_id))
+        );
+    }
 
     #[test]
     fn device_tokens_are_namespaced_away_from_gateway_tokens() {
@@ -936,6 +1108,27 @@ mod tests {
             serde_json::from_str(r#"{"type":"hello","token":"ynd_x","name":"pc"}"#).unwrap();
         assert!(matches!(minimal, FromDevice::Hello { .. }));
 
+        // The desktop app's automatic path: the window is already signed in,
+        // so it attaches with that session instead of asking again.
+        let attach: FromDevice = serde_json::from_str(
+            r#"{"type":"attach","session":"deadbeef","name":"pc","fingerprint":"fp"}"#,
+        )
+        .unwrap();
+        match attach {
+            FromDevice::Attach {
+                session,
+                name,
+                platform,
+                fingerprint,
+            } => {
+                assert_eq!(session, "deadbeef");
+                assert_eq!(name, "pc");
+                assert!(platform.is_none());
+                assert_eq!(fingerprint.as_deref(), Some("fp"));
+            }
+            other => panic!("expected attach, got {other:?}"),
+        }
+
         // The sign-in frame is the replacement for pairing: an account plus
         // the machine it is being bound to.
         let login: FromDevice = serde_json::from_str(
@@ -968,6 +1161,7 @@ mod tests {
         let plain = serde_json::to_string(&ToDevice::HelloOk {
             device_id: 3,
             token: None,
+            username: None,
         })
         .unwrap();
         let v: Value = serde_json::from_str(&plain).unwrap();
@@ -977,10 +1171,14 @@ mod tests {
         let fresh = serde_json::to_string(&ToDevice::HelloOk {
             device_id: 3,
             token: Some("ynd_new".into()),
+            username: Some("orca".into()),
         })
         .unwrap();
         let v: Value = serde_json::from_str(&fresh).unwrap();
         assert_eq!(v["token"], "ynd_new");
+        // The client may have attached with a session and never seen a
+        // username, so the bind has to report which account it landed on.
+        assert_eq!(v["username"], "orca");
     }
 
     #[test]

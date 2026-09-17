@@ -28,6 +28,15 @@ pub enum ToServer {
         /// same device row instead of registering a duplicate.
         fingerprint: Option<String>,
     },
+    /// First run in the desktop app: the site window is already signed in, so
+    /// its session token is proof enough to bind this machine. No password is
+    /// asked for, because the user already gave one to the page.
+    Attach {
+        session: String,
+        name: String,
+        platform: Option<String>,
+        fingerprint: Option<String>,
+    },
     Heartbeat,
     /// One JSONL record from a local runtime's stdout, verbatim.
     Frame {
@@ -54,6 +63,11 @@ pub enum FromServer {
         /// the password is never kept on disk.
         #[serde(default)]
         token: Option<String>,
+        /// The account this machine was just bound to. Needed because the
+        /// automatic path never asks for a username, so the server is the
+        /// only one that knows it.
+        #[serde(default)]
+        username: Option<String>,
     },
     Error {
         message: String,
