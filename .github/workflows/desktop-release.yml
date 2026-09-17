@@ -217,6 +217,10 @@ jobs:
       - name: Assemble and upload latest.json
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `gh` otherwise infers the repository from the local git checkout,
+          # and this job deliberately has none -- it only moves release
+          # assets. Without this it fails with "not a git repository".
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
         run: |
