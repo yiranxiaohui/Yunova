@@ -103,6 +103,19 @@ export const agentApi = {
     )
   },
 
+  /** Delete a session for good: runtime, transcript and workspace.
+   *
+   *  Distinct from `stop`, which only releases the runtime and deliberately
+   *  keeps the transcript readable. */
+  async remove(sid: number): Promise<void> {
+    await okOrThrow(
+      await fetch(`/api/agent/sessions/${sid}`, {
+        method: "DELETE",
+        credentials: "same-origin",
+      })
+    )
+  },
+
   /** Send a prompt. `streamingBehavior` is required while the agent is
    *  already streaming; the runtime rejects an unqualified prompt then. */
   async prompt(

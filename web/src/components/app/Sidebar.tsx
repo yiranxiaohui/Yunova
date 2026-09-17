@@ -319,26 +319,26 @@ export function Sidebar({
 
   async function remove(c: SidebarItem) {
     const ok = await confirm({
-      title: `删除会话 "${c.title}"？`,
-      description: "此操作不可撤销。",
+      title: `删除${c.kind === "agent" ? "工作任务" : "会话"} "${c.title}"？`,
+      description:
+        c.kind === "agent"
+          ? "将停止其运行时并删除任务记录与工作目录，此操作不可撤销。"
+          : "此操作不可撤销。",
       confirmText: "删除",
       destructive: true,
     })
     if (!ok) return
     try {
       if (c.kind === "agent") {
-        // Stopping releases the runtime and its container. The transcript is
-        // kept: there is no delete endpoint yet, and silently dropping the
-        // row from the list would hide work the user can still open.
-        await agentApi.stop(c.id)
-        setError("已停止该任务的运行时；记录仍可查看")
-        return
+        // Deleting releases the runtime and its container as well as the
+        // transcript; `stop` is the operation that keeps the history.
+        await agentApi.remove(c.id)
       } else {
         await conversationsApi.remove(c.id)
       }
       setItems((s) => s.filter((x) => !(x.kind === c.kind && x.id === c.id)))
-      // `agent` returned above, so only chat reaches here.
-      if (!activeAgent && activeId === c.id) nav("/")
+      // Leave the page whose session just disappeared, for either kind.
+      if (activeAgent === (c.kind === "agent") && activeId === c.id) nav("/")
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }

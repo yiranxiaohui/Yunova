@@ -922,6 +922,25 @@ pub async fn register_session_frames(
     }
 }
 
+/// Drop a session's frame route from its device.
+///
+/// The counterpart to `register_session_frames`, used when a session is
+/// stopped or deleted while the machine stays connected: one socket
+/// multiplexes every session on that device, so leaving the entry behind would
+/// keep a detached pump reachable and let a restarted runtime's frames land in
+/// it instead of in the session's current one.
+pub async fn unregister_session_frames(state: &AppState, device_id: i64, session_id: i64) {
+    let map = state
+        .agent_device_frames
+        .read()
+        .await
+        .get(&device_id)
+        .cloned();
+    if let Some(map) = map {
+        map.write().await.remove(&session_id);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

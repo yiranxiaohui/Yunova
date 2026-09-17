@@ -694,6 +694,7 @@ export default function (pi: ExtensionAPI) {
 | `GET /api/agent/sessions` | 列出会话，`live` 表示当前是否挂着运行时 |
 | `POST /api/agent/sessions/{id}/start` | 启动运行时（仅 `cloud`），已启动时复用 |
 | `POST /api/agent/sessions/{id}/stop` | 停止运行时，不删记录 |
+| `DELETE /api/agent/sessions/{id}` | 删除会话：停运行时并清掉历史与工作目录 |
 | `GET /api/agent/sessions/{id}/events` | SSE 订阅；多端可同时订阅同一会话 |
 | `GET /api/agent/sessions/{id}/entries?since=<entry_id>` | 读取镜像的历史，`since` 为增量游标 |
 | `POST /api/agent/sessions/{id}/prompt` | 发消息；流式中需带 `streaming_behavior` |

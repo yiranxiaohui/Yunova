@@ -16,7 +16,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Extension, Json, Router};
 use futures_util::stream::Stream;
 use serde::Deserialize;
@@ -984,17 +984,20 @@ async fn start_session(
     Json(json!({ "ok": true, "reused": false, "sandboxed": sandboxed })).into_response()
 }
 
-/// Stop a session's runtime without deleting its transcript.
-async fn stop_session(
-    State(state): State<AppState>,
-    Extension(installed): Extension<InstalledState>,
-    Extension(user): Extension<CurrentUser>,
-    Path(sid): Path<i64>,
-) -> Response {
-    if let Err(r) = owned_session(&installed.pool, installed.kind, user.id, sid).await {
-        return r;
-    }
-    match state.agent_sessions.remove(sid).await {
+/// Release everything a session's runtime holds, leaving its rows alone.
+///
+/// Shared by stop and delete so the two cannot drift: whichever way a session
+/// is retired, the credential is revoked, the container is gone and the device
+/// no longer has a route for its frames.
+///
+/// Returns whether a live runtime was actually detached here.
+async fn teardown_runtime(
+    state: &AppState,
+    installed: &InstalledState,
+    device_id: Option<i64>,
+    sid: i64,
+) -> bool {
+    let was_live = match state.agent_sessions.remove(sid).await {
         Some(live) => {
             live.shutdown().await;
             // Retire the credential here too. The frame pump revokes on its
@@ -1002,25 +1005,137 @@ async fn stop_session(
             // path may never run for a runtime that ignores stdin EOF — and
             // "stopped" must mean the token is dead, not dead within an hour.
             live.revoke_token(&installed.pool, installed.kind).await;
-            // Also clear the container. `--rm` handles the normal exit, but a
-            // runtime that ignored stdin EOF would otherwise leak a container
-            // and hold its name against the next start.
-            crate::agent_sandbox::remove_container(sid).await;
-            set_status(&installed.pool, installed.kind, sid, "idle").await;
-            Json(json!({ "ok": true })).into_response()
+            true
         }
-        None => {
-            // Nothing live in this process, but a container can still survive
-            // a crash; removing it keeps stop idempotent and self-healing.
-            crate::agent_sandbox::remove_container(sid).await;
-            Json(json!({ "ok": true, "already_stopped": true })).into_response()
+        None => false,
+    };
+    // Clear the container either way. `--rm` handles the normal exit, but a
+    // runtime that ignored stdin EOF — or one that outlived a crash of this
+    // process — would otherwise leak a container and hold its name against the
+    // next start, so doing it unconditionally keeps teardown self-healing.
+    crate::agent_sandbox::remove_container(sid).await;
+    // Drop the device's route for this session. One socket multiplexes every
+    // session on that machine, so a stale entry would keep relaying frames
+    // into a pump nobody reads.
+    if let Some(device_id) = device_id {
+        crate::agent_device::unregister_session_frames(state, device_id, sid).await;
+    }
+    was_live
+}
+
+/// Stop a session's runtime without deleting its transcript.
+async fn stop_session(
+    State(state): State<AppState>,
+    Extension(installed): Extension<InstalledState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(sid): Path<i64>,
+) -> Response {
+    let device_id = match owned_session(&installed.pool, installed.kind, user.id, sid).await {
+        Ok((_, device_id)) => device_id,
+        Err(r) => return r,
+    };
+    if teardown_runtime(&state, &installed, device_id, sid).await {
+        set_status(&installed.pool, installed.kind, sid, "idle").await;
+        Json(json!({ "ok": true })).into_response()
+    } else {
+        // Nothing was live in this process, but teardown still ran, so a
+        // container that survived a crash is gone: stop stays idempotent.
+        Json(json!({ "ok": true, "already_stopped": true })).into_response()
+    }
+}
+
+/// Delete a session: its runtime, its transcript and its workspace.
+///
+/// Stopping is not enough for a user who wants the task gone — the title stays
+/// in the sidebar and the transcript stays readable — so this is what the
+/// list's "删除" needs. The runtime is torn down first: dropping the rows while
+/// a container still mirrors into them would leave a half-written transcript
+/// pointing at a session that no longer exists.
+async fn delete_session(
+    State(state): State<AppState>,
+    Extension(installed): Extension<InstalledState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(sid): Path<i64>,
+) -> Response {
+    let device_id = match owned_session(&installed.pool, installed.kind, user.id, sid).await {
+        Ok((_, device_id)) => device_id,
+        Err(r) => return r,
+    };
+
+    teardown_runtime(&state, &installed, device_id, sid).await;
+
+    match delete_session_rows(&installed.pool, installed.kind, user.id, sid).await {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::NOT_FOUND, "会话不存在").into_response(),
+        Err(e) => {
+            eprintln!("[agent-api] deleting session {sid} failed: {e}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "删除任务失败").into_response();
         }
     }
+
+    // The session's private pi config and workspace go too: it holds whatever
+    // the agent wrote plus a generated `models.json` carrying a (now revoked)
+    // gateway credential, so leaving it behind would accumulate unreachable
+    // files for every deleted task.
+    let root = session_runtime_root(&state.data_dir).join(format!("s{sid}"));
+    if let Err(e) = tokio::fs::remove_dir_all(&root).await
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        // Not fatal: the session is already gone from the user's view, and
+        // failing here would invite a retry that can no longer find it.
+        eprintln!(
+            "[agent-api] removing the workspace of session {sid} failed: {e} ({})",
+            root.display()
+        );
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Drop a session and its mirrored transcript.
+///
+/// Returns whether a row was actually removed, so a repeated delete answers
+/// 404 instead of reporting success for a session that is already gone.
+async fn delete_session_rows(
+    pool: &Pool,
+    kind: DbKind,
+    user_id: i64,
+    sid: i64,
+) -> Result<bool, String> {
+    // Entries are removed explicitly rather than left to the FK cascade:
+    // Postgres declares ON DELETE CASCADE, but SQLite only honours it with
+    // `PRAGMA foreign_keys` on, which the pool does not set. Without this, a
+    // SQLite deployment would keep every mirrored entry of every deleted task.
+    //
+    // Scoped through the session's owner so this cannot reach another
+    // account's transcript even if called with an id that is not the caller's.
+    sqlx::query(&db::q(
+        kind,
+        "DELETE FROM agent_entries WHERE session_id IN \
+         (SELECT id FROM agent_sessions WHERE id = ? AND user_id = ?)",
+    ))
+    .bind(sid)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let deleted = sqlx::query(&db::q(
+        kind,
+        "DELETE FROM agent_sessions WHERE id = ? AND user_id = ?",
+    ))
+    .bind(sid)
+    .bind(user_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(deleted.rows_affected() > 0)
 }
 
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/agent/sessions", post(create_session).get(list_sessions))
+        .route("/agent/sessions/{sid}", delete(delete_session))
         .route("/agent/sessions/{sid}/entries", get(list_entries))
         .route("/agent/sessions/{sid}/events", get(session_events))
         .route("/agent/sessions/{sid}/start", post(start_session))
@@ -1196,5 +1311,106 @@ mod tests {
         assert_eq!(url_host("http://[2001:db8::1]:3000"), "2001:db8::1");
         assert_eq!(url_host("HTTP://Example.COM"), "example.com");
         assert_eq!(url_host("0.0.0.0:3000"), "0.0.0.0");
+    }
+
+    /// Deleting a task must take its mirrored transcript with it. The schema's
+    /// cascade is not enough on SQLite, where the pool leaves
+    /// `PRAGMA foreign_keys` off, so without an explicit delete every removed
+    /// task would leave its whole history behind.
+    #[tokio::test]
+    async fn deleting_a_session_takes_its_entries_with_it() {
+        let pool = pool_with(&[]).await;
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash) \
+             VALUES (1, 'u1', 'x'), (2, 'u2', 'x')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, user_id, target, title) \
+             VALUES (1, 1, 'cloud', 'mine'), (2, 2, 'cloud', 'theirs')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_entries (session_id, entry_id, kind, payload) \
+             VALUES (1, 'e1', 'message', '{}'), (1, 'e2', 'message', '{}'), \
+                    (2, 'e1', 'message', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            delete_session_rows(&pool, DbKind::Sqlite, 1, 1)
+                .await
+                .unwrap()
+        );
+
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let entries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_entries")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 1, "only the deleted session's row is gone");
+        assert_eq!(entries, 1, "its entries go, the other session's stay");
+
+        // A repeated delete has nothing left to remove, which is how the
+        // handler knows to answer 404 rather than report success twice.
+        assert!(
+            !delete_session_rows(&pool, DbKind::Sqlite, 1, 1)
+                .await
+                .unwrap()
+        );
+
+        pool.close().await;
+    }
+
+    /// "Not yours" must behave exactly like "does not exist": a session can
+    /// drive shell commands on someone's own machine, so a delete that reached
+    /// across accounts would be the worst possible place to trust an id.
+    #[tokio::test]
+    async fn a_session_belonging_to_someone_else_cannot_be_deleted() {
+        let pool = pool_with(&[]).await;
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash) \
+             VALUES (1, 'u1', 'x'), (2, 'u2', 'x')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, user_id, target, title) \
+             VALUES (2, 2, 'cloud', 'theirs')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_entries (session_id, entry_id, kind, payload) \
+             VALUES (2, 'e1', 'message', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert!(
+            !delete_session_rows(&pool, DbKind::Sqlite, 1, 2)
+                .await
+                .unwrap(),
+            "user 1 must not delete user 2's session"
+        );
+        let entries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_entries")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(entries, 1, "and must not touch its transcript either");
+
+        pool.close().await;
     }
 }
