@@ -1,9 +1,18 @@
 [workspace]
 members = [".", "desktop"]
 
+# One version for the whole product, because it is released as one thing: a
+# `vX.Y.Z` tag builds both the server image and the desktop installers, and a
+# user comparing the app's About box with the server's `/api/health` has to see
+# the same number. Both crates inherit it, and `desktop/tauri.conf.json`
+# deliberately omits `version` so the installers are named from here too --
+# a second copy of the number is a second thing to forget on release day.
+[workspace.package]
+version = "0.4.18"
+
 [package]
 name = "yunova"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
