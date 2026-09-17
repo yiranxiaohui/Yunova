@@ -100,9 +100,7 @@ export function ProfileDialog({ open, onClose }: Props) {
   const initial = (
     (displayName.trim() || user.username || "?").slice(0, 1) || "?"
   ).toUpperCase()
-  const dirty =
-    (displayName.trim() || null) !== (user.display_name ?? null) ||
-    (trimmedAvatar || null) !== (user.avatar_url ?? null)
+  const dirty = (displayName.trim() || null) !== (user.display_name ?? null)
 
   async function save() {
     setError(null)
@@ -110,7 +108,6 @@ export function ProfileDialog({ open, onClose }: Props) {
     try {
       const updated = await profileApi.update({
         display_name: displayName,
-        avatar_url: avatarUrl,
       })
       auth.updateUser(updated)
       onClose()
@@ -232,9 +229,9 @@ export function ProfileDialog({ open, onClose }: Props) {
           <div className="min-w-0 flex-1">
             <p className="text-xs text-muted-foreground">用户名</p>
             <p className="truncate font-medium">{user.username}</p>
-            {trimmedAvatar && avatarBroken && (
-              <p className="mt-0.5 text-xs text-destructive">头像链接无法加载</p>
-            )}
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              点击头像上传图片（最大 2MB）
+            </p>
           </div>
         </div>
 
@@ -247,30 +244,6 @@ export function ProfileDialog({ open, onClose }: Props) {
             maxLength={64}
             placeholder="留空则显示用户名"
           />
-        </div>
-
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="p-avatar">头像</Label>
-          <div className="flex gap-2">
-            <Input
-              id="p-avatar"
-              value={avatarUrl}
-              onChange={(e) => setAvatarUrl(e.target.value)}
-              maxLength={512}
-              placeholder="https://… 或点击右侧上传"
-            />
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={uploading}
-            >
-              {uploading ? "上传中…" : "上传图片"}
-            </Button>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            支持上传本地图片（最大 2MB），或填入 http(s) / data:image 链接。留空使用首字母头像。
-          </p>
         </div>
 
         <div className="flex flex-col gap-2 rounded-md border border-border bg-muted/30 p-3">
