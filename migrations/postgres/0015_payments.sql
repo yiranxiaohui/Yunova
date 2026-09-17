@@ -9,9 +9,9 @@ CREATE TABLE payment_orders (
     status         TEXT NOT NULL DEFAULT 'pending',
     trade_no       TEXT,
     client_ip      TEXT,
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    paid_at        TIMESTAMPTZ,
-    updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at     TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    paid_at        TEXT,
+    updated_at     TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 CREATE INDEX idx_payment_orders_user ON payment_orders(user_id, created_at DESC);
 CREATE INDEX idx_payment_orders_status ON payment_orders(status, created_at DESC);

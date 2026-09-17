@@ -109,7 +109,7 @@ pub struct StatusResponse {
 pub struct ConnectionForm {
     pub kind: String,
     // for sqlite: relative file path (e.g. "yunova.db")
-    // for mysql/postgres: host, port, user, password, database, with tls optional
+    // for postgres: host, port, user, password, database, with tls optional
     pub sqlite_path: Option<String>,
 
     pub host: Option<String>,
@@ -174,17 +174,15 @@ fn build_url(form: &ConnectionForm, data_dir: &Path) -> Result<(db::DbKind, Stri
                 .replace('\\', "/");
             Ok((db::DbKind::Sqlite, format!("sqlite://{path_str}")))
         }
-        "mysql" | "postgres" => {
+        "postgres" => {
             let host = form.host.as_deref().unwrap_or("localhost");
-            let default_port = if form.kind == "mysql" { 3306 } else { 5432 };
-            let port = form.port.unwrap_or(default_port);
+            let port = form.port.unwrap_or(5432);
             let user = form.user.as_deref().unwrap_or("");
             let password = form.password.as_deref().unwrap_or("");
             let database = form.database.as_deref().unwrap_or("");
             if database.is_empty() {
                 return Err("database name is required".into());
             }
-            let scheme = if form.kind == "mysql" { "mysql" } else { "postgres" };
             let user_enc = percent_encode(user);
             let pass_enc = percent_encode(password);
             let auth = if user.is_empty() {
@@ -194,17 +192,13 @@ fn build_url(form: &ConnectionForm, data_dir: &Path) -> Result<(db::DbKind, Stri
             } else {
                 format!("{user_enc}:{pass_enc}@")
             };
-            let mut query = String::new();
-            if form.tls.unwrap_or(false) {
-                if form.kind == "postgres" {
-                    query.push_str("?sslmode=require");
-                } else {
-                    query.push_str("?ssl-mode=REQUIRED");
-                }
-            }
-            let url = format!("{scheme}://{auth}{host}:{port}/{database}{query}");
-            let kind = db::DbKind::from_url(&url).unwrap();
-            Ok((kind, url))
+            let query = if form.tls.unwrap_or(false) {
+                "?sslmode=require"
+            } else {
+                ""
+            };
+            let url = format!("postgres://{auth}{host}:{port}/{database}{query}");
+            Ok((db::DbKind::Postgres, url))
         }
         other => Err(format!("unsupported db kind: {other}")),
     }
@@ -229,7 +223,7 @@ fn percent_encode(s: &str) -> String {
 async fn status(State(state): State<AppState>) -> Json<StatusResponse> {
     Json(StatusResponse {
         installed: state.installed.read().await.is_some(),
-        supported: vec!["sqlite", "mysql", "postgres"],
+        supported: vec!["sqlite", "postgres"],
     })
 }
 
@@ -325,51 +319,18 @@ async fn install(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e),
     };
 
-    let true_lit = db::bool_true(kind);
     let base_insert = db::q(
         kind,
-        &format!(
-            "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, {true_lit})"
-        ),
+        "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)",
     );
-    let admin_id = match kind {
-        db::DbKind::Sqlite | db::DbKind::Postgres => {
-            let row: Result<(i64,), _> =
-                sqlx::query_as(&format!("{base_insert} RETURNING id"))
-                    .bind(username)
-                    .bind(&phc)
-                    .fetch_one(&pool)
-                    .await;
-            match row {
-                Ok((id,)) => id,
-                Err(e) => return err(StatusCode::BAD_GATEWAY, e.to_string()),
-            }
-        }
-        db::DbKind::Mysql => {
-            let mut tx = match pool.begin().await {
-                Ok(t) => t,
-                Err(e) => return err(StatusCode::BAD_GATEWAY, e.to_string()),
-            };
-            if let Err(e) = sqlx::query(&base_insert)
-                .bind(username)
-                .bind(&phc)
-                .execute(&mut *tx)
-                .await
-            {
-                return err(StatusCode::BAD_GATEWAY, e.to_string());
-            }
-            let row: Result<(i64,), _> = sqlx::query_as("SELECT LAST_INSERT_ID()")
-                .fetch_one(&mut *tx)
-                .await;
-            let id = match row {
-                Ok((v,)) => v,
-                Err(e) => return err(StatusCode::BAD_GATEWAY, e.to_string()),
-            };
-            if let Err(e) = tx.commit().await {
-                return err(StatusCode::BAD_GATEWAY, e.to_string());
-            }
-            id
-        }
+    let row: Result<(i64,), _> = sqlx::query_as(&format!("{base_insert} RETURNING id"))
+        .bind(username)
+        .bind(&phc)
+        .fetch_one(&pool)
+        .await;
+    let admin_id = match row {
+        Ok((id,)) => id,
+        Err(e) => return err(StatusCode::BAD_GATEWAY, e.to_string()),
     };
 
     if let Err(e) = save_config(

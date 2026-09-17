@@ -195,41 +195,17 @@ async fn create_session(
         "INSERT INTO agent_sessions (user_id, target, device_id, title, model) \
          VALUES (?, ?, ?, ?, ?)",
     );
-    let id = match installed.kind {
-        DbKind::Sqlite | DbKind::Postgres => {
-            sqlx::query_as::<_, (i64,)>(&format!("{insert} RETURNING id"))
-                .bind(user.id)
-                .bind(target.as_str())
-                .bind(req.device_id)
-                .bind(&title)
-                .bind(model)
-                .fetch_one(&installed.pool)
-                .await
-                .map(|r| r.0)
-                .map_err(|e| e.to_string())
-        }
-        DbKind::Mysql => {
-            async {
-                let mut tx = installed.pool.begin().await.map_err(|e| e.to_string())?;
-                sqlx::query(&insert)
-                    .bind(user.id)
-                    .bind(target.as_str())
-                    .bind(req.device_id)
-                    .bind(&title)
-                    .bind(model)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let (id,): (i64,) = sqlx::query_as("SELECT LAST_INSERT_ID()")
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(|e| e.to_string())?;
-                tx.commit().await.map_err(|e| e.to_string())?;
-                Ok(id)
-            }
-            .await
-        }
-    };
+    // Both backends support RETURNING, so the id comes back from the insert.
+    let id = sqlx::query_as::<_, (i64,)>(&format!("{insert} RETURNING id"))
+        .bind(user.id)
+        .bind(target.as_str())
+        .bind(req.device_id)
+        .bind(&title)
+        .bind(model)
+        .fetch_one(&installed.pool)
+        .await
+        .map(|r| r.0)
+        .map_err(|e| e.to_string());
 
     match id {
         Ok(id) => Json(json!({

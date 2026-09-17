@@ -34,7 +34,7 @@ const SNIPPET_AFTER: usize = 120;
 
 /// Escape LIKE wildcards (`%` `_`) and the escape sentinel itself (`#`) so
 /// user input is matched literally. Pair with `LIKE ? ESCAPE '#'` in SQL.
-/// Sentinel `#` is chosen instead of `\` to avoid MySQL backslash quirks.
+/// Sentinel `#` is chosen instead of `\` to avoid backslash-escape quirks.
 fn escape_like(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 4);
     for c in s.chars() {

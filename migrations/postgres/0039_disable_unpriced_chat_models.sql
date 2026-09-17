@@ -14,7 +14,7 @@
 -- after a proper import cannot disable a correctly priced model.
 
 UPDATE model_pricing
-   SET enabled = FALSE
+   SET enabled = 0
  WHERE kind = 'chat'
    AND input_price = 0
    AND output_price = 0;

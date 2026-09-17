@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     AppState, CurrentUser, InstalledState,
-    db::{self, DbKind},
+    db::{self},
 };
 
 #[derive(Serialize, Deserialize, sqlx::FromRow)]
@@ -98,15 +98,11 @@ async fn get_settings(
     Extension(installed): Extension<InstalledState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
-    let proxy_col = db::bool_as_int(installed.kind, "use_proxy");
-    let image_proxy_col = db::opt_bool_as_int(installed.kind, "image_use_proxy");
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT protocol, base_url, api_key, model, {proxy_col},
-                    image_protocol, image_base_url, image_api_key, image_model, {image_proxy_col}
-             FROM user_settings WHERE user_id = ?"
-        ),
+        "SELECT protocol, base_url, api_key, model, use_proxy,
+                image_protocol, image_base_url, image_api_key, image_model, image_use_proxy
+         FROM user_settings WHERE user_id = ?",
     );
     let row: Result<Option<UpstreamSettings>, _> = sqlx::query_as(&sql)
         .bind(user.id)
@@ -127,53 +123,34 @@ async fn put_settings(
     if let Err(r) = validate(&body) {
         return r;
     }
-    let use_proxy = body.use_proxy != 0;
-    let image_use_proxy: Option<bool> = body.image_use_proxy.map(|v| v != 0);
+    // Stored as 0/1 integers on both backends, so the wire's bools are kept
+    // in the integer domain rather than bound as SQL booleans.
+    let use_proxy: i64 = if body.use_proxy != 0 { 1 } else { 0 };
+    let image_use_proxy: Option<i64> = body.image_use_proxy.map(|v| if v != 0 { 1 } else { 0 });
     let now = db::now_expr(installed.kind);
 
-    let sql = match installed.kind {
-        DbKind::Sqlite | DbKind::Postgres => db::q(
-            installed.kind,
-            &format!(
-                "INSERT INTO user_settings
-                     (user_id, protocol, base_url, api_key, model, use_proxy,
-                      image_protocol, image_base_url, image_api_key, image_model, image_use_proxy,
-                      updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now})
-                 ON CONFLICT(user_id) DO UPDATE SET
-                     protocol = EXCLUDED.protocol,
-                     base_url = EXCLUDED.base_url,
-                     api_key = EXCLUDED.api_key,
-                     model = EXCLUDED.model,
-                     use_proxy = EXCLUDED.use_proxy,
-                     image_protocol = EXCLUDED.image_protocol,
-                     image_base_url = EXCLUDED.image_base_url,
-                     image_api_key = EXCLUDED.image_api_key,
-                     image_model = EXCLUDED.image_model,
-                     image_use_proxy = EXCLUDED.image_use_proxy,
-                     updated_at = {now}"
-            ),
-        ),
-        DbKind::Mysql => format!(
+    let sql = db::q(
+        installed.kind,
+        &format!(
             "INSERT INTO user_settings
                  (user_id, protocol, base_url, api_key, model, use_proxy,
                   image_protocol, image_base_url, image_api_key, image_model, image_use_proxy,
                   updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, {now})
-             ON DUPLICATE KEY UPDATE
-                 protocol = VALUES(protocol),
-                 base_url = VALUES(base_url),
-                 api_key = VALUES(api_key),
-                 model = VALUES(model),
-                 use_proxy = VALUES(use_proxy),
-                 image_protocol = VALUES(image_protocol),
-                 image_base_url = VALUES(image_base_url),
-                 image_api_key = VALUES(image_api_key),
-                 image_model = VALUES(image_model),
-                 image_use_proxy = VALUES(image_use_proxy),
+             ON CONFLICT (user_id) DO UPDATE SET
+                 protocol = excluded.protocol,
+                 base_url = excluded.base_url,
+                 api_key = excluded.api_key,
+                 model = excluded.model,
+                 use_proxy = excluded.use_proxy,
+                 image_protocol = excluded.image_protocol,
+                 image_base_url = excluded.image_base_url,
+                 image_api_key = excluded.image_api_key,
+                 image_model = excluded.image_model,
+                 image_use_proxy = excluded.image_use_proxy,
                  updated_at = {now}"
         ),
-    };
+    );
 
     let r = sqlx::query(&sql)
         .bind(user.id)

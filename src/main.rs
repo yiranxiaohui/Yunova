@@ -10,6 +10,7 @@ mod auth;
 mod channels;
 mod conversations;
 mod db;
+mod db_copy;
 mod email;
 mod images;
 mod invites;
@@ -268,63 +269,23 @@ async fn register(
         installed.kind,
         "INSERT INTO users (username, password_hash, email) VALUES (?, ?, ?)",
     );
-    let user_id = match installed.kind {
-        db::DbKind::Sqlite | db::DbKind::Postgres => {
-            let row: Result<(i64,), _> = sqlx::query_as(&format!("{base_insert} RETURNING id"))
-                .bind(&username)
-                .bind(&phc)
-                .bind(&normalized_email)
-                .fetch_one(&installed.pool)
-                .await;
-            match row {
-                Ok((id,)) => id,
-                Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {
-                    let msg = if d.message().contains("email") {
-                        "该邮箱已注册"
-                    } else {
-                        "username already taken"
-                    };
-                    return (StatusCode::CONFLICT, msg).into_response();
-                }
-                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-            }
-        }
-        db::DbKind::Mysql => {
-            let mut tx = match installed.pool.begin().await {
-                Ok(t) => t,
-                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let row: Result<(i64,), _> = sqlx::query_as(&format!("{base_insert} RETURNING id"))
+        .bind(&username)
+        .bind(&phc)
+        .bind(&normalized_email)
+        .fetch_one(&installed.pool)
+        .await;
+    let user_id = match row {
+        Ok((id,)) => id,
+        Err(sqlx::Error::Database(d)) if d.is_unique_violation() => {
+            let msg = if d.message().contains("email") {
+                "该邮箱已注册"
+            } else {
+                "username already taken"
             };
-            if let Err(e) = sqlx::query(&base_insert)
-                .bind(&username)
-                .bind(&phc)
-                .bind(&normalized_email)
-                .execute(&mut *tx)
-                .await
-            {
-                if let sqlx::Error::Database(d) = &e {
-                    if d.is_unique_violation() {
-                        let msg = if d.message().contains("email") {
-                            "该邮箱已注册"
-                        } else {
-                            "username already taken"
-                        };
-                        return (StatusCode::CONFLICT, msg).into_response();
-                    }
-                }
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-            let row: Result<(i64,), _> = sqlx::query_as("SELECT LAST_INSERT_ID()")
-                .fetch_one(&mut *tx)
-                .await;
-            let id = match row {
-                Ok((v,)) => v,
-                Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-            };
-            if let Err(e) = tx.commit().await {
-                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-            }
-            id
+            return (StatusCode::CONFLICT, msg).into_response();
         }
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
 
     let is_admin = admin::is_admin(&installed.pool, installed.kind, user_id).await;
@@ -411,11 +372,10 @@ async fn login(
         Err(r) => return r,
     };
     let username = creds.username.trim();
-    let admin_col = db::bool_as_int(installed.kind, "is_admin");
     let sel = db::q(
         installed.kind,
         &format!(
-            "SELECT id, username, password_hash, display_name, avatar_url, {admin_col}
+            "SELECT id, username, password_hash, display_name, avatar_url, is_admin
              FROM users WHERE {}",
             db::ci_eq(installed.kind, "username")
         ),
@@ -504,13 +464,10 @@ async fn me(State(state): State<AppState>, jar: CookieJar) -> Response {
     else {
         return (StatusCode::UNAUTHORIZED, "session expired").into_response();
     };
-    let admin_col = db::bool_as_int(installed.kind, "is_admin");
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT id, username, display_name, avatar_url, {admin_col}
-             FROM users WHERE id = ?"
-        ),
+        "SELECT id, username, display_name, avatar_url, is_admin
+             FROM users WHERE id = ?",
     );
     let row: Option<(i64, String, Option<String>, Option<String>, i64)> = sqlx::query_as(&sql)
         .bind(id)
@@ -1323,9 +1280,58 @@ fn build_router(state: AppState) -> Router {
 // main
 // ---------------------------------------------------------------------------
 
+fn parse_db_copy(args: &[String]) -> Result<db_copy::Options, String> {
+    let mut from = None;
+    let mut to = None;
+    let mut allow_nonempty = false;
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        match arg.as_str() {
+            "--from" => from = Some(it.next().ok_or("--from needs a url")?.clone()),
+            "--to" => to = Some(it.next().ok_or("--to needs a url")?.clone()),
+            "--allow-nonempty" => allow_nonempty = true,
+            other => return Err(format!("unknown argument: {other}")),
+        }
+    }
+    Ok(db_copy::Options {
+        from: from.ok_or("--from is required")?,
+        to: to.ok_or("--to is required")?,
+        allow_nonempty,
+    })
+}
+
 #[tokio::main]
 async fn main() {
     db::install_drivers();
+
+    // `db-copy` is a one-shot maintenance command, not a server start.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("db-copy") {
+        match parse_db_copy(&args[1..]) {
+            Ok(opts) => match db_copy::run(opts).await {
+                Ok(()) => return,
+                Err(e) => {
+                    eprintln!("db-copy failed: {e}");
+                    std::process::exit(1);
+                }
+            },
+            Err(e) => {
+                eprintln!("{e}");
+                eprintln!(
+                    "usage: yunova db-copy --from <url> --to <url> [--allow-nonempty]\n\
+                     \n\
+                     Copies an installation's data to another backend, e.g.\n\
+                     \x20 yunova db-copy --from sqlite:///data/yunova.db \\\n\
+                     \x20              --to postgres://user:pass@host:5432/yunova\n\
+                     \n\
+                     The source is left untouched and the config file is not\n\
+                     rewritten; point YUNOVA_DATABASE_URL at the new database\n\
+                     after verifying the copy."
+                );
+                std::process::exit(2);
+            }
+        }
+    }
 
     let data_dir = std::path::PathBuf::from(
         crate::runtime_env::var("YUNOVA_DATA_DIR").unwrap_or_else(|_| "data".into()),

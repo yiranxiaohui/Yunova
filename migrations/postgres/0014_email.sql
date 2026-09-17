@@ -6,10 +6,10 @@ CREATE TABLE email_codes (
     email      TEXT NOT NULL,
     code_hash  TEXT NOT NULL,
     purpose    TEXT NOT NULL,
-    expires_at TIMESTAMPTZ NOT NULL,
+    expires_at TEXT NOT NULL,
     used       INT NOT NULL DEFAULT 0,
     attempts   INT NOT NULL DEFAULT 0,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 CREATE INDEX idx_email_codes_email_purpose ON email_codes(email, purpose, created_at DESC);
 

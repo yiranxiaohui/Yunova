@@ -8,9 +8,9 @@ CREATE TABLE image_jobs (
     status       TEXT NOT NULL DEFAULT 'pending',
     result_json  TEXT,
     error        TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    started_at   TIMESTAMPTZ,
-    finished_at  TIMESTAMPTZ
+    created_at   TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    started_at   TEXT,
+    finished_at  TEXT
 );
 CREATE INDEX idx_image_jobs_user ON image_jobs(user_id, created_at DESC);
 CREATE INDEX idx_image_jobs_status ON image_jobs(status, created_at DESC);

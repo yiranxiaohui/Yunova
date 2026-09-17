@@ -362,52 +362,24 @@ async fn insert_pending(
             n, negative_prompt, seed, background, source_path, source_paths, used_shared)
          VALUES (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
-    match kind {
-        db::DbKind::Sqlite | db::DbKind::Postgres => {
-            let row: (i64,) = sqlx::query_as(&format!("{ins} RETURNING id"))
-                .bind(token)
-                .bind(user_id)
-                .bind(prompt)
-                .bind(model)
-                .bind(size)
-                .bind(quality)
-                .bind(style)
-                .bind(n)
-                .bind(negative_prompt)
-                .bind(seed)
-                .bind(background)
-                .bind(source_path)
-                .bind(source_paths)
-                .bind(if used_shared { 1_i64 } else { 0 })
-                .fetch_one(pool)
-                .await?;
-            Ok(row.0)
-        }
-        db::DbKind::Mysql => {
-            let mut tx = pool.begin().await?;
-            sqlx::query(&ins)
-                .bind(token)
-                .bind(user_id)
-                .bind(prompt)
-                .bind(model)
-                .bind(size)
-                .bind(quality)
-                .bind(style)
-                .bind(n)
-                .bind(negative_prompt)
-                .bind(seed)
-                .bind(background)
-                .bind(source_path)
-                .bind(source_paths)
-                .bind(if used_shared { 1_i64 } else { 0 })
-                .execute(&mut *tx)
-                .await?;
-            let (id,): (i64,) =
-                sqlx::query_as("SELECT LAST_INSERT_ID()").fetch_one(&mut *tx).await?;
-            tx.commit().await?;
-            Ok(id)
-        }
-    }
+    let row: (i64,) = sqlx::query_as(&format!("{ins} RETURNING id"))
+        .bind(token)
+        .bind(user_id)
+        .bind(prompt)
+        .bind(model)
+        .bind(size)
+        .bind(quality)
+        .bind(style)
+        .bind(n)
+        .bind(negative_prompt)
+        .bind(seed)
+        .bind(background)
+        .bind(source_path)
+        .bind(source_paths)
+        .bind(if used_shared { 1_i64 } else { 0 })
+        .fetch_one(pool)
+        .await?;
+    Ok(row.0)
 }
 
 async fn finalize_done(

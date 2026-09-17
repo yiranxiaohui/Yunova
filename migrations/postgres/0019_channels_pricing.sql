@@ -8,10 +8,10 @@ CREATE TABLE upstream_channels (
     kind        TEXT         NOT NULL,                       -- 'chat'   | 'image'
     base_url    TEXT         NOT NULL,
     api_key     TEXT         NOT NULL,
-    enabled     BOOLEAN      NOT NULL DEFAULT TRUE,
+    enabled     INT      NOT NULL DEFAULT 1,
     priority    INTEGER      NOT NULL DEFAULT 100,
-    created_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    created_at  TEXT  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    updated_at  TEXT  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 CREATE INDEX idx_upstream_channels_enabled ON upstream_channels(enabled, priority);
 
@@ -21,9 +21,9 @@ CREATE TABLE model_pricing (
     kind         TEXT         NOT NULL,
     cost_credits BIGINT       NOT NULL,
     display_name TEXT,
-    enabled      BOOLEAN      NOT NULL DEFAULT TRUE,
-    created_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
-    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    enabled      INT      NOT NULL DEFAULT 1,
+    created_at   TEXT  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    updated_at   TEXT  NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
 );
 CREATE INDEX idx_model_pricing_enabled ON model_pricing(enabled, kind);
 

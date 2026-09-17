@@ -8,7 +8,6 @@ pub type Pool = AnyPool;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DbKind {
     Sqlite,
-    Mysql,
     Postgres,
 }
 
@@ -17,8 +16,6 @@ impl DbKind {
         let u = url.trim().to_ascii_lowercase();
         if u.starts_with("sqlite:") {
             Some(Self::Sqlite)
-        } else if u.starts_with("mysql:") || u.starts_with("mariadb:") {
-            Some(Self::Mysql)
         } else if u.starts_with("postgres:") || u.starts_with("postgresql:") {
             Some(Self::Postgres)
         } else {
@@ -29,7 +26,6 @@ impl DbKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Sqlite => "sqlite",
-            Self::Mysql => "mysql",
             Self::Postgres => "postgres",
         }
     }
@@ -112,52 +108,6 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (46, include_str!("../migrations/sqlite/0046_device_fingerprint.sql")),
     (47, include_str!("../migrations/sqlite/0047_usd_parity_rate.sql")),
 ];
-static MYSQL_MIGRATIONS: &[(i32, &str)] = &[
-    (1, include_str!("../migrations/mysql/0001_init.sql")),
-    (2, include_str!("../migrations/mysql/0002_user_settings.sql")),
-    (3, include_str!("../migrations/mysql/0003_image_settings.sql")),
-    (4, include_str!("../migrations/mysql/0004_image_protocol.sql")),
-    (5, include_str!("../migrations/mysql/0005_prompt_clone_count.sql")),
-    (6, include_str!("../migrations/mysql/0006_skills.sql")),
-    (7, include_str!("../migrations/mysql/0007_skills_public.sql")),
-    (8, include_str!("../migrations/mysql/0008_user_profile.sql")),
-    (9, include_str!("../migrations/mysql/0009_plaza_images.sql")),
-    (10, include_str!("../migrations/mysql/0010_admin.sql")),
-    (11, include_str!("../migrations/mysql/0011_credits.sql")),
-    (12, include_str!("../migrations/mysql/0012_plaza_social.sql")),
-    (13, include_str!("../migrations/mysql/0013_invites.sql")),
-    (14, include_str!("../migrations/mysql/0014_email.sql")),
-    (15, include_str!("../migrations/mysql/0015_payments.sql")),
-    (16, include_str!("../migrations/mysql/0016_image_jobs.sql")),
-    (17, include_str!("../migrations/mysql/0017_image_studio.sql")),
-    (18, include_str!("../migrations/mysql/0018_studio_generations.sql")),
-    (19, include_str!("../migrations/mysql/0019_channels_pricing.sql")),
-    (20, include_str!("../migrations/mysql/0020_payment_trade_no_unique.sql")),
-    (21, include_str!("../migrations/mysql/0021_studio_extra_params.sql")),
-    (22, include_str!("../migrations/mysql/0022_credit_ledger_meta.sql")),
-    (23, include_str!("../migrations/mysql/0023_shared_conversations.sql")),
-    (24, include_str!("../migrations/mysql/0024_model_pricing_protocol.sql")),
-    (25, include_str!("../migrations/mysql/0025_studio_source_paths.sql")),
-    (29, include_str!("../migrations/mysql/0029_model_pricing_context.sql")),
-    (30, include_str!("../migrations/mysql/0030_video_generation.sql")),
-    (31, include_str!("../migrations/mysql/0031_unify_video_pricing.sql")),
-    (32, include_str!("../migrations/mysql/0032_drop_channel_kind.sql")),
-    (33, include_str!("../migrations/mysql/0033_workflow_canvas.sql")),
-    (34, include_str!("../migrations/mysql/0034_workflow_run_logs.sql")),
-    (35, include_str!("../migrations/mysql/0035_video_editor.sql")),
-    (36, include_str!("../migrations/mysql/0036_unify_media_library.sql")),
-    (37, include_str!("../migrations/mysql/0037_yunova_brand.sql")),
-    (38, include_str!("../migrations/mysql/0038_token_quota_billing.sql")),
-    (39, include_str!("../migrations/mysql/0039_disable_unpriced_chat_models.sql")),
-    (40, include_str!("../migrations/mysql/0040_quota_in_cny.sql")),
-    (41, include_str!("../migrations/mysql/0041_message_reasoning.sql")),
-    (42, include_str!("../migrations/mysql/0042_agent_tokens.sql")),
-    (43, include_str!("../migrations/mysql/0043_agent_sessions.sql")),
-    (44, include_str!("../migrations/mysql/0044_drop_workers.sql")),
-    (45, include_str!("../migrations/mysql/0045_agent_token_expiry.sql")),
-    (46, include_str!("../migrations/mysql/0046_device_fingerprint.sql")),
-    (47, include_str!("../migrations/mysql/0047_usd_parity_rate.sql")),
-];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
     (2, include_str!("../migrations/postgres/0002_user_settings.sql")),
@@ -203,12 +153,14 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (45, include_str!("../migrations/postgres/0045_agent_token_expiry.sql")),
     (46, include_str!("../migrations/postgres/0046_device_fingerprint.sql")),
     (47, include_str!("../migrations/postgres/0047_usd_parity_rate.sql")),
+    // Converts a database created before the types were corrected to what
+    // `sqlx::Any` can decode. No-op on a fresh install.
+    (48, include_str!("../migrations/postgres/0048_any_compatible_domain.sql")),
 ];
 
 fn migrations_for(kind: DbKind) -> &'static [(i32, &'static str)] {
     match kind {
         DbKind::Sqlite => SQLITE_MIGRATIONS,
-        DbKind::Mysql => MYSQL_MIGRATIONS,
         DbKind::Postgres => POSTGRES_MIGRATIONS,
     }
 }
@@ -221,16 +173,12 @@ pub async fn migrate(pool: &Pool, kind: DbKind) -> Result<(), sqlx::Error> {
                 applied_at TEXT NOT NULL DEFAULT (datetime('now'))
             )"
         }
-        DbKind::Mysql => {
-            "CREATE TABLE IF NOT EXISTS _migrations (
-                id INT NOT NULL PRIMARY KEY,
-                applied_at DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3)
-            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
-        }
         DbKind::Postgres => {
+            // TEXT rather than `timestamptz`, for the reason documented at the
+            // top of migrations/postgres/0001_init.sql.
             "CREATE TABLE IF NOT EXISTS _migrations (
                 id INT PRIMARY KEY,
-                applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                applied_at TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')
             )"
         }
     };
@@ -261,19 +209,66 @@ pub async fn migrate(pool: &Pool, kind: DbKind) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
-/// Splits a SQL blob into individual statements separated by `;` outside strings/comments.
-/// Good enough for the migration files we ship (no dollar-quoting, no stored procs).
+/// Splits a SQL blob into individual statements separated by `;` outside
+/// strings, quoted identifiers, line comments and dollar-quoted blocks.
+///
+/// Dollar quoting matters because migration 48 is a `DO $tag$ ... $tag$` block
+/// whose body is full of `;`. Splitting on those would hand Postgres a
+/// truncated `DO` statement.
 fn split_sql(src: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
     let mut chars = src.chars().peekable();
     let mut in_single = false;
     let mut in_double = false;
+    // `Some(tag)` while inside `$tag$ ... $tag$`; the tag may be empty (`$$`).
+    let mut dollar_tag: Option<String> = None;
     while let Some(c) = chars.next() {
+        // Inside a dollar-quoted body nothing is special except the matching
+        // closing tag, so look for that before the normal rules apply.
+        if let Some(tag) = dollar_tag.clone() {
+            buf.push(c);
+            if c == '$' {
+                // `c` is already consumed, so match only `tag$`.
+                let rest: String = tag.chars().chain(std::iter::once('$')).collect();
+                let mut probe = chars.clone();
+                let matched: String = probe.by_ref().take(rest.chars().count()).collect();
+                if matched == rest {
+                    buf.push_str(&matched);
+                    chars = probe;
+                    dollar_tag = None;
+                }
+            }
+            continue;
+        }
         match c {
+            '$' if !in_single && !in_double => {
+                // A dollar quote opens with `$tag$`, where tag is empty or an
+                // identifier. Anything else (e.g. a `$1` placeholder) is data.
+                let mut probe = chars.clone();
+                let mut tag = String::new();
+                let mut opened = false;
+                loop {
+                    match probe.next() {
+                        Some('$') => {
+                            opened = true;
+                            break;
+                        }
+                        Some(ch) if ch == '_' || ch.is_alphanumeric() => tag.push(ch),
+                        _ => break,
+                    }
+                }
+                buf.push(c);
+                if opened {
+                    buf.push_str(&tag);
+                    buf.push('$');
+                    chars = probe;
+                    dollar_tag = Some(tag);
+                }
+            }
             '-' if !in_single && !in_double && chars.peek() == Some(&'-') => {
                 // line comment
-                while let Some(cc) = chars.next() {
+                for cc in chars.by_ref() {
                     if cc == '\n' {
                         buf.push('\n');
                         break;
@@ -318,23 +313,20 @@ fn split_sql(src: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 /// `now()`-style default timestamp expression, for use in UPDATE statements.
+///
+/// Both backends store timestamps as `YYYY-MM-DD HH:MM:SS` in UTC, so these
+/// two expressions produce byte-identical values.
 pub fn now_expr(kind: DbKind) -> &'static str {
     match kind {
         DbKind::Sqlite => "datetime('now')",
-        DbKind::Mysql => "CURRENT_TIMESTAMP(3)",
-        DbKind::Postgres => "NOW()",
+        DbKind::Postgres => "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')",
     }
 }
 
-/// Returns a fragment that appends "RETURNING id" on Postgres / SQLite
-/// (SQLite 3.35+).  MySQL doesn't support it, so callers fall back to
-/// `LAST_INSERT_ID()` via `last_insert_id()`.
-pub fn returning_id(kind: DbKind) -> &'static str {
-    match kind {
-        DbKind::Postgres | DbKind::Sqlite => " RETURNING id",
-        DbKind::Mysql => "",
-    }
-}
+// Note on aggregates: Postgres widens `SUM()` over a bigint to `numeric`,
+// which the `Any` driver cannot decode, so every aggregate in this codebase
+// is written as `CAST(COALESCE(SUM(x), 0) AS BIGINT)`. The cast is a no-op on
+// SQLite, which already returns an integer.
 
 /// Rewrites `?` placeholders to `$1, $2, …` for Postgres.
 pub fn q(kind: DbKind, sql: &str) -> String {
@@ -383,71 +375,122 @@ pub fn q(kind: DbKind, sql: &str) -> String {
     }
 }
 
-/// Case-insensitive equality fragment for usernames: `LOWER(col) = LOWER(?)` on PG/MySQL,
-/// direct `col = ?` on SQLite (handled by COLLATE NOCASE on the column).
+/// Case-insensitive equality fragment for usernames: `LOWER(col) = LOWER(?)`
+/// on Postgres, direct `col = ?` on SQLite (handled by COLLATE NOCASE on the
+/// column).
 pub fn ci_eq(kind: DbKind, col: &str) -> String {
     match kind {
         DbKind::Sqlite => format!("{col} = ?"),
-        DbKind::Mysql | DbKind::Postgres => format!("LOWER({col}) = LOWER(?)"),
+        DbKind::Postgres => format!("LOWER({col}) = LOWER(?)"),
     }
 }
 
-/// Select a nullable bool-valued column as an optional integer across backends.
-pub fn opt_bool_as_int(kind: DbKind, col: &str) -> String {
-    match kind {
-        DbKind::Postgres => format!(
-            "CASE WHEN {col} IS NULL THEN NULL WHEN {col} THEN 1 ELSE 0 END AS {}",
-            col_alias(col)
-        ),
-        _ => col.to_string(),
-    }
-}
-
-/// Select a bool-valued column as an integer so Rust `i64` decoding works across backends.
-/// SQLite/MySQL already store it as INTEGER/TINYINT; Postgres needs a cast from BOOLEAN.
-pub fn bool_as_int(kind: DbKind, col: &str) -> String {
-    match kind {
-        DbKind::Postgres => format!("CASE WHEN {col} THEN 1 ELSE 0 END AS {}", col_alias(col)),
-        _ => col.to_string(),
-    }
-}
-
-fn col_alias(col: &str) -> String {
-    // given "p.is_public" return "is_public"
-    col.rsplit('.').next().unwrap_or(col).to_string()
-}
-
-/// Literal "true" value for the given dialect, usable inside WHERE clauses against a bool column.
-pub fn bool_true(kind: DbKind) -> &'static str {
-    match kind {
-        DbKind::Postgres => "TRUE",
-        _ => "1",
-    }
-}
-
-/// Literal "false" value for the given dialect. Counterpart to [`bool_true`],
-/// so a query that filters on "not yet revoked" does not have to inline the
-/// dialect match at every call site.
-pub fn bool_false(kind: DbKind) -> &'static str {
-    match kind {
-        DbKind::Postgres => "FALSE",
-        _ => "0",
-    }
-}
-
-/// Returns a SQL expression that truncates a timestamp column to a day string
-/// like `2026-05-23`. Suitable for use in SELECT / GROUP BY across dialects.
-pub fn day_bucket(kind: DbKind, col: &str) -> String {
-    match kind {
-        DbKind::Sqlite => format!("substr({col}, 1, 10)"),
-        DbKind::Mysql => format!("DATE_FORMAT({col}, '%Y-%m-%d')"),
-        DbKind::Postgres => format!("to_char({col}, 'YYYY-MM-DD')"),
-    }
+/// Returns a SQL expression that truncates a stored timestamp to a day string
+/// like `2026-05-23`. Both backends keep timestamps as `YYYY-MM-DD HH:MM:SS`
+/// text, so slicing off the date is the same operation on each.
+pub fn day_bucket(col: &str) -> String {
+    format!("substr({col}, 1, 10)")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `Any` pool decodes only a fixed set of SQL types, so a migration
+    /// that declares a native timestamp or boolean makes its whole table
+    /// unreadable at runtime rather than failing at migrate time. Guarding the
+    /// migration text is the cheap way to keep that from coming back: the
+    /// failure it prevents shows up only against a real Postgres server.
+    #[test]
+    fn postgres_migrations_avoid_types_the_any_driver_cannot_decode() {
+        for (id, body) in POSTGRES_MIGRATIONS {
+            // Migration 48 names both types deliberately, to convert them.
+            if *id == 48 {
+                continue;
+            }
+            // Comments discuss these types on purpose; check only real SQL.
+            let sql: String = body
+                .lines()
+                .map(|line| line.split("--").next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .to_uppercase();
+            for banned in ["TIMESTAMPTZ", "TIMESTAMP", "BOOLEAN", "NUMERIC", "DECIMAL"] {
+                assert!(
+                    !sql.contains(banned),
+                    "migration {id} declares {banned}, which sqlx::Any cannot decode; \
+                     use TEXT for timestamps and INT for booleans"
+                );
+            }
+        }
+    }
+
+    /// Migration 48 is a single `DO $$ ... $$` block whose body is full of
+    /// semicolons. Splitting on those would send Postgres a truncated
+    /// statement, so the splitter has to treat a dollar-quoted body as opaque.
+    #[test]
+    fn sql_splitter_keeps_dollar_quoted_blocks_whole() {
+        let src = "SELECT 1;\n\
+                   DO $mig$ BEGIN EXECUTE 'a; b'; EXECUTE 'c'; END $mig$;\n\
+                   SELECT 2;";
+        let parts: Vec<String> = split_sql(src)
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(parts.len(), 3, "got {parts:?}");
+        assert_eq!(parts[0], "SELECT 1");
+        assert!(parts[1].starts_with("DO $mig$"));
+        assert!(parts[1].ends_with("$mig$"), "block was cut: {}", parts[1]);
+        assert!(parts[1].contains("EXECUTE 'c'"));
+        assert_eq!(parts[2], "SELECT 2");
+
+        // `$1` placeholders are not dollar quotes and must not swallow the rest.
+        let parts = split_sql("UPDATE t SET a = $1 WHERE b = $2; SELECT 3;");
+        let parts: Vec<String> = parts
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        assert_eq!(parts.len(), 2, "got {parts:?}");
+    }
+
+    /// Both backends store timestamps as the same UTC text, which is what lets
+    /// the day bucket be a plain substring and comparisons be lexicographic.
+    /// A drift in either expression would silently break usage stats.
+    #[tokio::test]
+    async fn sqlite_now_expr_matches_the_stored_timestamp_format() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        let now = now_expr(DbKind::Sqlite);
+        let (stamp,): (String,) = sqlx::query_as(&format!("SELECT {now}"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stamp.len(), 19, "expected YYYY-MM-DD HH:MM:SS, got {stamp}");
+        assert_eq!(&stamp[4..5], "-");
+        assert_eq!(&stamp[10..11], " ");
+        assert_eq!(day_bucket("x"), "substr(x, 1, 10)");
+
+        // The column default must agree with now_expr, or rows written by an
+        // INSERT and by an UPDATE would sort differently.
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'u', 'x')")
+            .await
+            .unwrap();
+        let (created,): (String,) = sqlx::query_as("SELECT created_at FROM users WHERE id = 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(created.len(), 19, "column default drifted: {created}");
+
+        pool.close().await;
+    }
 
     /// Quota is denominated in CNY, so migration 40 must rescale balances from
     /// the old point scale (50000 points per yuan) into micro-quota

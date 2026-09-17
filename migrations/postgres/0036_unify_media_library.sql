@@ -16,7 +16,7 @@ SELECT
     '/api/images/' || p.filename,
     '{}',
     'imported',
-    TRUE,
+    1,
     p.created_at,
     p.created_at
 FROM plaza_images p

@@ -66,13 +66,10 @@ fn normalize_avatar_url(v: &str) -> Result<Option<String>, Response> {
 }
 
 async fn load_user_dto(installed: &InstalledState, user_id: i64) -> Result<UserDto, Response> {
-    let admin_col = db::bool_as_int(installed.kind, "is_admin");
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT id, username, display_name, avatar_url, {admin_col}
-             FROM users WHERE id = ?"
-        ),
+        "SELECT id, username, display_name, avatar_url, is_admin
+             FROM users WHERE id = ?",
     );
     let row: Option<(i64, String, Option<String>, Option<String>, i64)> = sqlx::query_as(&sql)
         .bind(user_id)

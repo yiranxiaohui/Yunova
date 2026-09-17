@@ -136,13 +136,12 @@ async fn scalar_i64(pool: &Pool, kind: DbKind, sql: &str) -> i64 {
 }
 
 async fn get_stats(Extension(installed): Extension<InstalledState>) -> Response {
-    let true_lit = db::bool_true(installed.kind);
     let stats = AdminStats {
         users: scalar_i64(&installed.pool, installed.kind, "SELECT COUNT(*) FROM users").await,
         admins: scalar_i64(
             &installed.pool,
             installed.kind,
-            &format!("SELECT COUNT(*) FROM users WHERE is_admin = {true_lit}"),
+            "SELECT COUNT(*) FROM users WHERE is_admin = 1",
         )
         .await,
         conversations: scalar_i64(
@@ -156,14 +155,14 @@ async fn get_stats(Extension(installed): Extension<InstalledState>) -> Response 
         public_skills: scalar_i64(
             &installed.pool,
             installed.kind,
-            &format!("SELECT COUNT(*) FROM skills WHERE is_public = {true_lit}"),
+            "SELECT COUNT(*) FROM skills WHERE is_public = 1",
         )
         .await,
         prompts: scalar_i64(&installed.pool, installed.kind, "SELECT COUNT(*) FROM prompts").await,
         public_prompts: scalar_i64(
             &installed.pool,
             installed.kind,
-            &format!("SELECT COUNT(*) FROM prompts WHERE is_public = {true_lit}"),
+            "SELECT COUNT(*) FROM prompts WHERE is_public = 1",
         )
         .await,
         library_assets: scalar_i64(
@@ -183,19 +182,16 @@ async fn get_stats(Extension(installed): Extension<InstalledState>) -> Response 
 }
 
 async fn list_users(Extension(installed): Extension<InstalledState>) -> Response {
-    let admin_col = db::bool_as_int(installed.kind, "u.is_admin");
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT u.id, u.username, u.display_name, u.avatar_url, u.email, {admin_col}, u.created_at,
+        "SELECT u.id, u.username, u.display_name, u.avatar_url, u.email, u.is_admin, u.created_at,
                     (SELECT COUNT(*) FROM conversations c WHERE c.user_id = u.id) AS convs,
                     (SELECT COUNT(*) FROM messages m
                         JOIN conversations c ON c.id = m.conversation_id
                         WHERE c.user_id = u.id) AS msgs,
                     (SELECT COUNT(*) FROM skills s WHERE s.user_id = u.id) AS skl
              FROM users u
-             ORDER BY u.id ASC"
-        ),
+             ORDER BY u.id ASC",
     );
     let rows: Result<
         Vec<(
@@ -251,11 +247,10 @@ async fn list_users(Extension(installed): Extension<InstalledState>) -> Response
 }
 
 async fn count_admins(pool: &Pool, kind: DbKind) -> i64 {
-    let true_lit = db::bool_true(kind);
     scalar_i64(
         pool,
         kind,
-        &format!("SELECT COUNT(*) FROM users WHERE is_admin = {true_lit}"),
+        "SELECT COUNT(*) FROM users WHERE is_admin = 1",
     )
     .await
 }
@@ -279,11 +274,10 @@ async fn update_user(
         }
     }
 
-    if let Some(ref pw) = body.password {
-        if pw.len() < 6 || pw.len() > 256 {
+    if let Some(ref pw) = body.password
+        && (pw.len() < 6 || pw.len() > 256) {
             return err(StatusCode::BAD_REQUEST, "password must be 6-256 characters");
         }
-    }
 
     if let Some(flag) = body.is_admin {
         let sql = db::q(installed.kind, "UPDATE users SET is_admin = ? WHERE id = ?");

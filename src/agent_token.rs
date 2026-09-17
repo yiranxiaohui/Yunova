@@ -103,12 +103,9 @@ pub async fn user_for_token(pool: &Pool, kind: DbKind, token: &str) -> Option<i6
         return None;
     }
     let hash = auth::token_hash(token);
-    let revoked_col = db::bool_as_int(kind, "revoked");
     let sql = db::q(
         kind,
-        &format!(
-            "SELECT id, user_id, {revoked_col}, expires_at FROM agent_tokens WHERE token_hash = ?"
-        ),
+        "SELECT id, user_id, revoked, expires_at FROM agent_tokens WHERE token_hash = ?",
     );
     let row: Option<(i64, i64, i64, Option<String>)> = sqlx::query_as(&sql)
         .bind(&hash)
@@ -173,13 +170,10 @@ async fn list_tokens(
     Extension(installed): Extension<InstalledState>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
-    let revoked_col = db::bool_as_int(installed.kind, "revoked");
     let sql = db::q(
         installed.kind,
-        &format!(
-            "SELECT id, name, prefix, created_at, last_used_at, {revoked_col}, expires_at \
-             FROM agent_tokens WHERE user_id = ? ORDER BY id DESC"
-        ),
+        "SELECT id, name, prefix, created_at, last_used_at, revoked, expires_at \
+             FROM agent_tokens WHERE user_id = ? ORDER BY id DESC",
     );
     let rows: Vec<TokenRow> = sqlx::query_as(&sql)
         .bind(user.id)
@@ -255,7 +249,7 @@ pub async fn revoke_by_plaintext(pool: &Pool, kind: DbKind, token: &str) {
         kind,
         &format!(
             "UPDATE agent_tokens SET revoked = {} WHERE token_hash = ?",
-            db::bool_true(kind)
+            "1"
         ),
     );
     let _ = sqlx::query(&sql)
@@ -285,7 +279,7 @@ async fn create_token(
         installed.kind,
         &format!(
             "SELECT COUNT(*) FROM agent_tokens WHERE user_id = ? AND revoked = {}",
-            db::bool_false(installed.kind)
+            "0"
         ),
     );
     let live: i64 = sqlx::query_scalar(&live_sql)
@@ -328,7 +322,7 @@ async fn revoke_token(
         installed.kind,
         &format!(
             "UPDATE agent_tokens SET revoked = {} WHERE id = ? AND user_id = ?",
-            db::bool_true(installed.kind)
+            "1"
         ),
     );
     match sqlx::query(&sql)

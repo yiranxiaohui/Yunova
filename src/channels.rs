@@ -1,6 +1,6 @@
 //! Multi-channel upstream + per-model pricing.
 //!
-//! Tables (see migrations/{sqlite,postgres,mysql}/0019_channels_pricing.sql):
+//! Tables (see migrations/{sqlite,postgres}/0019_channels_pricing.sql):
 //!   * `upstream_channels`  — admin-managed providers (protocol/base_url/api_key/enabled/priority)
 //!   * `model_pricing`      — whitelist of callable models + their official-rate prices
 //!   * `channel_models`     — which channels serve which model (optional upstream id alias)
@@ -138,16 +138,12 @@ pub struct ChannelModel {
 // ---------------------------------------------------------------------------
 
 pub async fn list_channels(pool: &Pool, kind: DbKind) -> Result<Vec<Channel>, sqlx::Error> {
-    // Fetch `enabled` as i64 across all three backends (sqlx::Any on SQLite
-    // reports INTEGER as BIGINT, which can't decode straight to Rust bool).
-    let enabled_col = db::bool_as_int(kind, "enabled");
+    // `enabled` is an integer column on both backends and decodes as i64;
+    // it is converted to bool below.
     let sql = db::q(
         kind,
-        &format!(
-            "SELECT id, name, protocol, base_url, api_key, \
-             {enabled_col}, priority \
-             FROM upstream_channels ORDER BY priority ASC, id ASC"
-        ),
+        "SELECT id, name, protocol, base_url, api_key, enabled, priority \
+         FROM upstream_channels ORDER BY priority ASC, id ASC",
     );
     let rows: Vec<(i64, String, String, String, String, i64, i64)> =
         sqlx::query_as(&sql).fetch_all(pool).await?;
@@ -180,18 +176,14 @@ pub async fn channels_for_model(
     kind: DbKind,
     model: &str,
 ) -> Result<Vec<(Channel, Option<String>)>, sqlx::Error> {
-    let enabled_c = db::bool_as_int(kind, "c.enabled");
-    let bool_true = db::bool_true(kind);
     let explicit_sql = db::q(
         kind,
-        &format!(
-            "SELECT c.id, c.name, c.protocol, c.base_url, c.api_key, \
-             {enabled_c}, c.priority, cm.upstream_id \
+        "SELECT c.id, c.name, c.protocol, c.base_url, c.api_key, \
+             c.enabled, c.priority, cm.upstream_id \
              FROM upstream_channels c \
              INNER JOIN channel_models cm ON cm.channel_id = c.id \
-             WHERE cm.model = ? AND c.enabled = {bool_true} \
-             ORDER BY c.priority ASC, c.id ASC"
-        ),
+             WHERE cm.model = ? AND c.enabled = 1 \
+             ORDER BY c.priority ASC, c.id ASC",
     );
     let rows: Vec<(i64, String, String, String, String, i64, i64, Option<String>)> =
         sqlx::query_as(&explicit_sql)
@@ -231,13 +223,11 @@ pub async fn channels_for_model(
     // this set to the matching protocol afterwards.
     let fallback_sql = db::q(
         kind,
-        &format!(
-            "SELECT c.id, c.name, c.protocol, c.base_url, c.api_key, \
-             {enabled_c}, c.priority \
-             FROM upstream_channels c \
-             WHERE c.enabled = {bool_true} \
-             ORDER BY c.priority ASC, c.id ASC"
-        ),
+        "SELECT c.id, c.name, c.protocol, c.base_url, c.api_key, \
+         c.enabled, c.priority \
+         FROM upstream_channels c \
+         WHERE c.enabled = 1 \
+         ORDER BY c.priority ASC, c.id ASC",
     );
     let fb: Vec<(i64, String, String, String, String, i64, i64)> =
         sqlx::query_as(&fallback_sql).fetch_all(pool).await?;
@@ -408,53 +398,23 @@ pub async fn create_channel(
     kind: DbKind,
     input: &ChannelInput,
 ) -> Result<i64, sqlx::Error> {
-    let returning = db::returning_id(kind);
     let sql = db::q(
         kind,
-        &format!(
-            "INSERT INTO upstream_channels (name, protocol, base_url, api_key, enabled, priority) \
-             VALUES (?, ?, ?, ?, ?, ?){returning}"
-        ),
+        "INSERT INTO upstream_channels (name, protocol, base_url, api_key, enabled, priority) \
+         VALUES (?, ?, ?, ?, ?, ?) RETURNING id",
     );
+    // `enabled` is an integer column on both backends, so one binding works.
     let enabled_v: i64 = if input.enabled { 1 } else { 0 };
-    match kind {
-        DbKind::Postgres => {
-            let row: (i64,) = sqlx::query_as(&sql)
-                .bind(&input.name)
-                .bind(&input.protocol)
-                .bind(&input.base_url)
-                .bind(&input.api_key)
-                .bind(input.enabled)
-                .bind(input.priority)
-                .fetch_one(pool)
-                .await?;
-            Ok(row.0)
-        }
-        DbKind::Sqlite => {
-            let row: (i64,) = sqlx::query_as(&sql)
-                .bind(&input.name)
-                .bind(&input.protocol)
-                .bind(&input.base_url)
-                .bind(&input.api_key)
-                .bind(enabled_v)
-                .bind(input.priority)
-                .fetch_one(pool)
-                .await?;
-            Ok(row.0)
-        }
-        DbKind::Mysql => {
-            let r = sqlx::query(&sql)
-                .bind(&input.name)
-                .bind(&input.protocol)
-                .bind(&input.base_url)
-                .bind(&input.api_key)
-                .bind(enabled_v)
-                .bind(input.priority)
-                .execute(pool)
-                .await?;
-            Ok(r.last_insert_id().unwrap_or(0))
-        }
-    }
+    let row: (i64,) = sqlx::query_as(&sql)
+        .bind(&input.name)
+        .bind(&input.protocol)
+        .bind(&input.base_url)
+        .bind(&input.api_key)
+        .bind(enabled_v)
+        .bind(input.priority)
+        .fetch_one(pool)
+        .await?;
+    Ok(row.0)
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -602,14 +562,12 @@ fn parse_price_row(
     }
 }
 
-const PRICE_COLS: &str = "id, model, kind, display_name, {enabled_col}, protocol, context_limit, \
+const PRICE_COLS: &str = "id, model, kind, display_name, enabled, protocol, context_limit, \
      input_price, output_price, cached_input_price, per_call_price, \
      base_price, per_second_price, allowed_seconds, size_rules";
 
 fn price_select(kind: DbKind, tail: &str) -> String {
-    let enabled_col = db::bool_as_int(kind, "enabled");
-    let cols = PRICE_COLS.replace("{enabled_col}", &enabled_col);
-    db::q(kind, &format!("SELECT {cols} FROM model_pricing {tail}"))
+    db::q(kind, &format!("SELECT {PRICE_COLS} FROM model_pricing {tail}"))
 }
 
 pub async fn list_pricing(pool: &Pool, kind: DbKind) -> Result<Vec<ModelPrice>, sqlx::Error> {
@@ -736,35 +694,21 @@ pub async fn upsert_price(
     ];
 
     let now = db::now_expr(kind);
-    let assignments = |src: &str| {
-        UPDATED
-            .iter()
-            .map(|c| format!("{c} = {src}.{c}"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let sql = match kind {
-        DbKind::Sqlite => format!(
+    // `excluded` is the incoming row on both backends, so one statement serves
+    // both (identifiers are case-insensitive, and SQLite accepts the space
+    // before the conflict target).
+    let assignments = UPDATED
+        .iter()
+        .map(|c| format!("{c} = excluded.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = db::q(
+        kind,
+        &format!(
             "INSERT INTO model_pricing ({COLS}, updated_at) VALUES ({PLACEHOLDERS}, {now}) \
-             ON CONFLICT(model) DO UPDATE SET {}, updated_at = {now}",
-            assignments("excluded")
+             ON CONFLICT (model) DO UPDATE SET {assignments}, updated_at = {now}"
         ),
-        DbKind::Postgres => format!(
-            "INSERT INTO model_pricing ({COLS}, updated_at) VALUES ({PLACEHOLDERS}, {now}) \
-             ON CONFLICT (model) DO UPDATE SET {}, updated_at = {now}",
-            assignments("EXCLUDED")
-        ),
-        DbKind::Mysql => format!(
-            "INSERT INTO model_pricing ({COLS}, updated_at) VALUES ({PLACEHOLDERS}, {now}) \
-             ON DUPLICATE KEY UPDATE {}, updated_at = {now}",
-            UPDATED
-                .iter()
-                .map(|c| format!("{c} = VALUES({c})"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
-    };
-    let sql = db::q(kind, &sql);
+    );
     let enabled_v: i64 = if input.enabled { 1 } else { 0 };
     let ctx: Option<i64> = input.context_limit.filter(|n| *n > 0);
     let is_video = input.kind == "video";
@@ -790,8 +734,8 @@ pub async fn upsert_price(
     let q = sqlx::query(&sql)
         .bind(&input.model)
         .bind(&input.kind)
-        .bind(input.display_name.as_deref());
-    let q = if matches!(kind, DbKind::Postgres) { q.bind(input.enabled) } else { q.bind(enabled_v) };
+        .bind(input.display_name.as_deref())
+        .bind(enabled_v);
     // Zero out the columns that do not apply to this kind so a model converted
     // from, say, video to chat cannot keep charging its old per-second rate.
     let q = q
@@ -864,17 +808,12 @@ pub async fn any_enabled_channel(
     kind: DbKind,
     protocol: &str,
 ) -> Result<Option<Channel>, sqlx::Error> {
-    let enabled_col = db::bool_as_int(kind, "enabled");
-    let bool_true = db::bool_true(kind);
     let sql = db::q(
         kind,
-        &format!(
-            "SELECT id, name, protocol, base_url, api_key, \
-             {enabled_col}, priority \
-             FROM upstream_channels \
-             WHERE protocol = ? AND enabled = {bool_true} \
-             ORDER BY priority ASC, id ASC LIMIT 1"
-        ),
+        "SELECT id, name, protocol, base_url, api_key, enabled, priority \
+         FROM upstream_channels \
+         WHERE protocol = ? AND enabled = 1 \
+         ORDER BY priority ASC, id ASC LIMIT 1",
     );
     let row: Option<(i64, String, String, String, String, i64, i64)> =
         sqlx::query_as(&sql)

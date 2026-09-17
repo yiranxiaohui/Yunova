@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Yunova is a self-hosted Agent platform combining multi-model chat, remote tool execution, media creation, and workflows. Its Rust/Axum backend serves a React SPA, proxies OpenAI / Anthropic / Gemini calls, and stores conversations, skills, prompts, images, and quota balances in a SQLite/MySQL/Postgres database. The frontend is embedded into the Rust binary at build time via `rust-embed`, so a single `cargo build` produces one shippable executable.
+Yunova is a self-hosted Agent platform combining multi-model chat, remote tool execution, media creation, and workflows. Its Rust/Axum backend serves a React SPA, proxies OpenAI / Anthropic / Gemini calls, and stores conversations, skills, prompts, images, and quota balances in a SQLite or Postgres database. The frontend is embedded into the Rust binary at build time via `rust-embed`, so a single `cargo build` produces one shippable executable.
 
 ## Commands
 
 Backend (repo root):
-- `cargo run` — starts the server on `127.0.0.1:3000` (override with `YUNOVA_BIND`). On first run without a configured DB, the app exposes `/setup` and the frontend's SetupPage walks the user through picking SQLite/MySQL/Postgres.
+- `cargo run` — starts the server on `127.0.0.1:3000` (override with `YUNOVA_BIND`). On first run without a configured DB, the app exposes `/setup` and the frontend's SetupPage walks the user through picking SQLite or Postgres.
 - `cargo check` — fast type-check; the first run still invokes `bun install && bun run build` in `web/` via [build.rs](build.rs).
 - Environment: `YUNOVA_DATA_DIR` (default `./data` — SQLite DB, local media, `yunova.toml` live here), `YUNOVA_DATABASE_URL` / `DATABASE_URL` (skips the install wizard), `YUNOVA_CONFIG` (path for the TOML config). Configure optional S3-compatible media storage in the admin UI; it persists to `[storage]` in `yunova.toml` and applies at runtime. Legacy `YUNOVA_STORAGE_BACKEND=s3` plus `YUNOVA_S3_*` variables remain fallback-only.
 
@@ -21,7 +21,7 @@ Frontend (in `web/`):
 
 Docker:
 - `docker compose up -d` — SQLite (walk through `/setup` on first boot).
-- `docker compose --profile mysql up -d` / `--profile postgres up -d` — sets `YUNOVA_DATABASE_URL` so the DB step is skipped; you still create the first admin via `/setup`.
+- `docker compose --profile postgres up -d` — sets `YUNOVA_DATABASE_URL` so the DB step is skipped; you still create the first admin via `/setup`.
 
 ## Architecture
 
@@ -29,13 +29,18 @@ Docker:
 [src/main.rs](src/main.rs) holds `AppState { installed: Arc<RwLock<Option<InstalledState>>>, http, config_path, data_dir, storage, config_lock }`. `storage` is a hot-swappable local/S3 media backend managed by the admin storage API; S3 reads fall back to legacy local objects. `config_lock` serializes admin writes to `yunova.toml`. `InstalledState { pool, kind }` is `None` until the setup wizard (or `YUNOVA_DATABASE_URL`) supplies a connection string. All protected routes go through `require_auth` middleware which loads `InstalledState` into request extensions alongside `CurrentUser { id }` — downstream handlers take `Extension<InstalledState>` and `Extension<CurrentUser>` rather than re-reading `AppState`.
 
 ### Database layer
-Three dialects share one schema. Conventions in [src/db.rs](src/db.rs):
-- **Migrations are numbered `NNNN_name.sql` per dialect** under `migrations/{sqlite,mysql,postgres}/`, compiled in via `include_str!` in three parallel arrays. **Adding a migration requires editing all three arrays and shipping all three files.** The runner applies unseen ids in order, splitting on `;` outside string/comment literals.
+Two backends share one schema. Conventions in [src/db.rs](src/db.rs):
+- **Migrations are numbered `NNNN_name.sql` per dialect** under `migrations/{sqlite,postgres}/`, compiled in via `include_str!` in two parallel arrays. **Adding a migration requires editing both arrays and shipping both files.** The runner applies unseen ids in order, splitting on `;` outside string/comment literals and treating `$tag$ ... $tag$` blocks as opaque.
+- **The Postgres schema deliberately avoids `TIMESTAMPTZ` / `BOOLEAN` / `NUMERIC`.** The pool is `sqlx::Any`, whose type table covers only bool, integers, floats, text and blob. It rejects the *value*, so one `timestamptz` column makes every row of its table unreadable regardless of the query. Timestamps are therefore `TEXT` holding `YYYY-MM-DD HH:MM:SS` in UTC (byte-identical to SQLite's `datetime('now')`) and booleans are `INT` 0/1. Migration 48 converts databases created before this was fixed; `db::tests::postgres_migrations_avoid_types_the_any_driver_cannot_decode` guards it.
+- Aggregates must be written `CAST(COALESCE(SUM(x), 0) AS BIGINT)` — Postgres widens `SUM()` over a bigint to `numeric`, which `Any` cannot decode.
 - `db::q(kind, sql)` rewrites `?` → `$1, $2, …` for Postgres; pass all SQL through it.
-- `db::bool_true(kind)` → `"1"` or `"TRUE"` for `WHERE` clauses; `db::bool_as_int(kind, col)` → a `CASE` expression so booleans decode as `i64` across dialects. Postgres `BOOLEAN` would otherwise not decode into `i64` via sqlx-any.
-- `db::now_expr(kind)` for `updated_at` defaults in `UPDATE` statements.
-- Inserts returning the new id differ per dialect: Sqlite/Postgres use `RETURNING id`, MySQL uses `LAST_INSERT_ID()` inside a transaction. See [src/skills.rs](src/skills.rs#L213-L282) for the canonical pattern.
-- Case-insensitive username lookup: `db::ci_eq(kind, "username")` — SQLite uses `COLLATE NOCASE` on the column, others wrap in `LOWER()`.
+- Booleans are plain `0` / `1` literals and columns in SQL on both backends — no per-dialect helper is needed.
+- `db::now_expr(kind)` for `updated_at` defaults in `UPDATE` statements; both dialects emit the same UTC text format.
+- `db::day_bucket(col)` slices the date out of that text for GROUP BY.
+- Both backends support `RETURNING id`, so inserts read the new id directly.
+- Case-insensitive username lookup: `db::ci_eq(kind, "username")` — SQLite uses `COLLATE NOCASE` on the column, Postgres wraps in `LOWER()`.
+- `yunova db-copy --from <url> --to <url>` ([src/db_copy.rs](src/db_copy.rs)) migrates an installation between backends; new tables must be added to its `TABLE_ORDER`.
+- MySQL was removed: `Any` maps `MEDIUMTEXT` to BLOB and cannot decode `TINYINT`, and the server could not even boot against it.
 
 ### Quota + billing system
 [src/quota.rs](src/quota.rs) is the nerve center. Three tables (`app_settings` K/V, `user_balances`, `balance_ledger`) plus [src/usage.rs](src/usage.rs) for token extraction:

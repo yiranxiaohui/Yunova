@@ -7,8 +7,8 @@ CREATE TABLE shared_conversations (
     creator_name     TEXT,
     snapshot_json    TEXT NOT NULL,
     view_count       BIGINT NOT NULL DEFAULT 0,
-    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    expires_at       TIMESTAMPTZ
+    created_at       TEXT NOT NULL DEFAULT to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS'),
+    expires_at       TEXT
 );
 CREATE INDEX idx_shared_user_created
     ON shared_conversations(user_id, created_at DESC);
