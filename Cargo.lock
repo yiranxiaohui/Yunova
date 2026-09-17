@@ -6897,7 +6897,7 @@ dependencies = [
 
 [[package]]
 name = "yunova"
-version = "0.4.24"
+version = "0.4.25"
 dependencies = [
  "argon2",
  "async-stream",
@@ -6930,7 +6930,7 @@ dependencies = [
 
 [[package]]
 name = "yunova-desktop"
-version = "0.4.24"
+version = "0.4.25"
 dependencies = [
  "futures-util",
  "hex",
