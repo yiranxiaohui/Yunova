@@ -8,12 +8,13 @@ import {
   microUsdToUsd,
   usdToMicroUsd,
   yuanToMicroQuota,
+  DEFAULT_USD_TO_CNY_RATE_MICRO,
   MICRO_QUOTA,
 } from "../src/lib/quota"
 import { describeModelQuota, type PlatformModel } from "../src/lib/platform-models"
 
-/** 站点默认汇率：1 美元上游成本折算 ¥7.2，不加价。 */
-const USD_TO_CNY = 7_200_000
+/** 站点默认汇率：1 美元上游成本折算 ¥1（与上游持平），不加价。 */
+const USD_TO_CNY = DEFAULT_USD_TO_CNY_RATE_MICRO
 
 /** 便于阅读的期望值：元 → 微额度。 */
 const yuan = (n: number) => Math.round(n * MICRO_QUOTA)
@@ -25,8 +26,8 @@ function chatModel(patch: Partial<PlatformModel> = {}): PlatformModel {
     kind: "chat",
     protocol: "openai",
     context_limit: null,
-    input_micro_quota_per_1m: yuan(9),
-    output_micro_quota_per_1m: yuan(72),
+    input_micro_quota_per_1m: yuan(1.25),
+    output_micro_quota_per_1m: yuan(10),
     cached_input_micro_quota_per_1m: null,
     per_call_micro_quota: 0,
     ...patch,
@@ -51,10 +52,14 @@ describe("美元价与额度的换算", () => {
   })
 
   test("美元成本按汇率折算成人民币额度", () => {
-    // $1 = ¥7.2
-    expect(microQuotaForMicroUsd(1_000_000, USD_TO_CNY)).toBe(yuan(7.2))
-    // $1.25 = ¥9
-    expect(microQuotaForMicroUsd(1_250_000, USD_TO_CNY)).toBe(yuan(9))
+    // 默认持平：$1 = ¥1。上游中转站就是按列表美元价 1:1 卖额度的，
+    // 填真实外汇牌价会把每个模型按成本的好几倍扣费。
+    expect(USD_TO_CNY).toBe(MICRO_QUOTA)
+    expect(microQuotaForMicroUsd(1_000_000, USD_TO_CNY)).toBe(yuan(1))
+    // $1.25 = ¥1.25
+    expect(microQuotaForMicroUsd(1_250_000, USD_TO_CNY)).toBe(yuan(1.25))
+    // 汇率仍然可调：想用汇率而不是加价做毛利的站点不受影响。
+    expect(microQuotaForMicroUsd(1_250_000, 7_200_000)).toBe(yuan(9))
   })
 
   test("全局倍率统一作用于所有模型", () => {
@@ -97,7 +102,7 @@ describe("元与微额度的互转", () => {
 
 describe("对话按 token 计费的预估", () => {
   test("与后端同一套公式：分别按输入价和输出价计费", () => {
-    // $1.25 输入 / $10 输出，100 万输入 + 100 万输出 = $11.25 = ¥81
+    // $1.25 输入 / $10 输出，100 万输入 + 100 万输出 = $11.25 = ¥11.25
     const quota = estimateChatQuota({
       inputPrice: 1_250_000,
       outputPrice: 10_000_000,
@@ -106,11 +111,11 @@ describe("对话按 token 计费的预估", () => {
       outputTokens: 1_000_000,
       usdToCnyRateMicro: USD_TO_CNY,
     })
-    expect(quota).toBe(yuan(81))
+    expect(quota).toBe(yuan(11.25))
   })
 
   test("一次普通请求只花几分钱，且不会被取整成 0", () => {
-    // 1000 输入 + 500 输出 = $0.00625 = ¥0.045
+    // 1000 输入 + 500 输出 = $0.00625 = ¥0.00625
     const quota = estimateChatQuota({
       inputPrice: 1_250_000,
       outputPrice: 10_000_000,
@@ -119,8 +124,8 @@ describe("对话按 token 计费的预估", () => {
       outputTokens: 500,
       usdToCnyRateMicro: USD_TO_CNY,
     })
-    expect(quota).toBe(45_000)
-    expect(formatQuota(quota)).toBe("0.045")
+    expect(quota).toBe(6_250)
+    expect(formatQuota(quota)).toBe("0.00625")
   })
 
   test("命中缓存的 token 走缓存价，且不会被重复计费", () => {
@@ -142,8 +147,8 @@ describe("对话按 token 计费的预估", () => {
       usdToCnyRateMicro: USD_TO_CNY,
     })
     expect(cached).toBeLessThan(uncached)
-    // 10 万 × $1.25 + 90 万 × $0.125 = $0.2375 = ¥1.71
-    expect(cached).toBe(yuan(1.71))
+    // 10 万 × $1.25 + 90 万 × $0.125 = $0.2375 = ¥0.2375
+    expect(cached).toBe(yuan(0.2375))
   })
 
   test("未配置缓存价时，缓存 token 按普通输入价计费", () => {
@@ -209,7 +214,7 @@ describe("额度展示", () => {
   })
 
   test("对话模型展示每百万 token 的价格，而不是每次", () => {
-    expect(describeModelQuota(chatModel())).toBe("9/72 元每1M")
+    expect(describeModelQuota(chatModel())).toBe("1.25/10 元每1M")
   })
 
   test("图像模型按次展示", () => {
