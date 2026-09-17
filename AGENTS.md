@@ -50,3 +50,23 @@ When the user asks to publish a release, remember to complete the full flow:
 
 Keep this as an agent-operated process. Do not add release or deployment scripts
 unless the user explicitly asks for automation code.
+
+## Desktop client updates
+
+The desktop app self-updates through `tauri-plugin-updater`, so a `v*` tag now
+ships executable code to users' machines. Two consequences matter.
+
+The signing key is the whole trust anchor. The private half lives only in
+`~/.tauri/yunova-updater.key` (mode `0600`) on the maintainer's machine and in
+the `TAURI_SIGNING_PRIVATE_KEY` repository secret; the public half is committed
+in `desktop/tauri.conf.json`. **Never regenerate it** — a new key cannot update
+any client that is already installed, and those users would have to reinstall
+by hand. Never print, copy, commit, or log the private key.
+
+A release with no `.sig` files is worse than no release: it installs fine and
+then can never update. `desktop-release.yml` therefore fails the build when the
+signing secret produced no signatures, and assembles `latest.json` once in the
+`updater-manifest` job after the whole matrix succeeds — not per build job,
+which silently drops platforms when two jobs race on the same asset. After
+tagging, confirm the release carries `latest.json` plus a `.sig` for every
+platform before considering the release done.

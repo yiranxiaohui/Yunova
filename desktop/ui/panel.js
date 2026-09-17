@@ -178,11 +178,72 @@ async function refresh() {
   renderStatus(snap.status, snap.active_sessions)
   renderSettings(snap.settings)
   renderRuntime(snap.runtime)
+  renderUpdates(snap.updates)
   el("log").textContent = snap.log.join("\n")
   el("log").scrollTop = el("log").scrollHeight
   el("boundAs").textContent = snap.bound_as
     ? `已绑定账号 ${snap.bound_as}，本机保存的是可单独吊销的设备令牌。`
     : "尚未绑定本机。"
+}
+
+// Updates.
+//
+// Three mutually exclusive shapes, because conflating them is how an update
+// button ends up lying: nothing to do, something to install, or something
+// installed and waiting for a restart. The "why not" cases (a package-managed
+// copy, a bare binary) are a permanent property of this install rather than a
+// transient error, so they read as an explanation and not a failure.
+function renderUpdates(u) {
+  const status = el("updateStatus")
+  const install = el("installUpdate")
+  const restart = el("restartApp")
+  const notes = el("updateNotes")
+  const blocked = el("updateBlocked")
+  const error = el("updateError")
+  const check = el("checkUpdate")
+
+  error.hidden = !u.error
+  error.textContent = u.error ?? ""
+  blocked.hidden = !u.blocked
+  blocked.textContent = u.blocked ?? ""
+
+  notes.hidden = !u.available?.notes
+  notes.textContent = u.available?.notes ?? ""
+
+  if (u.installed) {
+    status.textContent = `已安装 ${u.available?.version ?? "新版本"}，重启后生效。`
+    install.hidden = true
+    restart.hidden = false
+    check.disabled = true
+    return
+  }
+
+  restart.hidden = true
+
+  if (u.downloading) {
+    const pct = u.downloading.percent
+    status.textContent =
+      pct === null || pct === undefined
+        ? "正在下载更新…"
+        : `正在下载更新… ${pct}%`
+    install.hidden = false
+    install.disabled = true
+    check.disabled = true
+    return
+  }
+
+  install.disabled = false
+  check.disabled = false
+
+  if (u.available) {
+    status.textContent = `可更新到 ${u.available.version}（当前 ${u.current_version}）`
+    // Offered only when this install shape can actually replace itself;
+    // otherwise the explanation above is the whole answer.
+    install.hidden = Boolean(u.blocked)
+  } else {
+    status.textContent = `已是最新版本 ${u.current_version}`
+    install.hidden = true
+  }
 }
 
 function fail(e) {
@@ -318,6 +379,49 @@ el("checkRuntime").addEventListener("click", async () => {
 // Signing in on the site is the normal way to bind this machine, so the
 // sign-in card points there first and keeps the password form folded away.
 el("openSiteLogin").addEventListener("click", () => invoke("show_site"))
+
+el("checkUpdate").addEventListener("click", async () => {
+  el("updateStatus").textContent = "正在检查更新…"
+  el("updateError").hidden = true
+  try {
+    renderUpdates(await invoke("check_update"))
+  } catch (e) {
+    // The check failing is ordinary (offline, captive portal, rate limit), so
+    // it is reported in place rather than as a dialog.
+    const snap = await invoke("snapshot")
+    renderUpdates(snap.updates)
+    const box = el("updateError")
+    box.textContent = typeof e === "string" ? e : (e?.message ?? String(e))
+    box.hidden = false
+  }
+})
+
+el("installUpdate").addEventListener("click", async () => {
+  el("updateError").hidden = true
+  try {
+    await invoke("install_update")
+  } catch (e) {
+    const box = el("updateError")
+    box.textContent = typeof e === "string" ? e : (e?.message ?? String(e))
+    box.hidden = false
+  }
+  // Either way the authoritative state lives in Rust: a Windows install exits
+  // the app mid-call, and a failure has already been recorded there.
+  const snap = await invoke("snapshot")
+  renderUpdates(snap.updates)
+})
+
+el("restartApp").addEventListener("click", async () => {
+  try {
+    await invoke("restart_app")
+  } catch (e) {
+    const box = el("updateError")
+    box.textContent = typeof e === "string" ? e : (e?.message ?? String(e))
+    box.hidden = false
+  }
+})
+
+await listen("updates://state", (event) => renderUpdates(event.payload))
 
 await listen("connector://status", async (event) => {
   // The session count lives on the Rust side, so a status change re-reads it
