@@ -47,6 +47,7 @@ export default function DownloadPage() {
   const [release, setRelease] = useState<ReleaseInfo | null>(null)
   const [loading, setLoading] = useState(true)
   const [copied, setCopied] = useState(false)
+  const [macCopied, setMacCopied] = useState(false)
 
   const os = useMemo(() => guessOs(), [])
   const primary = useMemo(() => preferredBuild(os), [os])
@@ -76,6 +77,24 @@ export default function DownloadPage() {
   const runSnippet = `YUNOVA_DEVICE_URL=${window.location.origin}
 YUNOVA_DEVICE_WORKSPACE=/path/to/project
 ./yunova-desktop --headless`
+
+  // The builds carry no Apple Developer ID, so macOS quarantines them and
+  // offers the "unidentified developer" prompt. Some machines refuse outright
+  // instead, and the wording it uses -- "damaged" -- reads as a corrupt
+  // download and points at the Trash, so people retry the download or give
+  // up. Naming the real cause next to the button is the honest fix until the
+  // app is signed and notarized.
+  const macQuarantineSnippet = "sudo xattr -rd com.apple.quarantine /Applications/Yunova.app"
+
+  const copyMacSnippet = async () => {
+    try {
+      await navigator.clipboard.writeText(macQuarantineSnippet)
+      setMacCopied(true)
+      setTimeout(() => setMacCopied(false), 2000)
+    } catch {
+      toast.error("复制失败，请手动选择文本")
+    }
+  }
 
   const copySnippet = async () => {
     try {
@@ -254,6 +273,39 @@ YUNOVA_DEVICE_WORKSPACE=/path/to/project
                   )
                 })}
               </div>
+              {/* Only under macOS: the other platforms have no equivalent
+                  step, and a warning shown to everyone would be noise that
+                  makes the app look broken. */}
+              {group === "macos" && (
+                <div className="rounded-xl bg-muted/70 p-3">
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    <span className="font-medium text-foreground">
+                      首次打开提示「已损坏」或「无法验证开发者」？
+                    </span>{" "}
+                    文件是完整的。安装包尚未经 Apple 签名公证，系统会拦下从网络
+                    下载的应用。先试右键应用图标 →「打开」；若仍被拦，把应用拖到
+                    「应用程序」后在终端执行：
+                  </p>
+                  <div className="mt-2 flex items-start justify-between gap-2">
+                    <code className="min-w-0 flex-1 overflow-auto text-[11px] leading-relaxed">
+                      {macQuarantineSnippet}
+                    </code>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="shrink-0"
+                      onClick={() => void copyMacSnippet()}
+                    >
+                      {macCopied ? (
+                        <Check className="size-3.5" />
+                      ) : (
+                        <Copy className="size-3.5" />
+                      )}
+                      {macCopied ? "已复制" : "复制"}
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </section>
