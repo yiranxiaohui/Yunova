@@ -32,6 +32,12 @@ mod endpoint;
 mod identity;
 mod proto;
 mod runtime;
+// The approval policy is shared verbatim with the server rather than
+// reimplemented: the server stores what a task asked for and this client
+// decides what to honour, so a mode that meant one thing on one side and
+// another on the other would be a security bug, not a display bug.
+#[path = "../../src/agent_approval.rs"]
+mod agent_approval;
 #[path = "../../src/runtime_env.rs"]
 mod runtime_env;
 mod runtime_install;
@@ -73,7 +79,7 @@ fn emit_approval_gate(args: &[String]) {
         eprintln!("用法: yunova-desktop --emit-approval-gate <always|commands|never> <目录>");
         std::process::exit(2);
     };
-    let Some(mode) = runtime::ApprovalMode::parse(mode) else {
+    let Some(mode) = agent_approval::ApprovalMode::parse(mode) else {
         eprintln!("无法识别的审批方式: {mode}");
         std::process::exit(2);
     };

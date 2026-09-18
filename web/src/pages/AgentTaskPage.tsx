@@ -29,6 +29,7 @@ import {
   type AgentItem,
   type AgentSession,
   type AgentTarget,
+  type ApprovalMode,
   type ThinkingLevel,
   THINKING_LABELS,
   THINKING_LEVELS,
@@ -39,7 +40,7 @@ import {
   onAppStateChange,
   requestNotificationPermission,
 } from "@/lib/platform"
-import { approvalTitle } from "@/lib/agent"
+import { approvalTitle, asApprovalMode } from "@/lib/agent"
 import { useAuth } from "@/lib/auth-context"
 import { toast } from "sonner"
 
@@ -128,6 +129,11 @@ export default function AgentTaskPage() {
   // Empty until one answers, in which case the picker offers the whole ladder
   // rather than hiding options that would in fact work.
   const [thinkingLevels, setThinkingLevels] = useState<ThinkingLevel[]>([])
+  // How much this task stops to ask. Null means the execution target's own
+  // policy, which is what every task did before this control existed: a cloud
+  // sandbox runs through, and a local machine applies whatever its owner set
+  // in the desktop client.
+  const [approval, setApproval] = useState<ApprovalMode | null>(null)
   const [devices, setDevices] = useState<DeviceOption[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [devicesOpen, setDevicesOpen] = useState(false)
@@ -218,7 +224,12 @@ export default function AgentTaskPage() {
           setDevices(
             ds
               .filter((d) => !d.revoked)
-              .map((d) => ({ id: d.id, name: d.name, online: d.online }))
+              .map((d) => ({
+                id: d.id,
+                name: d.name,
+                online: d.online,
+                approval: d.approval,
+              }))
           )
         })
         .catch(() => {
@@ -253,6 +264,7 @@ export default function AgentTaskPage() {
       // runs on, not what was selected on the previous screen.
       setModel(s?.model ?? "")
       setThinking(s?.thinking_level ?? null)
+      setApproval(asApprovalMode(s?.approval))
       setRunning(s?.status === "running")
       await syncEntries(sessionId, true)
     })()
@@ -424,6 +436,7 @@ export default function AgentTaskPage() {
           model: model || undefined,
           workspace: workspace ?? undefined,
           thinking_level: thinking ?? undefined,
+          approval: approval ?? undefined,
         })
         // Carry the prompt across the navigation so the user does not retype
         // it after the route changes.
@@ -432,7 +445,7 @@ export default function AgentTaskPage() {
         toast.error(`创建任务失败：${(e as Error).message}`)
       }
     },
-    [target, deviceId, model, workspace, thinking, nav]
+    [target, deviceId, model, workspace, thinking, approval, nav]
   )
 
   /** Switch the model this task runs on.
@@ -476,6 +489,29 @@ export default function AgentTaskPage() {
       }
     },
     [sessionId, thinking]
+  )
+
+  /** Switch how much this task stops to ask.
+   *
+   *  Deliberately *not* rolled back the way the model and level are, because
+   *  it is not applied to a running runtime at all: the gate is an extension
+   *  the runtime loads at startup, so this takes effect on the next start and
+   *  the picker says so. Rolling back on failure still matters — a control
+   *  claiming a policy the server did not store would be a promise about
+   *  someone's computer that nothing is keeping. */
+  const changeApproval = useCallback(
+    async (next: ApprovalMode | null) => {
+      const previous = approval
+      setApproval(next)
+      if (sessionId == null) return
+      try {
+        await agentApi.setApproval(sessionId, next)
+      } catch (e) {
+        setApproval(previous)
+        toast.error(`修改审批方式失败：${(e as Error).message}`)
+      }
+    },
+    [sessionId, approval]
   )
 
   const send = useCallback(
@@ -749,6 +785,19 @@ export default function AgentTaskPage() {
                       : undefined
                   }
                   hideSwitch={heroSwitch}
+                  approval={approval}
+                  onApprovalChange={(next) => void changeApproval(next)}
+                  // The machine actually chosen, so the menu can say when its
+                  // own setting is the stricter one and therefore the one
+                  // that will apply.
+                  deviceApproval={
+                    devices.find(
+                      (d) => d.id === (session?.device_id ?? deviceId)
+                    )?.approval ?? null
+                  }
+                  // Only once a runtime exists is there something the change
+                  // cannot reach; before that it simply starts with it.
+                  approvalPending={session?.live ?? false}
                 />
                 {/* Work mode is always platform-billed, so only models the
                     admin priced *and* an agent runtime can address are

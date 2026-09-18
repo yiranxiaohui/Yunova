@@ -114,11 +114,17 @@ impl RuntimeManager {
     /// start fails if it is outside them: refusing is the only safe answer,
     /// because silently falling back to the default would run a task somewhere
     /// other than where its author is watching.
+    ///
+    /// `approval` is what the task asked the gate to stop for. It can only
+    /// tighten this machine's setting: the stricter of the two is used, so a
+    /// task — or a server — cannot turn off confirmations the owner of this
+    /// computer configured. `None` means "this machine's own policy".
     pub async fn start(
         &self,
         session_id: i64,
         models_json: &Value,
         workspace: Option<&str>,
+        approval: Option<ApprovalMode>,
         to_server: mpsc::Sender<ToServer>,
     ) -> Result<(), String> {
         // A second runtime for one session would fork the transcript.
@@ -133,7 +139,14 @@ impl RuntimeManager {
         )?;
 
         let agent_dir = self.config.state_dir.join(format!("s{session_id}"));
-        write_runtime_config(&agent_dir, models_json, self.config.approval).await?;
+        // The floor is this machine's setting; a task may raise it, never
+        // lower it. Resolved here rather than trusted from the frame, so the
+        // guarantee holds even against a server that sends whatever it likes.
+        let approval = match approval {
+            Some(asked) => self.config.approval.strictest(asked),
+            None => self.config.approval,
+        };
+        write_runtime_config(&agent_dir, models_json, approval).await?;
 
         tokio::fs::create_dir_all(&cwd)
             .await
@@ -502,157 +515,15 @@ pub fn list_children(path: &std::path::Path) -> Result<Vec<ChildDir>, String> {
     Ok(out)
 }
 
-/// How tool calls are gated on this machine.
+/// The approval policy, shared verbatim with the server.
 ///
-/// Three steps rather than a switch, because "ask about everything" and "ask
-/// about nothing" are both wrong most of the time: a task that edits twenty
-/// files asks twenty times and the user stops reading the prompts, while
-/// turning the gate off to get work done also hands over the shell. The
-/// middle step keeps the expensive decision — running a command — in front of
-/// a human while letting the agent write files inside the workspace it was
-/// already confined to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ApprovalMode {
-    /// Ask before every command, write and edit. The safe default.
-    #[default]
-    Always,
-    /// Ask before commands; file writes and edits run on their own.
-    Commands,
-    /// Never ask. Only sensible on a machine the user treats as disposable.
-    Never,
-}
-
-impl ApprovalMode {
-    /// Parse a configured value, tolerating the old boolean spelling.
-    ///
-    /// `YUNOVA_DEVICE_AUTO_APPROVE=1` predates this setting and is still what
-    /// existing service units pass, so it has to keep meaning what it meant:
-    /// do not ask.
-    pub fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "always" | "ask" | "0" | "off" | "false" | "no" => Some(Self::Always),
-            "commands" | "command" | "shell" => Some(Self::Commands),
-            "never" | "auto" | "1" | "on" | "true" | "yes" => Some(Self::Never),
-            _ => None,
-        }
-    }
-
-    /// Tools that stop for a human under this mode.
-    ///
-    /// `read`/`grep`/`find` are deliberately absent at every level: they
-    /// cannot change the machine, and gating them would bury the prompts that
-    /// matter under ones nobody can answer usefully.
-    pub fn gated(self) -> &'static [&'static str] {
-        match self {
-            Self::Always => &["bash", "powershell", "write", "edit"],
-            Self::Commands => &["bash", "powershell"],
-            Self::Never => &[],
-        }
-    }
-
-    /// One line for a terminal or a log.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Always => "逐条确认命令与文件改动",
-            Self::Commands => "仅命令需要确认，文件改动自动放行",
-            Self::Never => "全部自动执行",
-        }
-    }
-
-    /// The wire spelling, matching the serde representation.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Always => "always",
-            Self::Commands => "commands",
-            Self::Never => "never",
-        }
-    }
-}
-
-/// The approval gate installed on the user's machine.
-///
-/// Written by this client rather than sent by the server: the policy that
-/// protects the machine must not be something a server can switch off. The
-/// runtime discovers it because it sits under the session's config dir.
-///
-/// What it shows matters as much as what it blocks. The first version passed
-/// an options object to `ctx.ui.confirm`, which takes `(title, message)`, and
-/// read `event.args`, which pi calls `event.input` — so every prompt arrived
-/// as a bare `{}` and the user was asked to approve a command they could not
-/// see. An approval dialog that hides the action is not a safety feature; it
-/// only teaches people to press 允许.
-fn approval_extension(mode: ApprovalMode) -> Option<String> {
-    let gated = mode.gated();
-    if gated.is_empty() {
-        return None;
-    }
-    let list = gated
-        .iter()
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Some(format!(
-        r#"// Installed by yunova-desktop. Gates tools that can change this machine.
-const GUARDED = new Set([{list}]);
-const LIMIT = 1600;
-
-const clip = (s) => {{
-  const text = String(s ?? "");
-  return text.length > LIMIT ? `${{text.slice(0, LIMIT)}}\n…（已截断）` : text;
-}};
-const firstLine = (s) => {{
-  const [line = ""] = String(s ?? "").split("\n");
-  return line.length > 120 ? `${{line.slice(0, 120)}}…` : line;
-}};
-
-function title(name) {{
-  if (name === "bash" || name === "powershell") return "允许在本机执行命令？";
-  if (name === "write") return "允许写入本机文件？";
-  if (name === "edit") return "允许修改本机文件？";
-  return `允许在本机执行 ${{name}}？`;
-}}
-
-// What the user is actually approving, per tool. A generic JSON dump is the
-// fallback rather than the rule: the whole point is that the command or the
-// path is readable at a glance on a phone.
-function describe(name, input, cwd) {{
-  const a = input ?? {{}};
-  if (name === "bash" || name === "powershell") {{
-    const where = cwd ? `目录：${{cwd}}\n\n` : "";
-    return `${{where}}${{clip(a.command)}}`;
-  }}
-  if (name === "write") {{
-    const body = typeof a.content === "string" ? a.content : "";
-    const size = body ? `（${{body.length}} 字符）` : "";
-    return `写入：${{a.path ?? "?"}}${{size}}\n\n${{clip(body)}}`;
-  }}
-  if (name === "edit") {{
-    const edits = Array.isArray(a.edits) ? a.edits : [];
-    const lines = edits.map(
-      (e, i) => `${{i + 1}}. ${{firstLine(e?.oldText)}}\n   → ${{firstLine(e?.newText)}}`
-    );
-    return clip(`修改：${{a.path ?? "?"}}（${{edits.length}} 处）\n\n${{lines.join("\n")}}`);
-  }}
-  return clip(JSON.stringify(a, null, 2));
-}}
-
-export default function (pi) {{
-  pi.on("tool_call", async (event, ctx) => {{
-    if (!GUARDED.has(event.toolName)) return;
-    // `input` is pi's own name for the arguments; `args` is kept only so an
-    // older runtime still shows something rather than an empty dialog.
-    const input = event.input ?? event.args;
-    const ok = await ctx.ui.confirm(
-      title(event.toolName),
-      describe(event.toolName, input, ctx.cwd)
-    );
-    if (!ok) return {{ block: true, reason: "用户拒绝了该操作" }};
-  }});
-}}
-"#
-    ))
-}
+/// Re-exported rather than defined here so this client and the server cannot
+/// drift on what a mode means: the server stores what a task asked for and
+/// this client decides what to honour, and a disagreement about the spelling
+/// of "commands" would be a security bug rather than a display bug. See
+/// `src/agent_approval.rs` for why there are three steps and why a task can
+/// only ever tighten what is set here.
+pub use crate::agent_approval::{ApprovalMode, Scope as ApprovalScope};
 
 /// Write a session's runtime config: models, and the approval gate the user's
 /// mode calls for.
@@ -688,26 +559,12 @@ pub async fn write_runtime_config(
     }
 
     let ext_dir = agent_dir.join("extensions");
-    let ext_path = ext_dir.join("yunova-approval.js");
-    match approval_extension(approval) {
-        Some(source) => {
-            tokio::fs::create_dir_all(&ext_dir)
-                .await
-                .map_err(|e| format!("无法创建扩展目录: {e}"))?;
-            tokio::fs::write(&ext_path, source)
-                .await
-                .map_err(|e| format!("写入审批扩展失败: {e}"))?;
-        }
-        // Explicitly removed: a gate from a previous run would silently
-        // contradict the user's current choice — and the narrower modes have
-        // to overwrite it rather than leave a wider one in place, which the
-        // unconditional write above does.
-        None => {
-            let _ = tokio::fs::remove_file(&ext_path).await;
-        }
-    }
-
-    Ok(())
+    // Removal on the loosening path is handled inside `write_gate`: a gate from
+    // a previous run would silently contradict the user's current choice in
+    // both directions — a wider one left behind asks about things they stopped
+    // wanting asked about, and a narrower one left behind is a boundary they
+    // believe is still there.
+    crate::agent_approval::write_gate(&ext_dir, approval, ApprovalScope::Device).await
 }
 
 #[cfg(test)]
@@ -844,23 +701,6 @@ mod tests {
         tokio::fs::remove_dir_all(&dir).await.unwrap();
     }
 
-    #[test]
-    fn the_old_boolean_setting_keeps_meaning_what_it_meant() {
-        // `YUNOVA_DEVICE_AUTO_APPROVE=1` is in existing service units, and a
-        // headless box that silently started asking for approvals nobody can
-        // answer would simply stop doing work.
-        assert_eq!(ApprovalMode::parse("1"), Some(ApprovalMode::Never));
-        assert_eq!(ApprovalMode::parse("true"), Some(ApprovalMode::Never));
-        assert_eq!(ApprovalMode::parse("0"), Some(ApprovalMode::Always));
-        assert_eq!(
-            ApprovalMode::parse("commands"),
-            Some(ApprovalMode::Commands)
-        );
-        // An unreadable value is not silently read as "do not ask": the caller
-        // keeps its default, which is to ask.
-        assert_eq!(ApprovalMode::parse("sometimes"), None);
-    }
-
     #[tokio::test]
     async fn the_gateway_credential_is_written_private() {
         let dir = temp_dir("perm");
@@ -917,7 +757,7 @@ mod tests {
         });
         let (tx, _rx) = mpsc::channel(4);
         let err = m
-            .start(1, &json!({"providers":{}}), None, tx)
+            .start(1, &json!({"providers":{}}), None, None, tx)
             .await
             .expect_err("a missing runtime must fail");
         assert!(err.contains("yunova-no-such-runtime"), "got: {err}");
@@ -1079,7 +919,7 @@ mod tests {
             reporter: None,
         });
         let (tx, mut rx) = mpsc::channel(4);
-        m.start(1, &json!({"providers":{}}), None, tx)
+        m.start(1, &json!({"providers":{}}), None, None, tx)
             .await
             .expect("spawning succeeds; the process fails afterwards");
 
@@ -1111,5 +951,99 @@ mod tests {
         let m = RuntimeManager::new(Config::default());
         m.stop(123).await;
         m.stop_all().await;
+    }
+
+    #[tokio::test]
+    async fn a_task_cannot_ask_this_machine_to_stop_confirming() {
+        // The direction that must hold for the per-task picker to be safe at
+        // all: it reaches this machine over a socket from a server, so a task
+        // asking for `never` on a machine set to ask must still ask. The gate
+        // on disk is the evidence — it is what the runtime actually loads.
+        let dir = temp_dir("floor");
+        let m = RuntimeManager::new(Config {
+            workspace: dir.clone(),
+            workspace_roots: vec![dir.clone()],
+            state_dir: dir.clone(),
+            program: "yunova-no-such-runtime".into(),
+            approval: ApprovalMode::Always,
+            reporter: None,
+        });
+        let (tx, _rx) = mpsc::channel(4);
+        // The spawn fails (there is no such program), but the config is
+        // written first, which is the part under test.
+        let _ = m
+            .start(
+                7,
+                &json!({"providers":{}}),
+                None,
+                Some(ApprovalMode::Never),
+                tx,
+            )
+            .await;
+
+        let gate = dir
+            .join("s7")
+            .join("extensions")
+            .join(crate::agent_approval::GATE_FILE);
+        let body = tokio::fs::read_to_string(&gate)
+            .await
+            .expect("a machine set to ask must still have a gate");
+        let guarded = body
+            .lines()
+            .find(|l| l.contains("const GUARDED"))
+            .expect("the gate must declare its tool list");
+        for tool in ["bash", "write", "edit"] {
+            assert!(
+                guarded.contains(tool),
+                "{tool} must still stop for a human: {guarded}"
+            );
+        }
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
+    }
+
+    #[tokio::test]
+    async fn a_task_may_tighten_a_machine_that_asks_for_nothing() {
+        // The other direction is the feature: a machine left on "never" — a
+        // scratch box, or one the user runs unattended — can still be asked to
+        // confirm one particular task without changing its settings.
+        let dir = temp_dir("raise");
+        let m = RuntimeManager::new(Config {
+            workspace: dir.clone(),
+            workspace_roots: vec![dir.clone()],
+            state_dir: dir.clone(),
+            program: "yunova-no-such-runtime".into(),
+            approval: ApprovalMode::Never,
+            reporter: None,
+        });
+        let (tx, _rx) = mpsc::channel(4);
+        let _ = m
+            .start(
+                8,
+                &json!({"providers":{}}),
+                None,
+                Some(ApprovalMode::Commands),
+                tx,
+            )
+            .await;
+
+        let body = tokio::fs::read_to_string(
+            dir.join("s8")
+                .join("extensions")
+                .join(crate::agent_approval::GATE_FILE),
+        )
+        .await
+        .expect("the task asked for a gate, so one must exist");
+        let guarded = body
+            .lines()
+            .find(|l| l.contains("const GUARDED"))
+            .expect("the gate must declare its tool list");
+        assert!(guarded.contains("bash"), "got: {guarded}");
+        assert!(
+            !guarded.contains("\"write\""),
+            "this task asked only about commands: {guarded}"
+        );
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
     }
 }

@@ -110,6 +110,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (49, include_str!("../migrations/sqlite/0049_cli_device_codes.sql")),
     (50, include_str!("../migrations/sqlite/0050_agent_session_workspace.sql")),
     (51, include_str!("../migrations/sqlite/0051_agent_session_thinking.sql")),
+    (52, include_str!("../migrations/sqlite/0052_agent_session_approval.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -167,6 +168,10 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (
         51,
         include_str!("../migrations/postgres/0051_agent_session_thinking.sql"),
+    ),
+    (
+        52,
+        include_str!("../migrations/postgres/0052_agent_session_approval.sql"),
     ),
 ];
 

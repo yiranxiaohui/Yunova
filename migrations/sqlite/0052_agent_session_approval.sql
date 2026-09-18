@@ -1,0 +1,15 @@
+-- Per-task approval policy for work-mode sessions.
+--
+-- Until now the gate was purely a property of the machine: the desktop client
+-- wrote it from its own settings, and a cloud sandbox had none at all. That
+-- makes the common case awkward in both directions — one risky task on a
+-- machine set to "never ask" cannot be watched, and a long mechanical task on
+-- a machine set to "ask about everything" is answered by reflex.
+--
+-- The column stores what the *task* asked for. It is never the final word:
+-- the device resolves it against its own setting and keeps the stricter of
+-- the two, so this can only tighten a machine's policy, never loosen it.
+--
+-- NULL means "whatever the execution target decides on its own", which is
+-- exactly what every existing session was, so no backfill is needed.
+ALTER TABLE agent_sessions ADD COLUMN approval TEXT;

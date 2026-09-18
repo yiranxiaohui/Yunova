@@ -541,16 +541,34 @@ async fn run_once(
                 session_id,
                 models_json,
                 workspace,
+                approval,
             } => {
+                // An unreadable mode is dropped rather than guessed at: the
+                // machine then keeps its own policy, which is the stricter
+                // reading of "this build does not understand what you asked
+                // for".
+                let asked = approval.as_deref().and_then(ApprovalMode::parse);
                 host.log(match workspace.as_deref() {
                     Some(dir) => format!("任务 {session_id}: 在 {dir} 启动本机运行时"),
                     None => format!("任务 {session_id}: 启动本机运行时"),
                 });
+                // Logged because it is the one local decision a user cannot
+                // see from the task list: the web UI shows what was *asked*
+                // for, and this line shows what this machine actually applied.
+                if let Some(asked) = asked
+                    && asked != config.approval
+                {
+                    host.log(format!(
+                        "任务 {session_id}: 审批方式 {}",
+                        config.approval.strictest(asked).label()
+                    ));
+                }
                 if let Err(e) = manager
                     .start(
                         session_id,
                         &models_json,
                         workspace.as_deref(),
+                        asked,
                         watch_tx.clone(),
                     )
                     .await

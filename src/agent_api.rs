@@ -23,6 +23,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast;
 
+use crate::agent_approval::{ApprovalMode, Scope as ApprovalScope};
 use crate::agent_rpc::{self, Inbound};
 use crate::agent_session::{SessionEvent, Target};
 use crate::db::{self, DbKind, Pool};
@@ -120,6 +121,28 @@ async fn session_thinking_level(pool: &Pool, kind: DbKind, session_id: i64) -> O
     .filter(|l| agent_rpc::is_thinking_level(l))
 }
 
+/// The approval policy a session asked for, if any.
+///
+/// Validated on the way out as well as on the way in, for the same reason the
+/// thinking level is: the column is plain text and survives a downgrade, so a
+/// value written by a newer build must not be replayed as something this one
+/// would mis-resolve. Unreadable therefore means "the target decides", which
+/// is the *stricter* reading — the device still applies its own policy.
+async fn session_approval(pool: &Pool, kind: DbKind, session_id: i64) -> Option<ApprovalMode> {
+    sqlx::query_scalar::<_, Option<String>>(&db::q(
+        kind,
+        "SELECT approval FROM agent_sessions WHERE id = ?",
+    ))
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .as_deref()
+    .and_then(ApprovalMode::parse)
+}
+
 /// Ask a live runtime to switch models.
 ///
 /// Used both when a runtime starts and when the user switches mid-session, so
@@ -182,6 +205,14 @@ struct CreateSessionReq {
     /// (`off`…`max`). Omitted means the runtime's own default.
     #[serde(default)]
     thinking_level: Option<String>,
+    /// How tool calls should be gated for this task.
+    ///
+    /// Only ever a request to *tighten*: the execution target resolves it
+    /// against its own policy and keeps the stricter of the two, so a task
+    /// cannot switch off the confirmations the owner of a machine configured.
+    /// Omitted means "whatever that target does on its own".
+    #[serde(default)]
+    approval: Option<String>,
     /// Directory on the device this task should run in.
     ///
     /// Only meaningful for `target = "device"`, and only ever a record of what
@@ -227,6 +258,23 @@ async fn create_session(
     {
         return (StatusCode::BAD_REQUEST, "推理级别无效").into_response();
     }
+
+    // Same treatment as the level, and for the same reason: the value is
+    // replayed into the gate on every later start, so a spelling neither side
+    // understands has to be refused while the user is still looking at the
+    // control that produced it.
+    let approval = match req
+        .approval
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        Some(raw) => match ApprovalMode::parse(raw) {
+            Some(mode) => Some(mode),
+            None => return (StatusCode::BAD_REQUEST, "审批方式无效").into_response(),
+        },
+        None => None,
+    };
 
     // A device session is meaningless without a machine to run on, and the
     // machine must belong to the caller: otherwise a session could be pointed
@@ -281,7 +329,7 @@ async fn create_session(
     let insert = db::q(
         installed.kind,
         "INSERT INTO agent_sessions (user_id, target, device_id, title, model, workspace, \
-         thinking_level) VALUES (?, ?, ?, ?, ?, ?, ?)",
+         thinking_level, approval) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     );
     // Both backends support RETURNING, so the id comes back from the insert.
     let id = sqlx::query_as::<_, (i64,)>(&format!("{insert} RETURNING id"))
@@ -292,6 +340,7 @@ async fn create_session(
         .bind(model)
         .bind(workspace.as_deref())
         .bind(thinking_level)
+        .bind(approval.map(ApprovalMode::as_str))
         .fetch_one(&installed.pool)
         .await
         .map(|r| r.0)
@@ -305,6 +354,7 @@ async fn create_session(
             "model": model,
             "workspace": workspace,
             "thinking_level": thinking_level,
+            "approval": approval.map(ApprovalMode::as_str),
         }))
         .into_response(),
         Err(e) => {
@@ -325,6 +375,7 @@ type SessionRow = (
     String,         // updated_at
     Option<String>, // workspace
     Option<String>, // thinking_level
+    Option<String>, // approval
 );
 
 async fn list_sessions(
@@ -335,7 +386,7 @@ async fn list_sessions(
     let rows: Vec<SessionRow> = sqlx::query_as(&db::q(
         installed.kind,
         "SELECT id, target, device_id, title, model, status, updated_at, workspace, \
-         thinking_level FROM agent_sessions WHERE user_id = ? ORDER BY updated_at DESC",
+         thinking_level, approval FROM agent_sessions WHERE user_id = ? ORDER BY updated_at DESC",
     ))
     .bind(user.id)
     .fetch_all(&installed.pool)
@@ -343,7 +394,18 @@ async fn list_sessions(
     .unwrap_or_default();
 
     let mut out = Vec::with_capacity(rows.len());
-    for (id, target, device_id, title, model, status, updated_at, workspace, thinking_level) in rows
+    for (
+        id,
+        target,
+        device_id,
+        title,
+        model,
+        status,
+        updated_at,
+        workspace,
+        thinking_level,
+        approval,
+    ) in rows
     {
         out.push(json!({
             "id": id,
@@ -360,6 +422,14 @@ async fn list_sessions(
             // How hard this task reasons. Null means the runtime's default,
             // which is what every task did before this could be chosen.
             "thinking_level": thinking_level,
+            // What this task asked the gate to stop for. Null means the
+            // execution target's own policy, which is what every task used
+            // before this could be chosen. Reported unresolved on purpose:
+            // the device may keep a stricter one, and only it can say.
+            "approval": approval
+                .as_deref()
+                .and_then(ApprovalMode::parse)
+                .map(ApprovalMode::as_str),
             // Whether a runtime is attached right now. Distinct from status:
             // an idle session can still hold a warm runtime.
             "live": state.agent_sessions.is_live(id).await,
@@ -686,6 +756,73 @@ async fn set_thinking_level(
     Json(json!({ "ok": true, "thinking_level": level })).into_response()
 }
 
+#[derive(Deserialize)]
+struct SetApprovalReq {
+    /// `always` / `commands` / `never`, or null to go back to "the execution
+    /// target decides".
+    #[serde(default)]
+    approval: Option<String>,
+}
+
+/// Pin how this task gates tool calls.
+///
+/// Stored only — deliberately not applied to a live runtime. The gate is an
+/// extension the runtime loads at startup, so changing it mid-session would
+/// leave the agent running under the old policy while the UI claimed the new
+/// one, which is worse than saying plainly that it applies from the next
+/// start. Callers surface that; see the picker's hint.
+///
+/// This can only ever *ask*. The execution target resolves the stored value
+/// against its own policy and keeps the stricter of the two, so nothing here
+/// can turn off the confirmations the owner of a machine configured.
+async fn set_approval(
+    Extension(installed): Extension<InstalledState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(sid): Path<i64>,
+    Json(req): Json<SetApprovalReq>,
+) -> Response {
+    if let Err(r) = owned_session(&installed.pool, installed.kind, user.id, sid).await {
+        return r;
+    }
+    let approval = match req
+        .approval
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+    {
+        Some(raw) => match ApprovalMode::parse(raw) {
+            Some(mode) => Some(mode),
+            None => return (StatusCode::BAD_REQUEST, "审批方式无效").into_response(),
+        },
+        None => None,
+    };
+
+    let sql = db::q(
+        installed.kind,
+        "UPDATE agent_sessions SET approval = ?, updated_at = ? WHERE id = ?",
+    );
+    if let Err(e) = sqlx::query(&sql)
+        .bind(approval.map(ApprovalMode::as_str))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(sid)
+        .execute(&installed.pool)
+        .await
+    {
+        eprintln!("[agent-api] persisting the session approval mode failed: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "保存审批方式失败").into_response();
+    }
+
+    Json(json!({
+        "ok": true,
+        "approval": approval.map(ApprovalMode::as_str),
+        // Said explicitly rather than left for the user to discover: the gate
+        // is loaded when the runtime starts, so a change made mid-task does
+        // not affect the turn currently running.
+        "applies_on_next_start": true,
+    }))
+    .into_response()
+}
+
 /// Which reasoning levels the session's current model actually supports.
 ///
 /// Asked of the live runtime rather than derived from the model name: the
@@ -957,6 +1094,10 @@ async fn start_session(
     // Same treatment as the model: read before anything is spawned, and
     // dropped rather than fatal if it is no longer a level this build knows.
     let pinned_level = session_thinking_level(&installed.pool, installed.kind, sid).await;
+    // Read here for the same reason, and used differently per target: a device
+    // resolves it against its own policy, while a cloud sandbox has no policy
+    // of its own and gets exactly what the task asked for.
+    let pinned_approval = session_approval(&installed.pool, installed.kind, sid).await;
     // Build the runtime's model config from the priced whitelist. This is the
     // security boundary: the runtime receives a gateway URL plus a
     // session-scoped token, never an upstream provider key.
@@ -1059,6 +1200,11 @@ async fn start_session(
                 // refuses the start if not, so this is a request rather than
                 // an order — the machine at risk keeps the last word.
                 workspace: session_workspace,
+                // Also a request, and also one the machine can only answer by
+                // tightening: it keeps the stricter of this and its own
+                // setting, so a task cannot switch off someone's shell
+                // confirmations. `None` means "your own policy".
+                approval: pinned_approval.map(|m| m.as_str().to_string()),
             })
             .await
         {
@@ -1099,7 +1245,13 @@ async fn start_session(
         {
             eprintln!("[agent-api] session {sid} could not set thinking level {level}: {e}");
         }
-        return Json(json!({ "ok": true, "reused": false, "sandboxed": false })).into_response();
+        return Json(json!({
+            "ok": true,
+            "reused": false,
+            "sandboxed": false,
+            "approval": pinned_approval.map(ApprovalMode::as_str),
+        }))
+        .into_response();
     }
 
     let root = session_runtime_root(&state.data_dir).join(format!("s{sid}"));
@@ -1111,6 +1263,24 @@ async fn start_session(
         return (StatusCode::INTERNAL_SERVER_ERROR, "创建工作目录失败").into_response();
     }
     if let Err(e) = crate::agent_driver::write_agent_dir(&agent_dir, &models).await {
+        crate::agent_token::revoke_by_plaintext(&installed.pool, installed.kind, &token).await;
+        return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
+    }
+    // A sandbox has no policy of its own: it is disposable and cut off from
+    // the network, which is exactly why running unattended is acceptable
+    // there. So the task's choice is applied as given, and a task that asked
+    // for nothing keeps the old behaviour of running straight through.
+    //
+    // Written before the runtime starts, because the gate is discovered when
+    // the runtime loads its config directory — the sandbox then mounts that
+    // directory read-only, so the agent cannot edit away its own guardrails.
+    if let Err(e) = crate::agent_approval::write_gate(
+        &agent_dir.join("extensions"),
+        pinned_approval.unwrap_or(ApprovalMode::Never),
+        ApprovalScope::Cloud,
+    )
+    .await
+    {
         crate::agent_token::revoke_by_plaintext(&installed.pool, installed.kind, &token).await;
         return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
     }
@@ -1191,7 +1361,13 @@ async fn start_session(
         });
     }
 
-    Json(json!({ "ok": true, "reused": false, "sandboxed": sandboxed })).into_response()
+    Json(json!({
+        "ok": true,
+        "reused": false,
+        "sandboxed": sandboxed,
+        "approval": pinned_approval.map(ApprovalMode::as_str),
+    }))
+    .into_response()
 }
 
 /// Release everything a session's runtime holds, leaving its rows alone.
@@ -1357,6 +1533,7 @@ pub fn routes() -> Router<AppState> {
             post(set_thinking_level).get(available_thinking_levels),
         )
         .route("/agent/sessions/{sid}/abort", post(abort))
+        .route("/agent/sessions/{sid}/approval", post(set_approval))
         .route("/agent/sessions/{sid}/approve", post(approve))
 }
 
@@ -1511,6 +1688,72 @@ mod tests {
         );
 
         pool.close().await;
+    }
+
+    /// Same reasoning as the level above, with a sharper failure mode: an
+    /// unreadable approval mode must resolve to "the target decides", which
+    /// leaves the device applying its own policy. Reading it as `never` — the
+    /// obvious accidental default for "nothing recognisable here" — would turn
+    /// a downgrade into a silently disabled gate.
+    #[tokio::test]
+    async fn an_unreadable_approval_mode_falls_back_to_the_targets_own_policy() {
+        let pool = pool_with(&[]).await;
+        sqlx::query("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, user_id, target, title, approval) \
+             VALUES (1, 1, 'cloud', 't', NULL), (2, 1, 'cloud', 't', '  '), \
+                    (3, 1, 'cloud', 't', 'commands'), (4, 1, 'cloud', 't', 'whenever'), \
+                    (5, 1, 'device', 't', 'always')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(session_approval(&pool, DbKind::Sqlite, 1).await, None);
+        assert_eq!(session_approval(&pool, DbKind::Sqlite, 2).await, None);
+        assert_eq!(
+            session_approval(&pool, DbKind::Sqlite, 3).await,
+            Some(ApprovalMode::Commands)
+        );
+        assert_eq!(
+            session_approval(&pool, DbKind::Sqlite, 4).await,
+            None,
+            "a mode this build cannot resolve must not be replayed as one it can"
+        );
+        assert_eq!(
+            session_approval(&pool, DbKind::Sqlite, 5).await,
+            Some(ApprovalMode::Always)
+        );
+
+        pool.close().await;
+    }
+
+    /// The rule the cloud side depends on: a sandbox has no policy of its own,
+    /// so "the task asked for nothing" has to keep meaning "run through", and
+    /// a task that did ask has to get exactly what it asked for.
+    #[test]
+    fn a_sandbox_without_a_task_choice_runs_unattended_as_it_always_did() {
+        assert!(
+            crate::agent_approval::gate_source(ApprovalMode::Never, ApprovalScope::Cloud).is_none(),
+            "container isolation is the reason automatic execution is acceptable there"
+        );
+        let gate = crate::agent_approval::gate_source(ApprovalMode::Commands, ApprovalScope::Cloud)
+            .expect("a task that asked for a gate must get one");
+        // The declaration, not the whole file: the prompt-rendering helpers
+        // name every tool they can describe, so only the gated set is
+        // evidence of what actually stops.
+        let guarded = gate
+            .lines()
+            .find(|l| l.contains("const GUARDED"))
+            .expect("the gate must declare its tool list");
+        assert!(guarded.contains("bash"), "got: {guarded}");
+        assert!(
+            !guarded.contains("\"write\""),
+            "this mode lets file changes through: {guarded}"
+        );
     }
 
     /// The regression this guards: production ran with no device gateway

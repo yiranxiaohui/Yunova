@@ -65,6 +65,14 @@ export interface AgentSession {
   workspace: string | null
   /** Reasoning level this task runs at. Null means the runtime's default. */
   thinking_level: ThinkingLevel | null
+  /** How this task asked tool calls to be gated. Null means "whatever the
+   *  execution target does on its own", which is what every task did before
+   *  this could be chosen.
+   *
+   *  Unresolved on purpose: a local machine keeps the stricter of this and
+   *  its own setting, so this is what was *asked* for, not necessarily what
+   *  that machine will apply. */
+  approval: ApprovalMode | null
 }
 
 /** One entry of the mirrored session tree, in the runtime's own shape. */
@@ -121,6 +129,10 @@ export const agentApi = {
     workspace?: string
     /** How hard the agent should reason. Omitted means the runtime default. */
     thinking_level?: ThinkingLevel
+    /** How tool calls should be gated. Only ever a request to *tighten*: the
+     *  machine the tools run on keeps the stricter of this and its own
+     *  setting. Omitted means that target's own policy. */
+    approval?: ApprovalMode
   }): Promise<{
     id: number
     target: string
@@ -128,6 +140,7 @@ export const agentApi = {
     model: string | null
     workspace: string | null
     thinking_level: ThinkingLevel | null
+    approval: ApprovalMode | null
   }> {
     return jsonOrThrow(
       await fetch("/api/agent/sessions", {
@@ -157,7 +170,14 @@ export const agentApi = {
     return data.entries ?? []
   },
 
-  async start(sid: number): Promise<{ ok: boolean; reused: boolean; sandboxed?: boolean }> {
+  async start(sid: number): Promise<{
+    ok: boolean
+    reused: boolean
+    sandboxed?: boolean
+    /** What the runtime was started with, echoed so the UI is not describing
+     *  a policy the runtime does not actually have. */
+    approval?: ApprovalMode | null
+  }> {
     return jsonOrThrow(
       await fetch(`/api/agent/sessions/${sid}/start`, {
         method: "POST",
@@ -259,6 +279,26 @@ export const agentApi = {
   }> {
     return jsonOrThrow(
       await fetch(`/api/agent/sessions/${sid}/thinking`, {
+        credentials: "same-origin",
+      })
+    )
+  },
+
+  /** Pin how this task gates tool calls.
+   *
+   *  Unlike the model and the level, this is *not* applied to a running
+   *  runtime: the gate is an extension loaded when the runtime starts, so
+   *  changing it mid-session would leave the agent under the old policy while
+   *  the UI claimed the new one. It takes effect on the next start, and the
+   *  picker says so.
+   *
+   *  Pass null to go back to "the execution target decides". */
+  async setApproval(sid: number, approval: ApprovalMode | null): Promise<void> {
+    await okOrThrow(
+      await fetch(`/api/agent/sessions/${sid}/approval`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approval }),
         credentials: "same-origin",
       })
     )
@@ -634,11 +674,17 @@ export function approvalMessage(req: any): string {
 }
 
 /**
- * How a machine gates tool calls, as that machine reports it.
+ * How tool calls are gated.
  *
- * Null when the client is too old to say, in which case the UI stays silent
- * rather than claiming a policy it cannot see: the gate is an extension the
- * server never writes and cannot read.
+ * Two things wear this type, which is why it is one type: a machine reports
+ * the policy it is configured with, and a task can ask for a *stricter* one.
+ * The machine resolves the pair and keeps the stricter, so a task can never
+ * switch off someone's confirmations — see `src/agent_approval.rs`, which both
+ * the server and the desktop client compile.
+ *
+ * Null means "the execution target decides": for a machine, that it is too old
+ * to report; for a task, that it made no request. The UI stays silent rather
+ * than claiming a policy it cannot see.
  */
 export type ApprovalMode = "always" | "commands" | "never"
 
@@ -652,6 +698,17 @@ export const APPROVAL_HINTS: Record<ApprovalMode, string> = {
   always: "命令和文件改动都会先问你",
   commands: "改文件直接放行，执行命令仍会先问你",
   never: "不再询问，Agent 可直接在那台电脑上执行命令",
+}
+
+/** What a task gets when it asks for nothing, worded per execution target.
+ *
+ *  The two are genuinely different and the picker must not blur them: a cloud
+ *  sandbox is disposable and offline, which is exactly why running unattended
+ *  there is acceptable, while a personal machine keeps whatever its owner
+ *  configured in the desktop client. */
+export const APPROVAL_DEFAULT_HINT: Record<AgentTarget, string> = {
+  cloud: "沙箱一次性且与外网隔离，不选则全程自动执行",
+  device: "跟随那台电脑在「本机设置」里的选择",
 }
 
 /** Narrow a value the machine sent into a mode this build can render. */

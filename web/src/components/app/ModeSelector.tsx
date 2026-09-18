@@ -1,4 +1,4 @@
-import { Check, Cloud, FolderOpen, Laptop, MessageSquare } from "lucide-react"
+import { Check, Cloud, FolderOpen, Laptop, MessageSquare, ShieldCheck } from "lucide-react"
 import { cn } from "@/lib/utils"
 import {
   Select,
@@ -7,7 +7,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
-import type { AgentTarget } from "@/lib/agent"
+import {
+  APPROVAL_DEFAULT_HINT,
+  APPROVAL_HINTS,
+  APPROVAL_LABELS,
+  type AgentTarget,
+  type ApprovalMode,
+} from "@/lib/agent"
 import { prefetchWorkMode, type WorkMode } from "@/lib/mode"
 
 export type { WorkMode } from "@/lib/mode"
@@ -16,6 +22,13 @@ export interface DeviceOption {
   id: number
   name: string
   online: boolean
+  /** That machine's own approval policy, as it reports it.
+   *
+   *  Carried here so the approval picker can say which side wins: the machine
+   *  keeps the stricter of its setting and the task's, so offering "全部放行"
+   *  on a machine configured to ask would be a control that silently does
+   *  nothing. Null while it is offline or from a client too old to say. */
+  approval?: ApprovalMode | null
 }
 
 const MODES: Array<{
@@ -151,6 +164,10 @@ export function ModeSelector({
   targetLocked,
   workspace,
   onPickWorkspace,
+  approval,
+  onApprovalChange,
+  deviceApproval,
+  approvalPending,
   /** Hidden when the page already shows the large empty-state switch, so the
    *  control never appears twice on one screen. */
   hideSwitch,
@@ -168,6 +185,19 @@ export function ModeSelector({
   /** Absent for a task that already exists: its runtime and transcript belong
    *  to one directory, so changing it mid-task would silently move the work. */
   onPickWorkspace?: () => void
+  /** What this task asked the gate to stop for; null means the target's own
+   *  policy. */
+  approval?: ApprovalMode | null
+  onApprovalChange?: (next: ApprovalMode | null) => void
+  /** The chosen machine's own setting, as it reports it. Shown because the
+   *  machine keeps the stricter of the two, so a task asking for less than
+   *  this gets the machine's answer and the user should see that before
+   *  walking away. Null while offline or from a client too old to say. */
+  deviceApproval?: ApprovalMode | null
+  /** Whether the change waits for the next start. True once a runtime is
+   *  live: the gate is loaded when the runtime starts, so saying nothing
+   *  would let the user believe a running agent had just been reined in. */
+  approvalPending?: boolean
   hideSwitch?: boolean
   className?: string
 }) {
@@ -187,7 +217,115 @@ export function ModeSelector({
       {target === "device" && (
         <WorkspaceChip workspace={workspace} onPick={onPickWorkspace} />
       )}
+      {/* Offered for both targets, and meaning different things in each: on a
+          machine it can only tighten what its owner configured, while a
+          sandbox has no policy of its own and gets exactly this. */}
+      {onApprovalChange && (
+        <ApprovalPicker
+          target={target}
+          approval={approval ?? null}
+          onChange={onApprovalChange}
+          deviceApproval={deviceApproval ?? null}
+          pending={approvalPending}
+        />
+      )}
     </div>
+  )
+}
+
+/**
+ * How much this task stops to ask.
+ *
+ * A per-task control rather than only a per-machine one, because the right
+ * answer changes with the task and not with the computer: the same laptop runs
+ * a mechanical rename that should not ask twenty times and an unfamiliar
+ * script that should ask about everything. Before this, changing either meant
+ * opening the desktop client's settings and changing it for every task.
+ *
+ * What it is careful not to imply is authority. On a local machine the setting
+ * there is a floor — the machine keeps the stricter of the two — so when this
+ * asks for less than the machine requires, the menu says which one wins rather
+ * than showing a choice that quietly does nothing.
+ */
+function ApprovalPicker({
+  target,
+  approval,
+  onChange,
+  deviceApproval,
+  pending,
+}: {
+  target: AgentTarget
+  approval: ApprovalMode | null
+  onChange: (next: ApprovalMode | null) => void
+  deviceApproval: ApprovalMode | null
+  pending?: boolean
+}) {
+  const strictness: Record<ApprovalMode, number> = {
+    never: 0,
+    commands: 1,
+    always: 2,
+  }
+  // Only a local machine has a policy of its own to be overruled by.
+  const floor = target === "device" ? deviceApproval : null
+  const overruled = (m: ApprovalMode) =>
+    floor != null && strictness[floor] > strictness[m]
+  const effective = approval ?? floor
+
+  return (
+    <Select
+      value={approval ?? "default"}
+      onValueChange={(v) => onChange(v === "default" ? null : (v as ApprovalMode))}
+    >
+      <SelectTrigger
+        size="sm"
+        className="tap-target-sm h-8 w-[8.5rem] rounded-full text-xs"
+        title={
+          approval
+            ? `审批方式：${APPROVAL_HINTS[approval]}`
+            : `审批方式：${APPROVAL_DEFAULT_HINT[target]}`
+        }
+      >
+        <span className="flex min-w-0 items-center gap-1.5">
+          <ShieldCheck className="size-3.5 shrink-0" />
+          <span className="truncate">
+            {approval ? APPROVAL_LABELS[approval] : "默认审批"}
+          </span>
+        </span>
+      </SelectTrigger>
+      <SelectContent>
+        <SelectItem value="default" className="tap-target-sm">
+          <span className="flex flex-col items-start">
+            <span>默认审批</span>
+            <span className="text-[10px] text-muted-foreground">
+              {APPROVAL_DEFAULT_HINT[target]}
+            </span>
+          </span>
+        </SelectItem>
+        {(Object.keys(APPROVAL_LABELS) as ApprovalMode[]).map((m) => (
+          <SelectItem key={m} value={m} className="tap-target-sm">
+            <span className="flex flex-col items-start">
+              <span>{APPROVAL_LABELS[m]}</span>
+              <span className="text-[10px] text-muted-foreground">
+                {/* Saying so beats offering a choice that silently does
+                    nothing: the machine keeps the stricter policy, so this
+                    option would not actually loosen anything. */}
+                {overruled(m)
+                  ? `该电脑自身要求「${APPROVAL_LABELS[floor!]}」，以更严的为准`
+                  : APPROVAL_HINTS[m]}
+              </span>
+            </span>
+          </SelectItem>
+        ))}
+        {/* The gate is an extension the runtime loads at startup, so a change
+            made mid-task cannot reach the agent that is already running. */}
+        {pending && (
+          <div className="px-2 py-1.5 text-[10px] text-muted-foreground">
+            修改下次启动运行时生效，当前运行中的任务仍用原设置
+            {effective && `（${APPROVAL_LABELS[effective]}）`}
+          </div>
+        )}
+      </SelectContent>
+    </Select>
   )
 }
 
