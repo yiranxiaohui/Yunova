@@ -35,7 +35,13 @@ import { ReasoningBlock } from "@/components/app/ReasoningBlock"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 
-import { streamChat, type ChatMessage, type ChatThinkingLevel } from "@/lib/chat-stream"
+import {
+  streamChat,
+  CHAT_THINKING_LABELS,
+  CHAT_THINKING_LEVELS,
+  type ChatMessage,
+  type ChatThinkingLevel,
+} from "@/lib/chat-stream"
 import { estimateMessagesTokens, contextLimit } from "@/lib/context-limits"
 import { listModels } from "@/lib/models"
 import { listPlatformModels } from "@/lib/platform-models"
@@ -53,7 +59,6 @@ import {
 } from "@/lib/settings"
 import { SettingsDialog } from "@/components/app/SettingsDialog"
 import { ModelPicker } from "@/components/app/ModelPicker"
-import { ChatThinkingPicker } from "@/components/app/ThinkingPicker"
 import { RechargeDialog } from "@/components/app/RechargeDialog"
 import { QuotaLedgerDialog } from "@/components/app/QuotaLedgerDialog"
 import { Sidebar } from "@/components/app/Sidebar"
@@ -116,11 +121,15 @@ function ChatModelPicker({
   model,
   settings,
   onChangeModel,
+  onChangeThinking,
+  disabled,
 }: {
   protocol: Protocol
   model: string
   settings: UpstreamSettings
   onChangeModel: (next: string, protocol?: Protocol) => void
+  onChangeThinking: (next: ChatThinkingLevel) => void
+  disabled?: boolean
 }) {
   const { baseUrl, apiKey, useProxy, chatMode } = settings
   const fetchProtocol = settings.protocol
@@ -132,6 +141,22 @@ function ChatModelPicker({
       reloadKey={`${chatMode}:${fetchProtocol}:${baseUrl}`}
       showQuota={chatMode === "platform"}
       onChangeModel={onChangeModel}
+      thinking={{
+        value: settings.thinking,
+        options: CHAT_THINKING_LEVELS.map((l) => ({
+          value: l,
+          label: CHAT_THINKING_LABELS[l],
+        })),
+        onChange: onChangeThinking,
+        hint: "级别越高，回答前思考得越久，消耗的 token 也越多。不支持的模型会自动回退。",
+        // `auto` is the behaviour chat had before levels existed, so it reads
+        // as "no choice made" and stays off the trigger.
+        badge:
+          settings.thinking === "auto"
+            ? null
+            : CHAT_THINKING_LABELS[settings.thinking],
+        disabled,
+      }}
       footer={
         chatMode === "platform"
           ? "云端额度 · 从管理员开放的模型获取"
@@ -1608,6 +1633,8 @@ export default function ChatPage() {
               protocol={settings.protocol}
               model={settings.model}
               settings={settings}
+              disabled={streaming}
+              onChangeThinking={changeThinking}
               onChangeModel={(next, nextProtocol) => {
                 const updated: UpstreamSettings = {
                   ...settings,
@@ -2063,14 +2090,8 @@ export default function ChatPage() {
                   <Globe className="size-3.5" />
                   联网
                 </Button>
-                {/* Next to 联网 rather than buried in settings: both change what
-                    the *next* message costs, so they belong where the message
-                    is written. */}
-                <ChatThinkingPicker
-                  level={settings.thinking}
-                  onChange={changeThinking}
-                  disabled={streaming}
-                />
+                {/* Thinking level moved into the model picker: it is part of
+                    the same choice, and the composer row was getting crowded. */}
                 <span className="ml-auto" />
                 {streaming ? (
                   <Button
