@@ -795,8 +795,39 @@ async fn channel_ids_match_protocol(
 }
 
 pub async fn delete_price(pool: &Pool, kind: DbKind, model: &str) -> Result<(), sqlx::Error> {
-    let sql = db::q(kind, "DELETE FROM model_pricing WHERE model = ?");
-    sqlx::query(&sql).bind(model).execute(pool).await.map(|_| ())
+    let models = [model.to_string()];
+    delete_prices(pool, kind, &models).await.map(|_| ())
+}
+
+/// Delete several pricing rules in one transaction, dropping their channel
+/// bindings too: a `channel_models` row whose model no longer exists in
+/// `model_pricing` is dead weight that would silently restrict routing if the
+/// same model id were created again later.
+pub async fn delete_prices(
+    pool: &Pool,
+    kind: DbKind,
+    models: &[String],
+) -> Result<u64, sqlx::Error> {
+    if models.is_empty() {
+        return Ok(0);
+    }
+    let del_bindings = db::q(kind, "DELETE FROM channel_models WHERE model = ?");
+    let del_price = db::q(kind, "DELETE FROM model_pricing WHERE model = ?");
+    let mut tx = pool.begin().await?;
+    let mut deleted = 0u64;
+    for model in models {
+        sqlx::query(&del_bindings)
+            .bind(model)
+            .execute(&mut *tx)
+            .await?;
+        deleted += sqlx::query(&del_price)
+            .bind(model)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+    }
+    tx.commit().await?;
+    Ok(deleted)
 }
 
 /// Convenience: top-priority enabled channel matching a protocol,
@@ -1344,6 +1375,90 @@ mod tests {
         );
     }
 
+    /// Deleting a priced model must also drop its `channel_models` rows:
+    /// a leftover binding restricts routing for any future model with the
+    /// same id, which looks like an upstream outage that nothing explains.
+    #[tokio::test]
+    async fn bulk_delete_removes_the_rules_and_their_channel_bindings() {
+        use sqlx::any::AnyPoolOptions;
+        crate::db::install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool, DbKind::Sqlite).await.unwrap();
+        sqlx::query("DELETE FROM model_pricing").execute(&pool).await.unwrap();
+
+        sqlx::query(
+            "INSERT INTO upstream_channels (name, protocol, base_url, api_key) \
+             VALUES ('c1', 'openai', 'https://c1.example', 'k')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for model in ["dead-a", "dead-b", "alive"] {
+            let input = PricingInput {
+                model: model.into(),
+                kind: "chat".into(),
+                channel_ids: Some(vec![1]),
+                display_name: None,
+                enabled: true,
+                protocol: "openai".into(),
+                context_limit: None,
+                input_price: 0,
+                output_price: 0,
+                cached_input_price: None,
+                per_call_price: 0,
+                base_price: 0,
+                per_second_price: 0,
+                allowed_seconds: None,
+                size_rules: None,
+            };
+            upsert_price(&pool, DbKind::Sqlite, &input).await.unwrap();
+        }
+
+        let deleted = delete_prices(
+            &pool,
+            DbKind::Sqlite,
+            &["dead-a".to_string(), "dead-b".to_string(), "never-existed".to_string()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(deleted, 2, "only the two existing rows count as deleted");
+        let remaining: Vec<String> = list_pricing(&pool, DbKind::Sqlite)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|p| p.model)
+            .collect();
+        assert_eq!(remaining, vec!["alive".to_string()]);
+        let (bindings,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM channel_models WHERE model LIKE 'dead-%'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(bindings, 0, "bindings of a deleted model must go too");
+    }
+
+    /// Nothing to delete must stay a no-op rather than an empty `IN ()`.
+    #[tokio::test]
+    async fn bulk_delete_of_an_empty_list_touches_nothing() {
+        use sqlx::any::AnyPoolOptions;
+        crate::db::install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::migrate(&pool, DbKind::Sqlite).await.unwrap();
+        let before = list_pricing(&pool, DbKind::Sqlite).await.unwrap().len();
+
+        assert_eq!(delete_prices(&pool, DbKind::Sqlite, &[]).await.unwrap(), 0);
+        assert_eq!(list_pricing(&pool, DbKind::Sqlite).await.unwrap().len(), before);
+    }
+
     #[test]
     fn unreadable_catalog_keeps_the_model_available() {
         let catalogs = vec![catalog(1, "openai", Err("upstream 403"))];
@@ -1477,6 +1592,49 @@ async fn admin_upsert_pricing(
     }
 }
 
+/// Bulk-delete every priced model that no enabled channel serves any more.
+///
+/// The same rule the list endpoint uses decides what "no upstream" means, so
+/// the admin deletes exactly the rows shown as 无上游. A channel whose catalog
+/// could not be read keeps its models alive (fail open), and a probe failure
+/// that prevents building the index aborts the whole operation rather than
+/// deleting a working whitelist.
+async fn admin_prune_unavailable_pricing(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    Extension(s): Extension<InstalledState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let refresh = matches!(q.get("refresh").map(String::as_str), Some("1" | "true"));
+    let pricing = match list_pricing(&s.pool, s.kind).await {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let index = match AvailabilityIndex::load(&state.http, &s.pool, s.kind, refresh).await {
+        Ok(v) => v,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let models: Vec<String> = pricing
+        .into_iter()
+        .filter(|p| !index.is_available(&p.model, &p.protocol))
+        .map(|p| p.model)
+        .collect();
+    let deleted = match delete_prices(&s.pool, s.kind, &models).await {
+        Ok(n) => n,
+        Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let errors: Vec<serde_json::Value> = index
+        .errors
+        .iter()
+        .map(|(channel, error)| serde_json::json!({ "channel": channel, "error": error }))
+        .collect();
+    Json(serde_json::json!({
+        "deleted": deleted,
+        "models": models,
+        "errors": errors,
+    }))
+    .into_response()
+}
+
 async fn admin_delete_pricing(
     Extension(s): Extension<InstalledState>,
     Path(model): Path<String>,
@@ -1523,6 +1681,10 @@ pub fn admin_routes() -> Router<AppState> {
         .route(
             "/admin/pricing/sync-newapi",
             axum::routing::post(crate::newapi_sync::admin_sync_pricing),
+        )
+        .route(
+            "/admin/pricing/prune-unavailable",
+            axum::routing::post(admin_prune_unavailable_pricing),
         )
         .route("/admin/pricing/{model}", delete(admin_delete_pricing))
         .route_layer(middleware::from_fn(admin::require_admin))

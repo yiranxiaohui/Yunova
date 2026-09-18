@@ -80,6 +80,10 @@ POST /api/proxy/openai {model:"gpt-5",...}
 `Admin → Channels`：CRUD 渠道、启用/停用、绑定 model 列表（每行 `model` 或 `model=client_model=upstream_id`）。
 `Admin → Pricing`：CRUD model 白名单 + 官方美元单价（录入时实时预览折算后的额度），
 或点「从 NewAPI 导入」批量拉取上游价格（见下）。
+没有任何启用渠道提供的模型会标为「无上游」并自动禁用；上游下线后残留的这类白名单条目，
+可以用工具栏的「清理无上游」一键删除（`POST /api/admin/pricing/prune-unavailable`）。
+该接口删除前会强制重新探测一次上游目录，只删除确实无人提供的模型：
+目录读不出来的渠道按「可能仍提供」处理（fail open），因此一次探测故障不会清空白名单。
 `Admin → 设置 → 额度与汇率`：调整 `usd_to_cny_rate_micro`、全局加价倍率、注册与邀请赠送额度。
 
 旧的「Shared Backend」面板与 KV (`shared_chat_openai_*` 等) 暂时保留只用于历史 seed，新链路不再读它们。
