@@ -8,7 +8,7 @@ members = [".", "desktop"]
 # deliberately omits `version` so the installers are named from here too --
 # a second copy of the number is a second thing to forget on release day.
 [workspace.package]
-version = "0.4.25"
+version = "0.4.26"
 
 [package]
 name = "yunova"
