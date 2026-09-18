@@ -39,18 +39,35 @@ export interface AgentEntry {
   message?: any
 }
 
+/// Turn a failed response into an error a person can read.
+///
+/// The body is not always ours. A request that a reverse proxy times out or
+/// rejects comes back as an HTML error page, and showing that verbatim put
+/// `<html><head><title>504 Gateway Time-out</title>...` inside a toast —
+/// technically the truth, and useless. Anything that does not look like a
+/// plain server message is replaced by one keyed to the status.
+async function errorFrom(res: Response): Promise<Error> {
+  const text = (await res.text().catch(() => "")).trim()
+  const looksLikeMarkup = text.startsWith("<") || /<\/?html/i.test(text)
+  if (text && !looksLikeMarkup && text.length <= 300) {
+    return new Error(text)
+  }
+  if (res.status === 502 || res.status === 503 || res.status === 504) {
+    return new Error("服务暂时无响应，请稍后重试")
+  }
+  return new Error(res.statusText || `HTTP ${res.status}`)
+}
+
 async function jsonOrThrow<T>(res: Response): Promise<T> {
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText)
-    throw new Error(text || `HTTP ${res.status}`)
+    throw await errorFrom(res)
   }
   return res.json() as Promise<T>
 }
 
 async function okOrThrow(res: Response): Promise<void> {
   if (!res.ok) {
-    const text = await res.text().catch(() => res.statusText)
-    throw new Error(text || `HTTP ${res.status}`)
+    throw await errorFrom(res)
   }
 }
 

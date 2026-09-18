@@ -60,7 +60,18 @@ pub struct Config {
     /// Off by default. On a personal machine the safe default is to ask, and a
     /// user who wants to walk away opts in explicitly.
     pub auto_approve: bool,
+    /// Where to send runtime diagnostics a person should see.
+    ///
+    /// A runtime's stderr is the only place that says *why* it could not
+    /// start, and it used to go to the process's own stderr — invisible in a
+    /// GUI app. Routing it to the host's log is what makes the app's own
+    /// 「运行日志」 enough to diagnose a failure, instead of needing the user to
+    /// relaunch the app from a terminal.
+    pub reporter: Option<Reporter>,
 }
+
+/// Sink for human-readable runtime diagnostics.
+pub type Reporter = Arc<dyn Fn(String) + Send + Sync>;
 
 impl Default for Config {
     fn default() -> Self {
@@ -70,6 +81,7 @@ impl Default for Config {
             state_dir: PathBuf::from("."),
             program: "pi".into(),
             auto_approve: false,
+            reporter: None,
         }
     }
 }
@@ -143,6 +155,12 @@ impl RuntimeManager {
             .arg("rpc")
             .arg("--no-session")
             .current_dir(&cwd)
+            // pi is a JS entry point with a `node` shebang, so it is the
+            // *child's* `PATH` that decides whether it can start at all. A GUI
+            // app inherits almost nothing, so without this the process dies at
+            // exec with `env: 'node': No such file or directory` and the task
+            // just never produces a frame.
+            .env("PATH", crate::runtime_install::augmented_path())
             .env("PI_CODING_AGENT_DIR", &agent_dir)
             .env("PI_OFFLINE", "1")
             .env("PI_SKIP_VERSION_CHECK", "1")
@@ -164,6 +182,36 @@ impl RuntimeManager {
         });
         self.inner.lock().await.insert(session_id, runtime);
 
+        // Diagnostics from stderr, kept for the failure report below.
+        //
+        // The reason a runtime could not start is written here and nowhere
+        // else, so discarding it is what turns a one-line fix ("node is not on
+        // the app's PATH") into an unexplained "运行时已退出" that repeats
+        // forever. Bounded because a chatty runtime must not grow this without
+        // limit over a long session.
+        let diagnostics = Arc::new(Mutex::new(Vec::<String>::new()));
+
+        // Draining stderr is not optional: a full pipe blocks the child, which
+        // looks like an agent that silently stopped responding.
+        if let Some(stderr) = stderr {
+            let diagnostics = Arc::clone(&diagnostics);
+            let reporter = self.config.reporter.clone();
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("[runtime {session_id}] {line}");
+                    if let Some(reporter) = reporter.as_ref() {
+                        reporter(format!("任务 {session_id} 运行时: {line}"));
+                    }
+                    let mut held = diagnostics.lock().await;
+                    if held.len() == STDERR_KEPT_LINES {
+                        held.remove(0);
+                    }
+                    held.push(line);
+                }
+            });
+        }
+
         // stdout -> server. Strict LF framing, matching the RPC contract: a
         // generic line reader would also split on U+2028/U+2029, which are
         // legal inside JSON strings.
@@ -172,6 +220,7 @@ impl RuntimeManager {
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut buf = Vec::new();
+            let mut framed = false;
             loop {
                 buf.clear();
                 match reader.read_until(b'\n', &mut buf).await {
@@ -184,6 +233,7 @@ impl RuntimeManager {
                         }
                         match serde_json::from_str::<Value>(trimmed) {
                             Ok(frame) => {
+                                framed = true;
                                 if tx
                                     .send(ToServer::Frame { session_id, frame })
                                     .await
@@ -202,25 +252,30 @@ impl RuntimeManager {
                     }
                 }
             }
-            manager.forget(session_id).await;
-            let _ = tx
-                .send(ToServer::RuntimeClosed {
-                    session_id,
-                    reason: Some("运行时已退出".into()),
-                })
-                .await;
-        });
+            let status = manager.reap(session_id).await;
 
-        // Draining stderr is not optional: a full pipe blocks the child, which
-        // looks like an agent that silently stopped responding.
-        if let Some(stderr) = stderr {
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    eprintln!("[runtime {session_id}] {line}");
-                }
-            });
-        }
+            // A runtime that never emitted a single frame did not "exit" in
+            // any sense the user can act on — it failed to start. Reporting
+            // both the same way is what left the app retrying a broken install
+            // with no clue why, so this path carries the exit status and the
+            // tail of stderr instead.
+            if framed {
+                let _ = tx
+                    .send(ToServer::RuntimeClosed {
+                        session_id,
+                        reason: Some("运行时已退出".into()),
+                    })
+                    .await;
+            } else {
+                let detail = diagnostics.lock().await.join("; ");
+                let _ = tx
+                    .send(ToServer::RuntimeError {
+                        session_id,
+                        message: startup_failure(&manager.config.program, status, &detail),
+                    })
+                    .await;
+            }
+        });
 
         Ok(())
     }
@@ -275,9 +330,55 @@ impl RuntimeManager {
         }
     }
 
-    async fn forget(&self, session_id: i64) {
-        self.inner.lock().await.remove(&session_id);
+    /// Drop a runtime and collect the exit status of its process.
+    ///
+    /// Waiting matters even though stdout already closed: the status is what
+    /// distinguishes an exec failure (127) from a runtime that ran and chose
+    /// to stop, and it is the only part of the story stderr does not tell.
+    async fn reap(&self, session_id: i64) -> Option<std::process::ExitStatus> {
+        let runtime = self.inner.lock().await.remove(&session_id)?;
+        let mut guard = runtime.child.lock().await;
+        let mut child = guard.take()?;
+        match tokio::time::timeout(std::time::Duration::from_secs(5), child.wait()).await {
+            Ok(Ok(status)) => Some(status),
+            // Still alive with a closed stdout is not a state to leave behind.
+            Err(_) => {
+                let _ = child.kill().await;
+                None
+            }
+            Ok(Err(_)) => None,
+        }
     }
+}
+
+/// How many stderr lines to keep for a failure report.
+const STDERR_KEPT_LINES: usize = 20;
+
+/// Explain a runtime that exited before producing any output.
+///
+/// The wording points at the fix rather than the symptom. A missing `node` is
+/// by far the most common cause — pi runs on it, and a GUI app does not
+/// inherit the user's shell `PATH` — and telling someone "运行时已退出"
+/// gives them nothing to act on.
+fn startup_failure(
+    program: &str,
+    status: Option<std::process::ExitStatus>,
+    stderr_tail: &str,
+) -> String {
+    let mut message = format!("运行时 {program} 启动后立即退出");
+    if let Some(status) = status {
+        match status.code() {
+            Some(code) => message.push_str(&format!("（退出码 {code}）")),
+            None => message.push_str("（被信号终止）"),
+        }
+    }
+    if !stderr_tail.is_empty() {
+        message.push_str(&format!("：{stderr_tail}"));
+    }
+    if stderr_tail.contains("node") || status.and_then(|s| s.code()) == Some(127) {
+        message.push_str("。请确认本机已安装 Node.js，或在「本机设置」里重新安装 pi");
+    }
+    message
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +681,7 @@ mod tests {
             state_dir: dir.clone(),
             program: "yunova-no-such-runtime".into(),
             auto_approve: true,
+            reporter: None,
         });
         let (tx, _rx) = mpsc::channel(4);
         let err = m
@@ -709,6 +811,65 @@ mod tests {
         );
 
         tokio::fs::remove_dir_all(&base).await.ok();
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_never_starts_reports_why_instead_of_just_exiting() {
+        // The failure this covers: pi runs through a `node` shebang, so on a
+        // machine where the app cannot find node the process dies at exec.
+        // Reporting that as `RuntimeClosed{运行时已退出}` is what left the UI
+        // retrying forever with nothing to act on — a runtime that never
+        // emitted a frame did not exit, it failed to start, and the exit code
+        // plus stderr are the only evidence of that.
+        let dir = temp_dir("earlyexit");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let fake = dir.join("fake-runtime");
+        tokio::fs::write(
+            &fake,
+            "#!/bin/sh\necho 'env: node: No such file' >&2\nexit 127\n",
+        )
+        .await
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            tokio::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755))
+                .await
+                .unwrap();
+        }
+
+        let m = RuntimeManager::new(Config {
+            workspace: dir.clone(),
+            workspace_roots: vec![dir.clone()],
+            state_dir: dir.clone(),
+            program: fake.to_string_lossy().into_owned(),
+            auto_approve: true,
+            reporter: None,
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        m.start(1, &json!({"providers":{}}), None, tx)
+            .await
+            .expect("spawning succeeds; the process fails afterwards");
+
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("a failing runtime must report, not hang")
+            .expect("a message is sent");
+        match msg {
+            ToServer::RuntimeError {
+                session_id,
+                message,
+            } => {
+                assert_eq!(session_id, 1);
+                assert!(message.contains("127"), "exit code is evidence: {message}");
+                assert!(message.contains("node"), "stderr must survive: {message}");
+                // And it must name the fix, not just the symptom.
+                assert!(message.contains("Node.js"), "got: {message}");
+            }
+            other => panic!("expected a startup failure, got {other:?}"),
+        }
+
+        tokio::fs::remove_dir_all(&dir).await.ok();
     }
 
     #[tokio::test]

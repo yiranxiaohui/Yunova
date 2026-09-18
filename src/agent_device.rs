@@ -1117,6 +1117,12 @@ async fn handle_socket(
                     eprintln!(
                         "[agent-device] device {device_id} session {session_id} runtime closed: {reason}"
                     );
+                    // Hand the device's own account of what happened to the
+                    // session, so the client is told that instead of a generic
+                    // notice assembled by the side that knows least.
+                    if let Some(live) = state.agent_sessions.get(session_id).await {
+                        live.set_close_reason(reason).await;
+                    }
                 }
                 frame_senders.write().await.remove(&session_id);
             }
@@ -1125,6 +1131,9 @@ async fn handle_socket(
                 message,
             } => {
                 eprintln!("[agent-device] device {device_id} session {session_id}: {message}");
+                if let Some(live) = state.agent_sessions.get(session_id).await {
+                    live.set_close_reason(message).await;
+                }
                 frame_senders.write().await.remove(&session_id);
             }
             FromDevice::Workspaces { default, roots } => {

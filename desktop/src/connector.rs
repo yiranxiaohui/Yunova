@@ -200,6 +200,12 @@ impl Connector {
             state_dir: config.state_dir.clone(),
             program: config.program.clone(),
             auto_approve: config.auto_approve,
+            // Runtime diagnostics belong in the window's log, not in a
+            // process stderr nobody launched a terminal to read.
+            reporter: Some({
+                let host = Arc::clone(&self.host);
+                Arc::new(move |line: String| host.log(line))
+            }),
         });
 
         let this = Arc::clone(self);

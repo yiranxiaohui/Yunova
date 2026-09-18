@@ -64,6 +64,13 @@ pub trait AgentTransport: Send + Sync {
 /// mirror rather than stalling the agent.
 const EVENT_BUFFER: usize = 512;
 
+/// How long a command may wait for its response.
+///
+/// Generous, because this covers a command being *accepted* rather than the
+/// work it asks for, and a device on a slow home link still has to fit. It
+/// exists so a dead runtime fails fast rather than never.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// What a subscribed client receives.
 #[derive(Debug, Clone)]
 pub enum SessionEvent {
@@ -104,6 +111,13 @@ pub struct LiveSession {
     approvals: RwLock<HashMap<String, PendingApproval>>,
     /// Outstanding command responses keyed by our correlation id.
     inflight: RwLock<HashMap<String, oneshot::Sender<Inbound>>>,
+    /// Why this session ended, when something knew more than "it ended".
+    ///
+    /// The frame pump's exit is the same event for every cause — a sandbox
+    /// stopping, a device disconnecting, a runtime that could not start — so
+    /// whoever *does* know the reason leaves it here on the way out and the
+    /// pump reports that instead of a generic notice the user cannot act on.
+    close_reason: RwLock<Option<String>>,
     /// Serializes mirror passes. Mirroring runs off the frame pump (see
     /// `attach`), so two settles in quick succession could otherwise issue
     /// overlapping `get_entries` calls and advance the cursor out of order.
@@ -129,6 +143,13 @@ impl LiveSession {
     /// pi answers a command as soon as it is *accepted*, not when the work
     /// finishes, so this must not be used to wait for a turn to complete —
     /// that is what `SessionEvent::Settled` is for.
+    ///
+    /// Bounded by `REQUEST_TIMEOUT`. An unbounded wait here is not a slow
+    /// request, it is a stuck one: the runtime that owed the answer is already
+    /// gone, so the only thing still holding the caller is a `oneshot` nobody
+    /// will ever resolve. Callers are HTTP handlers, so that wait surfaces as
+    /// a request that hangs until a reverse proxy times it out and replaces
+    /// the answer with a gateway error page.
     pub async fn request(&self, mut command: Value) -> Result<Inbound, String> {
         let id = self.new_request_id();
         command["id"] = json!(id);
@@ -139,7 +160,57 @@ impl LiveSession {
             self.inflight.write().await.remove(&id);
             return Err(e);
         }
-        rx.await.map_err(|_| "运行时已断开".to_string())
+        match tokio::time::timeout(REQUEST_TIMEOUT, rx).await {
+            Ok(Ok(reply)) => Ok(reply),
+            Ok(Err(_)) => Err(self.closed_reason().await),
+            Err(_) => {
+                // Reclaim the slot: a timed-out request whose waiter stayed
+                // registered would leak one entry per attempt.
+                self.inflight.write().await.remove(&id);
+                Err("运行时未在预期时间内响应".into())
+            }
+        }
+    }
+
+    /// The reason this session ended, or a generic one if nothing recorded it.
+    async fn closed_reason(&self) -> String {
+        self.close_reason
+            .read()
+            .await
+            .clone()
+            .unwrap_or_else(|| "运行时已退出".to_string())
+    }
+
+    /// Record why this session is about to end.
+    ///
+    /// First writer wins: the original cause explains the failure, while the
+    /// teardown that follows only describes its consequence.
+    pub async fn set_close_reason(&self, reason: String) {
+        let mut held = self.close_reason.write().await;
+        if held.is_none() {
+            *held = Some(reason);
+        }
+    }
+
+    /// Fail every waiting command.
+    ///
+    /// Called when the transport is known to be dead. Dropping the senders
+    /// would be enough *if* nothing else held this session alive, but an HTTP
+    /// handler awaiting a reply holds its own `Arc`, so the map outlives the
+    /// pump and those waiters hang. Failing them explicitly is what turns a
+    /// hung request into a prompt error.
+    async fn fail_inflight(&self, reason: &str) {
+        let waiters: Vec<(String, oneshot::Sender<Inbound>)> =
+            self.inflight.write().await.drain().collect();
+        for (id, waiter) in waiters {
+            let _ = waiter.send(Inbound::Response {
+                id: Some(id),
+                command: String::new(),
+                success: false,
+                error: Some(reason.to_string()),
+                data: None,
+            });
+        }
     }
 
     /// Fire a command without waiting (used for UI dialog answers, which get
@@ -250,6 +321,7 @@ impl SessionRegistry {
             events,
             approvals: RwLock::new(HashMap::new()),
             inflight: RwLock::new(HashMap::new()),
+            close_reason: RwLock::new(None),
             mirror_lock: tokio::sync::Mutex::new(()),
             next_id: std::sync::atomic::AtomicU64::new(1),
         });
@@ -340,9 +412,12 @@ impl SessionRegistry {
             // own, and on the device target that token is in the user's hands.
             set_status(&pool, kind, session_id, "idle").await;
             session.revoke_token(&pool, kind).await;
-            let _ = session.events.send(SessionEvent::Closed {
-                reason: "运行时已退出".into(),
-            });
+            // Fail the waiters before announcing the close. A client told the
+            // session ended retries, and a retry must not queue behind a
+            // request still registered against a runtime that is gone.
+            let reason = session.closed_reason().await;
+            session.fail_inflight(&reason).await;
+            let _ = session.events.send(SessionEvent::Closed { reason });
             registry.remove(session_id).await;
         });
 
@@ -584,6 +659,7 @@ mod tests {
             events: events.clone(),
             approvals: RwLock::new(HashMap::new()),
             inflight: RwLock::new(HashMap::new()),
+            close_reason: RwLock::new(None),
             mirror_lock: tokio::sync::Mutex::new(()),
             next_id: std::sync::atomic::AtomicU64::new(1),
         });
@@ -624,6 +700,7 @@ mod tests {
             events,
             approvals: RwLock::new(HashMap::new()),
             inflight: RwLock::new(HashMap::new()),
+            close_reason: RwLock::new(None),
             mirror_lock: tokio::sync::Mutex::new(()),
             next_id: std::sync::atomic::AtomicU64::new(1),
         });
@@ -773,5 +850,63 @@ mod tests {
         assert!(err.contains("broken pipe"));
         // The waiter must not be left behind, or the id would leak.
         assert!(live.inflight.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_dies_mid_request_fails_the_waiter_with_its_reason() {
+        // The 504 this fixes. `request` waits on a `oneshot` that only the
+        // frame pump resolves, and an HTTP handler holds its own `Arc` to the
+        // session — so when the runtime died, dropping the pump's handle did
+        // not drop the waiter, and the handler waited until a reverse proxy
+        // replaced its answer with a gateway error page. The teardown has to
+        // fail the waiters itself, and with the reason the device reported
+        // rather than a generic one.
+        let sent = Arc::new(RwLock::new(Vec::new()));
+        let (live, _events) = live_for_test(Arc::new(RecordingTransport { sent }));
+        live.set_close_reason("运行时 pi 启动后立即退出（退出码 127）".into())
+            .await;
+
+        let waiting = {
+            let live = Arc::clone(&live);
+            tokio::spawn(async move { live.request(agent_rpc::cmd_prompt("", "hi", None)).await })
+        };
+        // Let the request register before the session is torn down.
+        while live.inflight.read().await.is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+
+        let reason = live.closed_reason().await;
+        live.fail_inflight(&reason).await;
+
+        let reply = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("the waiter must not outlive its runtime")
+            .unwrap()
+            .expect("teardown answers rather than dropping");
+        match reply {
+            Inbound::Response { success, error, .. } => {
+                assert!(!success);
+                let error = error.unwrap_or_default();
+                assert!(
+                    error.contains("127"),
+                    "the real cause must reach the user: {error}"
+                );
+            }
+            other => panic!("expected a failed response, got {other:?}"),
+        }
+        assert!(live.inflight.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_first_recorded_close_reason_wins() {
+        // The cause explains the failure; the teardown that follows only
+        // describes its consequence, and would otherwise overwrite it.
+        let sent = Arc::new(RwLock::new(Vec::new()));
+        let (live, _events) = live_for_test(Arc::new(RecordingTransport { sent }));
+        assert_eq!(live.closed_reason().await, "运行时已退出");
+
+        live.set_close_reason("未找到 Node.js".into()).await;
+        live.set_close_reason("连接已断开".into()).await;
+        assert_eq!(live.closed_reason().await, "未找到 Node.js");
     }
 }

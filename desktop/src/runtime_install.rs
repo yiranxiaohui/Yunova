@@ -120,6 +120,33 @@ fn well_known_dirs() -> Vec<PathBuf> {
     dirs
 }
 
+/// `PATH` for a child process, widened with the directories a Node package
+/// manager installs into.
+///
+/// Finding `pi` is not enough to run it. It is published as a JavaScript entry
+/// point with a `#!/usr/bin/env node` shebang, so starting it makes the kernel
+/// look up `node` in the *child's* `PATH`. A GUI app launched from Finder has
+/// roughly `/usr/bin:/bin`, which contains no Node install, so the exec fails
+/// with `env: 'node': No such file or directory` and the process is gone
+/// before it writes a single frame — indistinguishable, from the server's
+/// side, from a runtime that started and immediately exited.
+///
+/// The extra directories are appended rather than prepended: a user who put a
+/// specific toolchain on `PATH` keeps it, and this only adds fallbacks for the
+/// case where there was nothing to inherit.
+pub fn augmented_path() -> std::ffi::OsString {
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    // Deduplicated, first occurrence wins: an inherited `PATH` may already
+    // repeat entries, and search order is what decides which `node` runs.
+    for dir in std::env::split_paths(&existing).chain(well_known_dirs()) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or(existing)
+}
+
 #[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -163,6 +190,12 @@ pub fn resolve(program: &str) -> Option<PathBuf> {
 async fn version_of(exe: &Path) -> Option<String> {
     let out = Command::new(exe)
         .arg("--version")
+        // Same widened `PATH` the runtime itself is started with, so this
+        // check answers the question that matters: not "is the file there"
+        // but "does it run the way we will run it". Without it the panel
+        // could report a healthy runtime that fails at task time, or vice
+        // versa, and the two would disagree for no visible reason.
+        .env("PATH", augmented_path())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -331,5 +364,37 @@ mod tests {
                 "an npm global prefix must be searched: {joined:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_child_path_keeps_what_it_inherited_and_adds_the_install_prefixes() {
+        // Finding pi is not enough to run it: it starts through a `node`
+        // shebang, so `node` must be findable in the *child's* PATH. A GUI app
+        // inherits roughly `/usr/bin:/bin`, which is why the exec failed with
+        // `env: 'node': No such file or directory` and the task saw a runtime
+        // that started and vanished.
+        let augmented = augmented_path();
+        let dirs: Vec<PathBuf> = std::env::split_paths(&augmented).collect();
+
+        // Inherited entries survive: a user who selected a toolchain keeps it,
+        // and this only supplies fallbacks where there was nothing.
+        for inherited in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+            assert!(
+                dirs.contains(&inherited),
+                "{inherited:?} was dropped from the child PATH"
+            );
+        }
+        for known in well_known_dirs() {
+            assert!(
+                dirs.contains(&known),
+                "{known:?} is missing from the child PATH"
+            );
+        }
+        // Duplicates would be harmless but signal the merge is wrong, and
+        // search order is what decides which `node` a runtime gets.
+        let mut seen = dirs.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), dirs.len(), "the child PATH repeats a directory");
     }
 }
