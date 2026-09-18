@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Brain, Check, RefreshCcw } from "lucide-react"
+import { Check, RefreshCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
+import { ThinkingSlider } from "@/components/app/ThinkingSlider"
 import { describeModelQuota, type PlatformModel } from "@/lib/platform-models"
 import { PROTOCOL_META, type Protocol } from "@/lib/settings"
 import { cn } from "@/lib/utils"
@@ -21,6 +22,10 @@ export type ThinkingControl<T extends string = string> = {
   label?: string
   /** Tooltip explaining what a higher level costs. */
   hint?: string
+  /** Level meaning "let the model decide". Lifted off the slider axis into a
+   *  toggle, since "automatic" is not a point on an ordered scale. */
+  autoValue?: T
+  autoLabel?: string
   /** Short text shown on the trigger; null means this level is the default
    *  and does not deserve trigger space. */
   badge?: string | null
@@ -289,36 +294,20 @@ export function ModelPicker<T extends string = string>({
               })}
             </ul>
           </div>
+          {/* A slider rather than a pill row: the levels are one ordered axis,
+              and a ladder of seven no longer wraps onto a second line. */}
           {thinking && (
-            <div className="mt-2 shrink-0 border-t border-border pt-2">
-              <div
-                className="mb-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground"
-                title={thinking.hint}
-              >
-                <Brain className="size-3" />
-                {thinking.label ?? "思考程度"}
-              </div>
-              <div className="flex flex-wrap gap-1">
-                {thinking.options.map((o) => {
-                  const active = o.value === thinking.value
-                  return (
-                    <button
-                      key={o.value}
-                      type="button"
-                      disabled={thinking.disabled}
-                      onClick={() => thinking.onChange(o.value)}
-                      className={cn(
-                        "tap-target-sm rounded-full border border-border/70 px-2 py-1 text-[11px] transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60",
-                        active &&
-                          "border-primary/40 bg-primary/10 font-medium text-primary hover:bg-primary/10"
-                      )}
-                    >
-                      {o.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
+            <ThinkingSlider
+              className="mt-2 shrink-0 border-t border-border pt-2"
+              value={thinking.value}
+              options={thinking.options}
+              onChange={thinking.onChange}
+              label={thinking.label}
+              hint={thinking.hint}
+              autoValue={thinking.autoValue}
+              autoLabel={thinking.autoLabel}
+              disabled={thinking.disabled}
+            />
           )}
           {footer && (
             <div className="mt-2 shrink-0 border-t border-border pt-2 text-[10px] text-muted-foreground">
