@@ -1,10 +1,31 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { Check, RefreshCcw } from "lucide-react"
+import { Brain, Check, RefreshCcw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { describeModelQuota, type PlatformModel } from "@/lib/platform-models"
 import { PROTOCOL_META, type Protocol } from "@/lib/settings"
 import { cn } from "@/lib/utils"
+
+/**
+ * The reasoning ladder, handed to the model picker by whoever owns it.
+ *
+ * Generic over the level string because chat and work mode run different
+ * ladders (vendor effort levels versus pi's own), and neither should have to
+ * widen its type to borrow this control.
+ */
+export type ThinkingControl<T extends string = string> = {
+  value: T | null
+  options: { value: T; label: string }[]
+  onChange: (next: T) => void
+  /** Heading above the row; defaults to “思考程度”. */
+  label?: string
+  /** Tooltip explaining what a higher level costs. */
+  hint?: string
+  /** Short text shown on the trigger; null means this level is the default
+   *  and does not deserve trigger space. */
+  badge?: string | null
+  disabled?: boolean
+}
 
 /**
  * Model switcher shared by chat and work mode.
@@ -18,8 +39,14 @@ import { cn } from "@/lib/utils"
  * Loading is injected. Chat can read either the platform catalogue or the
  * user's own upstream, while work mode is always platform-billed, and neither
  * caller should have to explain that to a popover.
+ *
+ * Reasoning level lives in here too, ChatGPT-style, instead of in a second
+ * control beside the textarea. The two are one decision — the ladder a level
+ * means depends on the model, and what the user is really choosing is the
+ * cost of the pair — and folding them together buys back the composer row
+ * that a separate picker was spending.
  */
-export function ModelPicker({
+export function ModelPicker<T extends string = string>({
   protocol,
   model,
   load,
@@ -27,6 +54,7 @@ export function ModelPicker({
    *  upstream the models were read from. */
   reloadKey = "",
   onChangeModel,
+  thinking,
   footer,
   showQuota,
   disabled,
@@ -39,6 +67,8 @@ export function ModelPicker({
   load: () => Promise<PlatformModel[]>
   reloadKey?: string
   onChangeModel: (next: string, protocol?: Protocol) => void
+  /** Omit entirely on screens that have no reasoning ladder to offer. */
+  thinking?: ThinkingControl<T>
   footer?: string
   showQuota?: boolean
   disabled?: boolean
@@ -147,6 +177,8 @@ export function ModelPicker({
     })
   }, [models, query])
 
+  const thinkingBadge = thinking?.badge
+
   return (
     <div className={cn("relative min-w-0", className)} ref={popRef}>
       <button
@@ -168,6 +200,13 @@ export function ModelPicker({
         </span>
         <span className="hidden text-muted-foreground md:inline">·</span>
         <span className="truncate text-muted-foreground">{model || placeholder}</span>
+        {/* Only a level the user actually chose is worth trigger space: the
+            runtime/provider default is already what "no badge" means. */}
+        {thinkingBadge && (
+          <span className="shrink-0 rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-medium text-primary">
+            {thinkingBadge}
+          </span>
+        )}
         <span className="shrink-0 text-muted-foreground">▾</span>
       </button>
 
@@ -250,6 +289,37 @@ export function ModelPicker({
               })}
             </ul>
           </div>
+          {thinking && (
+            <div className="mt-2 shrink-0 border-t border-border pt-2">
+              <div
+                className="mb-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground"
+                title={thinking.hint}
+              >
+                <Brain className="size-3" />
+                {thinking.label ?? "思考程度"}
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {thinking.options.map((o) => {
+                  const active = o.value === thinking.value
+                  return (
+                    <button
+                      key={o.value}
+                      type="button"
+                      disabled={thinking.disabled}
+                      onClick={() => thinking.onChange(o.value)}
+                      className={cn(
+                        "tap-target-sm rounded-full border border-border/70 px-2 py-1 text-[11px] transition-colors hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60",
+                        active &&
+                          "border-primary/40 bg-primary/10 font-medium text-primary hover:bg-primary/10"
+                      )}
+                    >
+                      {o.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          )}
           {footer && (
             <div className="mt-2 shrink-0 border-t border-border pt-2 text-[10px] text-muted-foreground">
               {footer}

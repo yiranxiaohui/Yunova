@@ -18,7 +18,6 @@ import {
 } from "@/components/app/ModeSelector"
 import { readModeDraft, useModeSwitch } from "@/lib/mode"
 import { ModelPicker } from "@/components/app/ModelPicker"
-import { ThinkingPicker } from "@/components/app/ThinkingPicker"
 import { listPlatformModels } from "@/lib/platform-models"
 import type { Protocol } from "@/lib/settings"
 import {
@@ -31,6 +30,8 @@ import {
   type AgentSession,
   type AgentTarget,
   type ThinkingLevel,
+  THINKING_LABELS,
+  THINKING_LEVELS,
 } from "@/lib/agent"
 import {
   capabilities,
@@ -758,23 +759,31 @@ export default function AgentTaskPage() {
                   protocol={modelProtocol}
                   model={model}
                   placeholder="默认模型"
-                  title="点击切换工作模型"
+                  title="点击切换工作模型和推理级别"
                   showQuota
                   footer="云端额度 · 仅列出可用于 Agent 的模型"
                   onChangeModel={(next, protocol) => void changeModel(next, protocol)}
+                  // Inside the model panel, not beside it: the ladder a level
+                  // means depends on the selected model, and the composer row
+                  // no longer has to spend width on a second control.
+                  thinking={{
+                    value: thinking,
+                    options: (thinkingLevels.length > 0
+                      ? thinkingLevels
+                      : THINKING_LEVELS
+                    ).map((l) => ({ value: l, label: THINKING_LABELS[l] })),
+                    onChange: (next) => void changeThinking(next),
+                    label: "推理级别",
+                    hint: "级别越高，Agent 在回答前思考得越久，消耗的 token 也越多",
+                    // Null is the runtime's own default, which is not a
+                    // synonym for any listed level, so it shows nothing.
+                    badge: thinking ? THINKING_LABELS[thinking] : null,
+                  }}
                   load={async () =>
                     (await listPlatformModels("chat")).filter(
                       (m) => m.agent_provider != null
                     )
                   }
-                />
-                {/* Next to the model, because the two are one decision: the
-                    ladder a level means depends on which model is selected,
-                    and the cost of the pair is what the user is choosing. */}
-                <ThinkingPicker
-                  level={thinking}
-                  levels={thinkingLevels}
-                  onChange={(next) => void changeThinking(next)}
                 />
                 {/* Pairing lives next to the picker: "no local computers" is
                     only actionable if the fix is one click away. */}
