@@ -37,6 +37,7 @@ import {
   requestNotificationPermission,
 } from "@/lib/platform"
 import { approvalTitle } from "@/lib/agent"
+import { useAuth } from "@/lib/auth-context"
 import { toast } from "sonner"
 
 /**
@@ -83,6 +84,8 @@ function protocolOf(model: string): Promise<Protocol | undefined> {
 export default function AgentTaskPage() {
   const { id } = useParams()
   const nav = useNavigate()
+  const auth = useAuth()
+  const user = auth.state.status === "authed" ? auth.state.user : null
   const sessionId = id ? Number(id) : null
 
   const [session, setSession] = useState<AgentSession | null>(null)
@@ -562,7 +565,7 @@ export default function AgentTaskPage() {
               // Centred while empty, top-aligned once there is a transcript —
               // the same rule chat uses, so the greeting sits at the same
               // height in both modes.
-              heroSwitch ? "flex min-h-full flex-col justify-center" : "space-y-3"
+              heroSwitch ? "flex min-h-full flex-col justify-center" : "space-y-4"
             )}
           >
             {sessionId == null && items.length === 0 && (
@@ -595,7 +598,12 @@ export default function AgentTaskPage() {
               </div>
             )}
 
-            <AgentTranscript items={items} streamingText={streamingText} />
+            <AgentTranscript
+              items={items}
+              streamingText={streamingText}
+              userAvatarUrl={user?.avatar_url ?? null}
+              userInitial={(user?.display_name?.trim() || user?.username || "?").slice(0, 1)}
+            />
 
             {approvals.map((req) => (
               <ApprovalCard
@@ -607,9 +615,21 @@ export default function AgentTaskPage() {
             ))}
 
             {(running || starting) && !streamingText && (
-              <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                <Loader2 className="size-3.5 animate-spin" />
-                {starting ? "正在启动运行时…" : "Agent 正在处理…"}
+              // Aligned with the assistant column so the pending turn reads as
+              // the next bubble rather than a stray line under the transcript.
+              <div className="flex items-center gap-2.5">
+                <span className="relative grid size-8 shrink-0 place-items-center">
+                  <span className="absolute inset-0 animate-ping rounded-xl bg-primary/20" />
+                  <img
+                    src="/logo.svg"
+                    alt=""
+                    className="relative size-8 rounded-xl shadow-sm ring-1 ring-border/70"
+                  />
+                </span>
+                <span className="flex items-center gap-2 rounded-[1.25rem] rounded-tl-md border border-border/60 bg-card/80 px-3.5 py-2 text-xs text-muted-foreground shadow-sm backdrop-blur-sm">
+                  <Loader2 className="size-3.5 animate-spin" />
+                  {starting ? "正在启动运行时…" : "Agent 正在处理…"}
+                </span>
               </div>
             )}
             <div ref={bottomRef} />

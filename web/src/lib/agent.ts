@@ -505,6 +505,37 @@ export function mergeAgentItems(
   return add.length === 0 ? prev : [...prev, ...add]
 }
 
+/** A step the agent took on its own: a tool call, or its private reasoning. */
+export type AgentStep = Extract<AgentItem, { kind: "tool" } | { kind: "thinking" }>
+
+/** One rendered row of a transcript: a message, or a run of steps. */
+export type AgentBlock =
+  | { kind: "steps"; id: string; items: AgentStep[] }
+  | { kind: "single"; id: string; item: AgentItem }
+
+/**
+ * Group consecutive steps so a turn renders as one activity log.
+ *
+ * Every step used to be its own bordered card, so a turn that ran five
+ * commands became five identical floating boxes with the prose squeezed
+ * between them. A block is keyed by its first item, which keeps the key stable
+ * while later steps stream into the same run.
+ */
+export function toAgentBlocks(items: AgentItem[]): AgentBlock[] {
+  const out: AgentBlock[] = []
+  for (const item of items) {
+    const step = item.kind === "tool" || item.kind === "thinking" ? item : null
+    const last = out[out.length - 1]
+    if (step && last?.kind === "steps") {
+      last.items.push(step)
+      continue
+    }
+    if (step) out.push({ kind: "steps", id: step.id, items: [step] })
+    else out.push({ kind: "single", id: item.id, item })
+  }
+  return out
+}
+
 /** Human-readable label for an approval request. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function approvalTitle(req: any): string {
