@@ -90,6 +90,57 @@ pub fn cmd_set_model(id: &str, provider: &str, model_id: &str) -> Value {
     json!({ "id": id, "type": "set_model", "provider": provider, "modelId": model_id })
 }
 
+/// Levels pi accepts for `set_thinking_level`, weakest first.
+///
+/// Kept as a list rather than an enum because it is also the validation set
+/// for a value that arrives from a client and is replayed on every later
+/// start: an unknown level must be refused at the edge, not discovered by the
+/// runtime months afterwards.
+pub const THINKING_LEVELS: [&str; 7] = [
+    "off", "minimal", "low", "medium", "high", "xhigh", "max",
+];
+
+/// Whether `level` is one pi would accept.
+pub fn is_thinking_level(level: &str) -> bool {
+    THINKING_LEVELS.contains(&level)
+}
+
+/// Set how hard the model reasons before answering.
+///
+/// `xhigh` and `max` exist only on some models, and pi clamps a level the
+/// selected model cannot do rather than failing, so a session pinned to a high
+/// level stays usable after switching to a model with a shorter ladder.
+pub fn cmd_set_thinking_level(id: &str, level: &str) -> Value {
+    json!({ "id": id, "type": "set_thinking_level", "level": level })
+}
+
+/// Ask which levels the *currently selected* model supports.
+///
+/// Model-dependent, which is why it is asked of a live runtime instead of
+/// derived from the model name: the ladder differs per model and a picker
+/// built from guesses would offer levels that silently collapse to another.
+pub fn cmd_get_available_thinking_levels(id: &str) -> Value {
+    json!({ "id": id, "type": "get_available_thinking_levels" })
+}
+
+/// Levels out of a `get_available_thinking_levels` response payload.
+///
+/// A model without reasoning support answers `["off"]`, so an empty result
+/// means the response was not understood — the caller treats that as "unknown"
+/// rather than as "no levels", which would hide a working control.
+pub fn parse_thinking_levels(data: &Value) -> Vec<String> {
+    data.get("levels")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .filter(|l| is_thinking_level(l))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Incremental history fetch. `since` is an entry id already mirrored; pi
 /// returns only entries strictly after it. Entry ids are stable, so this works
 /// as a durable cursor even across a client or server restart.
@@ -326,6 +377,38 @@ mod tests {
         assert_eq!(v["type"], "set_model");
         assert_eq!(v["provider"], "yunova-claude");
         assert_eq!(v["modelId"], "claude-opus-4-5");
+    }
+
+    #[test]
+    fn only_levels_pi_accepts_pass_validation() {
+        for level in THINKING_LEVELS {
+            assert!(is_thinking_level(level), "{level} is part of the ladder");
+        }
+        // A client-supplied level is replayed on every later start, so a typo
+        // must be refused at the edge rather than reaching the runtime.
+        for bad in ["", "HIGH", "ultra", "none", "medium "] {
+            assert!(!is_thinking_level(bad), "{bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn set_thinking_level_carries_the_level_verbatim() {
+        let v = cmd_set_thinking_level("r1", "high");
+        assert_eq!(v["type"], "set_thinking_level");
+        assert_eq!(v["level"], "high");
+        assert_eq!(v["id"], "r1");
+    }
+
+    #[test]
+    fn available_levels_are_parsed_and_unknown_ones_dropped() {
+        // Forward-compatibility cuts both ways: a pi release that adds a level
+        // must not put a value in the picker this build cannot send back.
+        let data = json!({ "levels": ["off", "low", "high", "ludicrous"] });
+        assert_eq!(parse_thinking_levels(&data), ["off", "low", "high"]);
+        // A model without reasoning answers ["off"], which is a real answer.
+        assert_eq!(parse_thinking_levels(&json!({ "levels": ["off"] })), ["off"]);
+        // An unusable response is empty, meaning "unknown", not "none".
+        assert!(parse_thinking_levels(&json!({})).is_empty());
     }
 
     #[test]

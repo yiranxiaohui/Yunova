@@ -11,6 +11,42 @@
 
 export type AgentTarget = "cloud" | "device"
 
+/** How hard the agent reasons before answering, in pi's own ladder.
+ *
+ *  Null on a session means "whatever the runtime defaults to", which is what
+ *  every task did before this could be chosen — not a synonym for `medium`,
+ *  because the default is pi's to change. */
+export type ThinkingLevel =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max"
+
+/** The full ladder, weakest first. Used when the runtime has not told us which
+ *  levels the selected model actually supports. */
+export const THINKING_LEVELS: ThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]
+
+export const THINKING_LABELS: Record<ThinkingLevel, string> = {
+  off: "不思考",
+  minimal: "极简",
+  low: "低",
+  medium: "中",
+  high: "高",
+  xhigh: "极高",
+  max: "最大",
+}
+
 export interface AgentSession {
   id: number
   target: AgentTarget
@@ -27,6 +63,8 @@ export interface AgentSession {
    *  default workspace, which is what every task used before tasks could
    *  choose one. */
   workspace: string | null
+  /** Reasoning level this task runs at. Null means the runtime's default. */
+  thinking_level: ThinkingLevel | null
 }
 
 /** One entry of the mirrored session tree, in the runtime's own shape. */
@@ -81,12 +119,15 @@ export const agentApi = {
      *  only honoured by that machine when it is inside the directories the
      *  user authorized there. */
     workspace?: string
+    /** How hard the agent should reason. Omitted means the runtime default. */
+    thinking_level?: ThinkingLevel
   }): Promise<{
     id: number
     target: string
     title: string
     model: string | null
     workspace: string | null
+    thinking_level: ThinkingLevel | null
   }> {
     return jsonOrThrow(
       await fetch("/api/agent/sessions", {
@@ -184,6 +225,40 @@ export const agentApi = {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model }),
+        credentials: "same-origin",
+      })
+    )
+  },
+
+  /** Pin how hard the session reasons.
+   *
+   *  Same lifetime as the model: applied to a live runtime at once, and
+   *  replayed on the next start so a task reopened next week still thinks as
+   *  hard as it was told to. */
+  async setThinkingLevel(sid: number, level: ThinkingLevel): Promise<void> {
+    await okOrThrow(
+      await fetch(`/api/agent/sessions/${sid}/thinking`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ level }),
+        credentials: "same-origin",
+      })
+    )
+  },
+
+  /** Which levels the session's *current model* supports.
+   *
+   *  Answered by the live runtime, because the ladder is model-dependent:
+   *  `xhigh` and `max` exist only on some models. An empty list means nothing
+   *  authoritative is available (no runtime attached, or it could not say), in
+   *  which case the caller should offer the whole ladder rather than hide a
+   *  control that works. */
+  async thinkingLevels(sid: number): Promise<{
+    levels: ThinkingLevel[]
+    thinking_level: ThinkingLevel | null
+  }> {
+    return jsonOrThrow(
+      await fetch(`/api/agent/sessions/${sid}/thinking`, {
         credentials: "same-origin",
       })
     )

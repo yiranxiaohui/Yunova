@@ -694,6 +694,9 @@ export function SettingsDialog({
                 model: model.trim(),
                 useProxy,
                 webSearch,
+                // Chosen in the composer, not here; carried through so saving
+                // the dialog cannot silently reset it.
+                thinking: initial.thinking,
                 imageProtocol,
                 imageBaseUrl: imageBaseUrl.trim(),
                 imageApiKey: imageApiKey.trim(),

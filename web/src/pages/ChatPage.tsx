@@ -35,7 +35,7 @@ import { ReasoningBlock } from "@/components/app/ReasoningBlock"
 import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 
-import { streamChat, type ChatMessage } from "@/lib/chat-stream"
+import { streamChat, type ChatMessage, type ChatThinkingLevel } from "@/lib/chat-stream"
 import { estimateMessagesTokens, contextLimit } from "@/lib/context-limits"
 import { listModels } from "@/lib/models"
 import { listPlatformModels } from "@/lib/platform-models"
@@ -53,6 +53,7 @@ import {
 } from "@/lib/settings"
 import { SettingsDialog } from "@/components/app/SettingsDialog"
 import { ModelPicker } from "@/components/app/ModelPicker"
+import { ChatThinkingPicker } from "@/components/app/ThinkingPicker"
 import { RechargeDialog } from "@/components/app/RechargeDialog"
 import { QuotaLedgerDialog } from "@/components/app/QuotaLedgerDialog"
 import { Sidebar } from "@/components/app/Sidebar"
@@ -775,6 +776,22 @@ export default function ChatPage() {
     }
   }
 
+  /** Change how hard the model thinks.
+   *
+   *  Persisted like the search toggle so the choice survives a reload, and
+   *  applied from the next message on: a turn already streaming was sent with
+   *  the old level, and re-requesting it would bill twice for one answer. */
+  function changeThinking(level: ChatThinkingLevel) {
+    const next = { ...settings, thinking: level }
+    setSettings(next)
+    saveSettings(settingsOwnerId, next)
+    if (next.cloudSync) {
+      settingsApi.save(next).catch(() => {
+        /* non-fatal */
+      })
+    }
+  }
+
   useEffect(() => {
     if (!conversationId) {
       setMessages([])
@@ -1222,6 +1239,7 @@ export default function ChatPage() {
         useProxy: settings.useProxy,
         usePlatform: settings.chatMode === "platform",
         webSearch: settings.webSearch,
+        thinking: settings.thinking,
         imageGen: settings.protocol === "openai",
         persistGeneratedImages: Boolean(user),
         messages: toModel,
@@ -1374,6 +1392,7 @@ export default function ChatPage() {
         useProxy: settings.useProxy,
         usePlatform: settings.chatMode === "platform",
         webSearch: settings.webSearch,
+        thinking: settings.thinking,
         imageGen: settings.protocol === "openai",
         persistGeneratedImages: Boolean(user),
         messages: toModel,
@@ -2044,6 +2063,14 @@ export default function ChatPage() {
                   <Globe className="size-3.5" />
                   联网
                 </Button>
+                {/* Next to 联网 rather than buried in settings: both change what
+                    the *next* message costs, so they belong where the message
+                    is written. */}
+                <ChatThinkingPicker
+                  level={settings.thinking}
+                  onChange={changeThinking}
+                  disabled={streaming}
+                />
                 <span className="ml-auto" />
                 {streaming ? (
                   <Button

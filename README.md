@@ -764,6 +764,9 @@ export default function (pi: ExtensionAPI) {
 | `GET /api/agent/sessions/{id}/entries?since=<entry_id>` | 读取镜像的历史，`since` 为增量游标 |
 | `POST /api/agent/sessions/{id}/prompt` | 发消息；流式中需带 `streaming_behavior` |
 | `POST /api/agent/sessions/{id}/abort` | 中止当前轮次 |
+| `POST /api/agent/sessions/{id}/model` | 固定任务的模型，立即生效并在下次启动时重放 |
+| `POST /api/agent/sessions/{id}/thinking` | 设置推理级别（`off`…`max`），同样会在下次启动时重放 |
+| `GET /api/agent/sessions/{id}/thinking` | 当前模型支持的推理级别；没有运行时时返回空列表 |
 | `POST /api/agent/sessions/{id}/approve` | 应答审批对话框 |
 
 几个关键设计：
@@ -776,6 +779,10 @@ export default function (pi: ExtensionAPI) {
 - **审批广播到所有在线端，任一端批准即生效**；重复应答返回 409，避免两个设备
   同时点“允许”时向运行时发两次答案。新订阅者会先收到待处理的审批请求，
   不会看到一个原因不明的停顿。
+- **模型和推理级别存在会话行上**，而不是只告诉当前运行时。会话比运行时活得久，
+  所以两者都在每次 `start` 时重放；明天重新打开的任务依旧跑在用户选的模型和
+  思考强度上。级别的可选范围跟模型走（`xhigh`/`max` 只有部分模型有），所以是
+  问运行时要的，而不是根据模型名猜的。不选则沉默地用 pi 自己的默认值。
 - **运行时拿不到上游 key**。子进程的 `models.json` 由 `model_pricing` 生成，
   指向本站 `/api/proxy/*` 并带一个会话级 Agent 令牌（文件权限 `0600`）。
 - **重启后 `running` 会话重置为 `idle`**。活会话绑定在子进程或设备套接字上，

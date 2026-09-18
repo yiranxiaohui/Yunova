@@ -1,0 +1,14 @@
+-- Per-task reasoning level for work-mode sessions.
+--
+-- The runtime decides how hard to think, and until now nothing could tell it
+-- otherwise: every task ran on pi's default (`medium`), which is wrong in both
+-- directions — a one-line edit pays for reasoning it does not need, and a
+-- refactor across ten files gets less than it deserves.
+--
+-- The level belongs on the session row for the same reason the model does: a
+-- session outlives its runtime, so the choice has to be replayed on the next
+-- start rather than re-picked every time a task is reopened.
+--
+-- NULL means "whatever the runtime defaults to", which is what every existing
+-- session was, so the column needs no backfill.
+ALTER TABLE agent_sessions ADD COLUMN thinking_level TEXT;
