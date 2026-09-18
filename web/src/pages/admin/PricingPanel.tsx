@@ -162,6 +162,7 @@ export function PricingPanel() {
   const [query, setQuery] = useState("")
   const [dialog, setDialog] = useState<DialogMode>(null)
   const [importOpen, setImportOpen] = useState(false)
+  const [pruning, setPruning] = useState(false)
 
   /** `refresh` 重新探测每个上游的模型列表，而不是复用服务端缓存。 */
   async function load(refresh = false) {
@@ -215,6 +216,36 @@ export function PricingPanel() {
       await load()
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  async function onPruneUnavailable() {
+    // 删除前先重新探测（refresh=1）：缓存可能是几分钟前的，
+    // 刚修好的渠道不应该因为陈旧结果而被连带删掉。
+    const names = rows.filter((r) => !r.upstream_available).map((r) => r.model)
+    if (names.length === 0) return
+    const preview = names.slice(0, 10).join("\n")
+    if (
+      !confirm(
+        `确认删除 ${names.length} 个无上游模型的计费规则？\n\n${preview}` +
+          (names.length > 10 ? `\n…等 ${names.length} 个` : "") +
+          "\n\n删除前会重新探测一次上游，只删除确实无人提供的模型。"
+      )
+    )
+      return
+    setPruning(true)
+    try {
+      const res = await channelsAdminApi.prunePricing(true)
+      await load()
+      if (res.deleted === 0) {
+        alert("重新探测后没有需要删除的模型。")
+      } else {
+        alert(`已删除 ${res.deleted} 个无上游模型。`)
+      }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : String(e))
+    } finally {
+      setPruning(false)
     }
   }
 
@@ -288,6 +319,23 @@ export function PricingPanel() {
         >
           <CloudDownload /> 从 NewAPI 导入
         </Button>
+        {unavailableCount > 0 && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={pruning}
+            onClick={() => void onPruneUnavailable()}
+            title="删除所有没有上游渠道提供的模型计费规则"
+            className="border-amber-500/40 text-amber-700 hover:bg-amber-500/10 hover:text-amber-700 dark:text-amber-300 dark:hover:text-amber-300"
+          >
+            {pruning ? (
+              <LoaderCircle className="animate-spin" />
+            ) : (
+              <Trash2 />
+            )}
+            清理无上游 ({unavailableCount})
+          </Button>
+        )}
         <span className="ml-auto text-xs text-muted-foreground">
           共 {rows.length} 条
           {unavailableCount > 0 && (

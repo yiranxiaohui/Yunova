@@ -199,6 +199,13 @@ export type AdminPricingResponse = {
   errors: ChannelProbeError[]
 }
 
+/** 一键清理无上游模型的结果。`models` 是被删掉的模型 ID。 */
+export type PrunePricingResult = {
+  deleted: number
+  models: string[]
+  errors: ChannelProbeError[]
+}
+
 // ---------------------------------------------------------------------------
 // API
 // ---------------------------------------------------------------------------
@@ -299,6 +306,14 @@ export const channelsAdminApi = {
         method: "DELETE",
         credentials: "same-origin",
       })
+    )
+  },
+  async prunePricing(refresh = false): Promise<PrunePricingResult> {
+    return jsonOrThrow(
+      await fetch(
+        `/api/admin/pricing/prune-unavailable${refresh ? "?refresh=1" : ""}`,
+        { method: "POST", credentials: "same-origin" }
+      )
     )
   },
   async syncNewApiPricing(req: NewApiSyncRequest): Promise<NewApiSyncResult> {
