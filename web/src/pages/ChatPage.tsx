@@ -143,12 +143,16 @@ function ChatModelPicker({
       onChangeModel={onChangeModel}
       thinking={{
         value: settings.thinking,
-        options: CHAT_THINKING_LEVELS.map((l) => ({
+        // `auto` is not a rung on the ladder: it comes out of the ordered
+        // options and is offered as a toggle instead.
+        options: CHAT_THINKING_LEVELS.filter((l) => l !== "auto").map((l) => ({
           value: l,
           label: CHAT_THINKING_LABELS[l],
         })),
         onChange: onChangeThinking,
         hint: "级别越高，回答前思考得越久，消耗的 token 也越多。不支持的模型会自动回退。",
+        autoValue: "auto",
+        autoLabel: CHAT_THINKING_LABELS.auto,
         // `auto` is the behaviour chat had before levels existed, so it reads
         // as "no choice made" and stays off the trigger.
         badge:
