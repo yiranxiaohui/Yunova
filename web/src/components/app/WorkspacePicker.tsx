@@ -131,10 +131,14 @@ export function WorkspacePicker({
               >
                 {/* Two actions per row, because "go into" and "use this" are
                     both wanted: a project directory is usually the answer,
-                    while its parent is usually just a step. */}
+                    while its parent is usually just a step. A root the machine
+                    reports as missing gets neither: both would fail there, and
+                    an error is a worse answer than a visible "not created
+                    yet". */}
                 <button
                   type="button"
-                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left text-sm hover:underline"
+                  disabled={entry.missing}
+                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left text-sm hover:underline disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:no-underline"
                   onClick={() => void load(entry.path)}
                 >
                   {entry.repo ? (
@@ -148,19 +152,28 @@ export function WorkspacePicker({
                       Git
                     </span>
                   )}
-                  <ChevronRight className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
+                  {entry.missing && (
+                    <span className="shrink-0 text-[10px] text-muted-foreground">
+                      目录不存在
+                    </span>
+                  )}
+                  {!entry.missing && (
+                    <ChevronRight className="ml-auto size-3.5 shrink-0 text-muted-foreground" />
+                  )}
                 </button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="shrink-0 text-xs"
-                  onClick={() => {
-                    onPick(entry.path)
-                    onOpenChange(false)
-                  }}
-                >
-                  使用
-                </Button>
+                {!entry.missing && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="shrink-0 text-xs"
+                    onClick={() => {
+                      onPick(entry.path)
+                      onOpenChange(false)
+                    }}
+                  >
+                    使用
+                  </Button>
+                )}
               </div>
             ))}
 

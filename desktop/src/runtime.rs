@@ -313,8 +313,18 @@ pub fn resolve_workspace(
     }
     // Compared after resolving symlinks and `..`, so neither a crafted path
     // nor a link planted inside a root can aim the runtime outside it.
-    let target = std::fs::canonicalize(&asked)
-        .map_err(|e| format!("无法访问目录 {}: {e}", asked.display()))?;
+    let target = std::fs::canonicalize(&asked).map_err(|e| {
+        // A missing directory is the common case and has a specific remedy,
+        // so it does not get the raw OS wording: the app's own default
+        // workspace does not exist until a task has run there, and "No such
+        // file or directory (os error 2)" read like a bug rather than like
+        // something the user could act on.
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!("目录不存在: {}", asked.display())
+        } else {
+            format!("无法访问目录 {}: {e}", asked.display())
+        }
+    })?;
     if !target.is_dir() {
         return Err(format!("{} 不是目录", asked.display()));
     }

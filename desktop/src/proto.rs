@@ -91,6 +91,14 @@ pub struct DirEntry {
     pub path: String,
     pub name: String,
     pub repo: bool,
+    /// An authorized root that does not exist on disk right now.
+    ///
+    /// Only ever set on the root screen: children are read from the
+    /// filesystem, so they exist by construction. The picker needs to know,
+    /// because entering such a root fails — a directory cannot be canonicalized
+    /// before it exists — and an entry that can only produce an error is worse
+    /// than one shown as unavailable.
+    pub missing: bool,
 }
 
 /// Frames the server sends to this client.
