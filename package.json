@@ -1,0 +1,10 @@
+{
+  "name": "yunova",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Yunova 仓库根的 pi 包清单：把 pi-package/ 里的 provider 扩展暴露给 `pi install git:github.com/yiranxiaohui/Yunova@main`",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./pi-package/extensions"]
+  }
+}
