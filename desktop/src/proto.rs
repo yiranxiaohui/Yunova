@@ -138,6 +138,14 @@ pub enum FromServer {
         /// the local roots before anything starts.
         #[serde(default)]
         workspace: Option<String>,
+        /// How this task asked tool calls to be gated.
+        ///
+        /// Honoured only when it is *stricter* than this machine's own
+        /// setting, which is what keeps the policy local: the server can ask
+        /// for more confirmations, never for fewer. Absent means "this
+        /// machine's own policy", which is what every earlier task meant.
+        #[serde(default)]
+        approval: Option<String>,
     },
     /// One JSONL record for a local runtime's stdin, verbatim.
     Frame {

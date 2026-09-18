@@ -1,5 +1,6 @@
 mod admin;
 mod agent_api;
+mod agent_approval;
 mod agent_device;
 mod agent_driver;
 mod agent_rpc;

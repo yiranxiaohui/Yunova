@@ -212,6 +212,15 @@ pub enum ToDevice {
         /// every task did before tasks could choose.
         #[serde(skip_serializing_if = "Option::is_none")]
         workspace: Option<String>,
+        /// How this task asked tool calls to be gated.
+        ///
+        /// A request to *tighten*, never to loosen: the client keeps the
+        /// stricter of this and its own setting, so a server — compromised or
+        /// not — cannot switch off the confirmations the owner of this machine
+        /// configured. Absent means "use your own policy", which is what every
+        /// task did before tasks could choose.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        approval: Option<String>,
     },
     /// One JSONL record for the local runtime's stdin, verbatim.
     Frame {
@@ -1501,6 +1510,7 @@ mod tests {
             session_id: 3,
             models_json: json!({"providers":{"yunova-claude":{"apiKey":"yna_t"}}}),
             workspace: Some("/home/u/code/app".into()),
+            approval: Some("always".into()),
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
         assert_eq!(v["type"], "start_runtime");
@@ -1509,17 +1519,24 @@ mod tests {
         // upstream provider key.
         assert_eq!(v["models_json"]["providers"]["yunova-claude"]["apiKey"], "yna_t");
         assert_eq!(v["workspace"], "/home/u/code/app");
+        // What the *task* asked for. The machine resolves it against its own
+        // setting and keeps the stricter of the two, so this is a request and
+        // never an instruction.
+        assert_eq!(v["approval"], "always");
 
         // A task that named no directory must omit the field rather than send
         // null: the client reads "absent" as "use your default", and an
-        // explicit null would have to be special-cased on both sides.
+        // explicit null would have to be special-cased on both sides. The same
+        // applies to the approval mode, where absent means "your own policy".
         let msg = ToDevice::StartRuntime {
             session_id: 4,
             models_json: json!({"providers":{}}),
             workspace: None,
+            approval: None,
         };
         let v: Value = serde_json::from_str(&serde_json::to_string(&msg).unwrap()).unwrap();
         assert!(v.get("workspace").is_none());
+        assert!(v.get("approval").is_none());
     }
 
     #[tokio::test]
