@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test"
 import {
   entriesToItems,
   mergeAgentItems,
+  toAgentBlocks,
+  type AgentBlock,
   type AgentEntry,
   type AgentItem,
 } from "../src/lib/agent"
@@ -121,5 +123,38 @@ describe("transcript reconciliation", () => {
     expect(tool.kind).toBe("tool")
     expect(tool.output).toBe("README.md")
     expect(tool.ok).toBe(true)
+  })
+})
+
+describe("transcript grouping", () => {
+  const user = (id: string): AgentItem => ({ kind: "user", id, text: "hi" })
+  const assistant = (id: string): AgentItem => ({ kind: "assistant", id, text: "ok" })
+  const tool = (id: string): AgentItem => ({ kind: "tool", id, name: "bash", args: {} })
+  const thinking = (id: string): AgentItem => ({ kind: "thinking", id, text: "…" })
+
+  test("merges a run of steps into one panel", () => {
+    const blocks = toAgentBlocks([tool("t1"), thinking("k1"), tool("t2")])
+    expect(blocks).toHaveLength(1)
+    expect(blocks[0]!.kind).toBe("steps")
+    expect((blocks[0] as Extract<AgentBlock, { kind: "steps" }>).items).toHaveLength(3)
+  })
+
+  test("a message between two runs splits them", () => {
+    const blocks = toAgentBlocks([tool("t1"), assistant("a1"), tool("t2")])
+    expect(blocks.map((b) => b.kind)).toEqual(["steps", "single", "steps"])
+  })
+
+  test("messages are never folded into a step panel", () => {
+    const blocks = toAgentBlocks([user("u1"), assistant("a1")])
+    expect(blocks.map((b) => b.kind)).toEqual(["single", "single"])
+  })
+
+  test("a block is keyed by its first item, so keys stay stable as steps arrive", () => {
+    expect(toAgentBlocks([tool("t1"), tool("t2")])[0]!.id).toBe("t1")
+    expect(toAgentBlocks([tool("t1"), tool("t2"), tool("t3")])[0]!.id).toBe("t1")
+  })
+
+  test("an empty transcript produces no blocks", () => {
+    expect(toAgentBlocks([])).toEqual([])
   })
 })
