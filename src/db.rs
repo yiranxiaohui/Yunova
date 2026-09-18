@@ -109,6 +109,7 @@ static SQLITE_MIGRATIONS: &[(i32, &str)] = &[
     (47, include_str!("../migrations/sqlite/0047_usd_parity_rate.sql")),
     (49, include_str!("../migrations/sqlite/0049_cli_device_codes.sql")),
     (50, include_str!("../migrations/sqlite/0050_agent_session_workspace.sql")),
+    (51, include_str!("../migrations/sqlite/0051_agent_session_thinking.sql")),
 ];
 static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (1, include_str!("../migrations/postgres/0001_init.sql")),
@@ -162,6 +163,10 @@ static POSTGRES_MIGRATIONS: &[(i32, &str)] = &[
     (
         50,
         include_str!("../migrations/postgres/0050_agent_session_workspace.sql"),
+    ),
+    (
+        51,
+        include_str!("../migrations/postgres/0051_agent_session_thinking.sql"),
     ),
 ];
 
@@ -1065,6 +1070,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((sessions, entries), (0, 0));
+
+        pool.close().await;
+    }
+
+    /// Migration 51 adds the per-task reasoning level. Existing tasks must keep
+    /// running — on the runtime's own default, which is what they always did —
+    /// so the column has to be nullable and needs no backfill.
+    #[tokio::test]
+    async fn thinking_level_migration_leaves_existing_tasks_on_the_default() {
+        install_drivers();
+        let pool = AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        pool.execute("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .await
+            .unwrap();
+
+        // Rewind to the pre-51 schema and insert a task the way an older build
+        // would have.
+        pool.execute("ALTER TABLE agent_sessions DROP COLUMN thinking_level")
+            .await
+            .unwrap();
+        pool.execute("DELETE FROM _migrations WHERE id = 51")
+            .await
+            .unwrap();
+        pool.execute(
+            "INSERT INTO agent_sessions (id, user_id, target, title) VALUES (1, 1, 'cloud', 'old')",
+        )
+        .await
+        .unwrap();
+
+        migrate(&pool, DbKind::Sqlite).await.unwrap();
+
+        let (title, level): (String, Option<String>) =
+            sqlx::query_as("SELECT title, thinking_level FROM agent_sessions WHERE id = 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(title, "old", "the task must survive the migration");
+        assert_eq!(level, None, "pre-51 tasks keep the runtime's own default");
 
         pool.close().await;
     }

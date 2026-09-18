@@ -99,6 +99,27 @@ async fn session_model(pool: &Pool, kind: DbKind, session_id: i64) -> Option<Str
     .filter(|m| !m.trim().is_empty())
 }
 
+/// The reasoning level a session is pinned to, if any.
+///
+/// Validated on the way out as well as on the way in: the column is plain text
+/// and survives a downgrade, so a level written by a newer build must not be
+/// replayed into a runtime that would reject it and leave the session running
+/// at a level nothing on screen claims.
+async fn session_thinking_level(pool: &Pool, kind: DbKind, session_id: i64) -> Option<String> {
+    sqlx::query_scalar::<_, Option<String>>(&db::q(
+        kind,
+        "SELECT thinking_level FROM agent_sessions WHERE id = ?",
+    ))
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+    .flatten()
+    .map(|l| l.trim().to_string())
+    .filter(|l| agent_rpc::is_thinking_level(l))
+}
+
 /// Ask a live runtime to switch models.
 ///
 /// Used both when a runtime starts and when the user switches mid-session, so
@@ -121,6 +142,27 @@ async fn apply_model(
     }
 }
 
+/// Ask a live runtime to change how hard it reasons.
+///
+/// Shared by start-time replay and the mid-session switch for the same reason
+/// `apply_model` is: the two paths must fail identically, or one of them would
+/// leave the runtime on a level the UI does not show.
+async fn apply_thinking_level(
+    live: &Arc<crate::agent_session::LiveSession>,
+    level: &str,
+) -> Result<(), String> {
+    match live
+        .request(agent_rpc::cmd_set_thinking_level("", level))
+        .await?
+    {
+        Inbound::Response { success: true, .. } => Ok(()),
+        Inbound::Response { error, .. } => {
+            Err(error.unwrap_or_else(|| "运行时拒绝了该推理级别".into()))
+        }
+        _ => Err("运行时返回了意外响应".into()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // session CRUD
 // ---------------------------------------------------------------------------
@@ -136,6 +178,10 @@ struct CreateSessionReq {
     title: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    /// How hard the agent should reason, from pi's ladder
+    /// (`off`…`max`). Omitted means the runtime's own default.
+    #[serde(default)]
+    thinking_level: Option<String>,
     /// Directory on the device this task should run in.
     ///
     /// Only meaningful for `target = "device"`, and only ever a record of what
@@ -166,6 +212,20 @@ async fn create_session(
         && let Err(r) = resolve_agent_model(&installed.pool, installed.kind, model).await
     {
         return r;
+    }
+
+    // Refused rather than silently dropped: the level is replayed on every
+    // later start, so a value pi would reject has to be caught while the user
+    // is still looking at the control that produced it.
+    let thinking_level = req
+        .thinking_level
+        .as_deref()
+        .map(str::trim)
+        .filter(|l| !l.is_empty());
+    if let Some(level) = thinking_level
+        && !agent_rpc::is_thinking_level(level)
+    {
+        return (StatusCode::BAD_REQUEST, "推理级别无效").into_response();
     }
 
     // A device session is meaningless without a machine to run on, and the
@@ -220,8 +280,8 @@ async fn create_session(
 
     let insert = db::q(
         installed.kind,
-        "INSERT INTO agent_sessions (user_id, target, device_id, title, model, workspace) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO agent_sessions (user_id, target, device_id, title, model, workspace, \
+         thinking_level) VALUES (?, ?, ?, ?, ?, ?, ?)",
     );
     // Both backends support RETURNING, so the id comes back from the insert.
     let id = sqlx::query_as::<_, (i64,)>(&format!("{insert} RETURNING id"))
@@ -231,6 +291,7 @@ async fn create_session(
         .bind(&title)
         .bind(model)
         .bind(workspace.as_deref())
+        .bind(thinking_level)
         .fetch_one(&installed.pool)
         .await
         .map(|r| r.0)
@@ -243,6 +304,7 @@ async fn create_session(
             "title": title,
             "model": model,
             "workspace": workspace,
+            "thinking_level": thinking_level,
         }))
         .into_response(),
         Err(e) => {
@@ -262,6 +324,7 @@ type SessionRow = (
     String,         // status
     String,         // updated_at
     Option<String>, // workspace
+    Option<String>, // thinking_level
 );
 
 async fn list_sessions(
@@ -271,8 +334,8 @@ async fn list_sessions(
 ) -> Response {
     let rows: Vec<SessionRow> = sqlx::query_as(&db::q(
         installed.kind,
-        "SELECT id, target, device_id, title, model, status, updated_at, workspace \
-         FROM agent_sessions WHERE user_id = ? ORDER BY updated_at DESC",
+        "SELECT id, target, device_id, title, model, status, updated_at, workspace, \
+         thinking_level FROM agent_sessions WHERE user_id = ? ORDER BY updated_at DESC",
     ))
     .bind(user.id)
     .fetch_all(&installed.pool)
@@ -280,7 +343,8 @@ async fn list_sessions(
     .unwrap_or_default();
 
     let mut out = Vec::with_capacity(rows.len());
-    for (id, target, device_id, title, model, status, updated_at, workspace) in rows {
+    for (id, target, device_id, title, model, status, updated_at, workspace, thinking_level) in rows
+    {
         out.push(json!({
             "id": id,
             "target": target,
@@ -293,6 +357,9 @@ async fn list_sessions(
             // a launch parameter: a task reopened later has to be able to say
             // which project it was working on.
             "workspace": workspace,
+            // How hard this task reasons. Null means the runtime's default,
+            // which is what every task did before this could be chosen.
+            "thinking_level": thinking_level,
             // Whether a runtime is attached right now. Distinct from status:
             // an idle session can still hold a warm runtime.
             "live": state.agent_sessions.is_live(id).await,
@@ -568,6 +635,94 @@ async fn set_model(
 }
 
 #[derive(Deserialize)]
+struct SetThinkingReq {
+    level: String,
+}
+
+/// Pin a session's reasoning level, applying it immediately when a runtime is
+/// live.
+///
+/// Stored for the same reason the model is: a session outlives its runtime, so
+/// a task resumed tomorrow has to reason as hard as the user asked rather than
+/// falling back to pi's default. Persisting only after the runtime accepts
+/// keeps the two in step — a rejected level must not become the value replayed
+/// on every later start.
+async fn set_thinking_level(
+    State(state): State<AppState>,
+    Extension(installed): Extension<InstalledState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(sid): Path<i64>,
+    Json(req): Json<SetThinkingReq>,
+) -> Response {
+    if let Err(r) = owned_session(&installed.pool, installed.kind, user.id, sid).await {
+        return r;
+    }
+    let level = req.level.trim();
+    if !agent_rpc::is_thinking_level(level) {
+        return (StatusCode::BAD_REQUEST, "推理级别无效").into_response();
+    }
+
+    if let Some(live) = state.agent_sessions.get(sid).await
+        && let Err(e) = apply_thinking_level(&live, level).await
+    {
+        return (StatusCode::BAD_GATEWAY, e).into_response();
+    }
+
+    let sql = db::q(
+        installed.kind,
+        "UPDATE agent_sessions SET thinking_level = ?, updated_at = ? WHERE id = ?",
+    );
+    if let Err(e) = sqlx::query(&sql)
+        .bind(level)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(sid)
+        .execute(&installed.pool)
+        .await
+    {
+        eprintln!("[agent-api] persisting the session thinking level failed: {e}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, "保存推理级别失败").into_response();
+    }
+
+    Json(json!({ "ok": true, "thinking_level": level })).into_response()
+}
+
+/// Which reasoning levels the session's current model actually supports.
+///
+/// Asked of the live runtime rather than derived from the model name: the
+/// ladder is model-dependent (`xhigh`/`max` exist only on some), so a picker
+/// built from guesses would offer levels that silently collapse to another
+/// one. Without a runtime there is nothing authoritative to report, which the
+/// client renders as the full ladder.
+async fn available_thinking_levels(
+    State(state): State<AppState>,
+    Extension(installed): Extension<InstalledState>,
+    Extension(user): Extension<CurrentUser>,
+    Path(sid): Path<i64>,
+) -> Response {
+    if let Err(r) = owned_session(&installed.pool, installed.kind, user.id, sid).await {
+        return r;
+    }
+    let current = session_thinking_level(&installed.pool, installed.kind, sid).await;
+    let Some(live) = state.agent_sessions.get(sid).await else {
+        return Json(json!({ "levels": [], "thinking_level": current })).into_response();
+    };
+    let levels = match live
+        .request(agent_rpc::cmd_get_available_thinking_levels(""))
+        .await
+    {
+        Ok(Inbound::Response {
+            success: true,
+            data: Some(data),
+            ..
+        }) => agent_rpc::parse_thinking_levels(&data),
+        // Non-fatal on purpose: a runtime that cannot answer should degrade to
+        // "unknown", not break the composer the control lives in.
+        _ => Vec::new(),
+    };
+    Json(json!({ "levels": levels, "thinking_level": current })).into_response()
+}
+
+#[derive(Deserialize)]
 struct ApproveReq {
     /// The `extension_ui_request` id being answered.
     request_id: String,
@@ -799,6 +954,9 @@ async fn start_session(
         None => None,
     };
 
+    // Same treatment as the model: read before anything is spawned, and
+    // dropped rather than fatal if it is no longer a level this build knows.
+    let pinned_level = session_thinking_level(&installed.pool, installed.kind, sid).await;
     // Build the runtime's model config from the priced whitelist. This is the
     // security boundary: the runtime receives a gateway URL plus a
     // session-scoped token, never an upstream provider key.
@@ -934,6 +1092,13 @@ async fn start_session(
             // tearing the session down over a model switch would lose it.
             eprintln!("[agent-api] session {sid} could not select {model}: {e}");
         }
+        // After the model, never before: the ladder is model-dependent, so a
+        // level applied first could be clamped against the wrong model.
+        if let Some(level) = &pinned_level
+            && let Err(e) = apply_thinking_level(&live, level).await
+        {
+            eprintln!("[agent-api] session {sid} could not set thinking level {level}: {e}");
+        }
         return Json(json!({ "ok": true, "reused": false, "sandboxed": false })).into_response();
     }
 
@@ -990,6 +1155,11 @@ async fn start_session(
         && let Err(e) = apply_model(&live, provider, model).await
     {
         eprintln!("[agent-api] session {sid} could not select {model}: {e}");
+    }
+    if let Some(level) = &pinned_level
+        && let Err(e) = apply_thinking_level(&live, level).await
+    {
+        eprintln!("[agent-api] session {sid} could not set thinking level {level}: {e}");
     }
 
     // Bound the sandbox's wall-clock lifetime. A session that is never stopped
@@ -1182,6 +1352,10 @@ pub fn routes() -> Router<AppState> {
         .route("/agent/sessions/{sid}/stop", post(stop_session))
         .route("/agent/sessions/{sid}/prompt", post(prompt))
         .route("/agent/sessions/{sid}/model", post(set_model))
+        .route(
+            "/agent/sessions/{sid}/thinking",
+            post(set_thinking_level).get(available_thinking_levels),
+        )
         .route("/agent/sessions/{sid}/abort", post(abort))
         .route("/agent/sessions/{sid}/approve", post(approve))
 }
@@ -1300,6 +1474,40 @@ mod tests {
         assert_eq!(
             session_model(&pool, DbKind::Sqlite, 3).await,
             Some("gpt-5".to_string())
+        );
+
+        pool.close().await;
+    }
+
+    /// The column is plain text and survives a downgrade, so a level written
+    /// by a newer build must not be replayed into a runtime that would reject
+    /// it — the session would then run at a level nothing on screen claims.
+    #[tokio::test]
+    async fn only_a_level_this_build_understands_is_replayed() {
+        let pool = pool_with(&[]).await;
+        sqlx::query("INSERT INTO users (id, username, password_hash) VALUES (1, 'u1', 'x')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_sessions (id, user_id, target, title, thinking_level) \
+             VALUES (1, 1, 'cloud', 't', NULL), (2, 1, 'cloud', 't', '  '), \
+                    (3, 1, 'cloud', 't', 'high'), (4, 1, 'cloud', 't', 'ludicrous')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(session_thinking_level(&pool, DbKind::Sqlite, 1).await, None);
+        assert_eq!(session_thinking_level(&pool, DbKind::Sqlite, 2).await, None);
+        assert_eq!(
+            session_thinking_level(&pool, DbKind::Sqlite, 3).await,
+            Some("high".to_string())
+        );
+        assert_eq!(
+            session_thinking_level(&pool, DbKind::Sqlite, 4).await,
+            None,
+            "a level this build cannot send must not be replayed"
         );
 
         pool.close().await;

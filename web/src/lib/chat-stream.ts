@@ -3,6 +3,38 @@ import { trimSlash } from "./settings"
 
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string }
 
+/**
+ * How hard the model should think before answering, in chat mode.
+ *
+ * `auto` is what chat did before the level could be chosen: ask for thinking
+ * without saying how much, and let the provider decide. It stays the default
+ * because it is the only value that behaves sensibly on every model — the
+ * three vendors disagree on what a "level" even is (an effort enum, a token
+ * budget, a dynamic budget), so the explicit levels below are a mapping, not a
+ * promise of identical behaviour across providers.
+ *
+ * `off` is the one level worth being literal about: it suppresses the thinking
+ * request entirely, which is also what the automatic downgrade falls back to
+ * when a model rejects the parameters.
+ */
+export type ChatThinkingLevel = "off" | "auto" | "low" | "medium" | "high"
+
+export const CHAT_THINKING_LEVELS: ChatThinkingLevel[] = [
+  "off",
+  "auto",
+  "low",
+  "medium",
+  "high",
+]
+
+export const CHAT_THINKING_LABELS: Record<ChatThinkingLevel, string> = {
+  off: "不思考",
+  auto: "自动",
+  low: "低",
+  medium: "中",
+  high: "高",
+}
+
 // --- attachment handling -------------------------------------------------
 // User messages can embed markdown image refs like `![](/api/images/x.png)`
 // or data URLs. We strip them out for the text sent to the model and
@@ -138,6 +170,9 @@ export type ChatStreamOptions = {
    */
   usePlatform?: boolean
   webSearch?: boolean
+  /** How hard to think. Defaults to `auto`, which is the behaviour chat had
+   *  before this could be chosen. */
+  thinking?: ChatThinkingLevel
   // OpenAI protocol only. Declares the hosted `image_generation` tool on
   // the /v1/responses request so the model can emit images inline during
   // a normal chat turn. When an `image_generation_call` completes, its
@@ -169,9 +204,19 @@ type PreparedRequest = {
   directHeaders: Record<string, string>
 }
 
+/** Gemini takes a token budget rather than an effort enum, so the levels are
+ *  mapped to absolute numbers. Chosen inside the range every thinking-capable
+ *  2.x/3.x model accepts, so one mapping works across the family; a model that
+ *  rejects the field at all is caught by the downgrade in `streamChat`. */
+const GEMINI_BUDGET: Record<"low" | "medium" | "high", number> = {
+  low: 1024,
+  medium: 8192,
+  high: 24576,
+}
+
 async function prepareOpenAi(
   o: ChatStreamOptions,
-  withThinking: boolean
+  thinking: ChatThinkingLevel
 ): Promise<PreparedRequest> {
   const system = o.messages
     .filter((m) => m.role === "system")
@@ -219,8 +264,16 @@ async function prepareOpenAi(
       ...(system ? { instructions: system } : {}),
       ...(o.temperature !== undefined ? { temperature: o.temperature } : {}),
       // 索要推理摘要。非推理模型（gpt-4o 等）会 400，由 streamChat 的降级
-      // 重试兜底。
-      ...(withThinking ? { reasoning: { summary: "auto" } } : {}),
+      // 重试兜底。`effort` 只在用户明确选了级别时才传：省略它等于用
+      // 模型自己的默认强度，而中转站对这个字段的支持参差不齐。
+      ...(thinking === "off"
+        ? {}
+        : {
+            reasoning: {
+              summary: "auto",
+              ...(thinking === "auto" ? {} : { effort: thinking }),
+            },
+          }),
       ...(tools.length ? { tools } : {}),
     },
     directHeaders: {
@@ -231,7 +284,7 @@ async function prepareOpenAi(
 
 async function prepareClaude(
   o: ChatStreamOptions,
-  withThinking: boolean
+  thinking: ChatThinkingLevel
 ): Promise<PreparedRequest> {
   const system = o.messages
     .filter((m) => m.role === "system")
@@ -283,11 +336,26 @@ async function prepareClaude(
     })
   )
   // extended thinking 的硬性约束：budget_tokens 至少 1024 且必须小于
-  // max_tokens，同时 temperature 只能是 1（传别的值直接 400）。这里把上限抬到
-  // 至少 2048，保证思考和正文都有空间。
-  const maxTokens = withThinking
-    ? Math.max(o.maxTokens ?? 4096, 2048)
+  // max_tokens，同时 temperature 只能是 1（传别的值直接 400）。级别越高需要
+  // 越大的窗口，所以上限跟着级别抬：只抬 budget 不抬 max_tokens 会把正文
+  // 的空间挤完，模型会在思考完之后直接被截断。
+  const thinkingOn = thinking !== "off"
+  const maxTokens = thinkingOn
+    ? Math.max(o.maxTokens ?? 4096, thinking === "high" ? 8192 : 2048)
     : (o.maxTokens ?? 4096)
+  // 余下的都留给正文：1024 是 API 的硬下限，maxTokens-1024 保证回答本身
+  // 至少还有 1024 token 可用。
+  const budget = (ratio: number) =>
+    Math.min(
+      Math.max(Math.floor(maxTokens * ratio), 1024),
+      Math.max(maxTokens - 1024, 1024)
+    )
+  const BUDGET_RATIO: Record<Exclude<ChatThinkingLevel, "off">, number> = {
+    auto: 0.5,
+    low: 0.25,
+    medium: 0.5,
+    high: 0.75,
+  }
 
   return {
     url: `${trimSlash(o.baseUrl)}/v1/messages`,
@@ -298,14 +366,14 @@ async function prepareClaude(
       stream: true,
       ...(system ? { system } : {}),
       // 开思考时不传 temperature —— API 要求它必须为 1，省略即取默认值 1。
-      ...(!withThinking && o.temperature !== undefined
+      ...(!thinkingOn && o.temperature !== undefined
         ? { temperature: o.temperature }
         : {}),
-      ...(withThinking
+      ...(thinkingOn
         ? {
             thinking: {
               type: "enabled",
-              budget_tokens: Math.floor(maxTokens / 2),
+              budget_tokens: budget(BUDGET_RATIO[thinking]),
             },
           }
         : {}),
@@ -331,7 +399,7 @@ async function prepareClaude(
 
 async function prepareGemini(
   o: ChatStreamOptions,
-  withThinking: boolean
+  thinking: ChatThinkingLevel
 ): Promise<PreparedRequest> {
   const system = o.messages
     .filter((m) => m.role === "system")
@@ -368,15 +436,25 @@ async function prepareGemini(
     })
   )
   const generationConfig =
-    o.temperature !== undefined || o.maxTokens !== undefined || withThinking
+    o.temperature !== undefined || o.maxTokens !== undefined || thinking !== "off"
       ? {
           ...(o.temperature !== undefined ? { temperature: o.temperature } : {}),
           ...(o.maxTokens !== undefined ? { maxOutputTokens: o.maxTokens } : {}),
           // 不加 includeThoughts，parts 里就不会出现 thought:true 的片段。
           // 老模型不认这个字段会 400，由 streamChat 的降级重试兜底。
-          ...(withThinking
-            ? { thinkingConfig: { includeThoughts: true } }
-            : {}),
+          // thinkingBudget 是 token 数而不是枚举，且各模型的合法区间不同，所以
+          // 只在用户明确选了级别时才传；`auto` 省略它，等于交给模型动态
+          // 决定，这也是降级重试的第一级。
+          ...(thinking === "off"
+            ? {}
+            : {
+                thinkingConfig: {
+                  includeThoughts: true,
+                  ...(thinking === "auto"
+                    ? {}
+                    : { thinkingBudget: GEMINI_BUDGET[thinking] }),
+                },
+              }),
         }
       : undefined
   return {
@@ -397,15 +475,15 @@ async function prepareGemini(
 
 function prepare(
   o: ChatStreamOptions,
-  withThinking: boolean
+  thinking: ChatThinkingLevel
 ): Promise<PreparedRequest> {
   switch (o.protocol) {
     case "openai":
-      return prepareOpenAi(o, withThinking)
+      return prepareOpenAi(o, thinking)
     case "claude":
-      return prepareClaude(o, withThinking)
+      return prepareClaude(o, thinking)
     case "gemini":
-      return prepareGemini(o, withThinking)
+      return prepareGemini(o, thinking)
   }
 }
 
@@ -513,31 +591,47 @@ async function sendRequest(
 }
 
 /** 上游报的错是不是「不认识思考参数」。不支持思考的模型（gpt-4o、Claude 3.5、
- * 老 Gemini）会在 400 里点名这些字段，据此决定要不要去掉参数重试。 */
+ * 老 Gemini）会在 400 里点名这些字段，据此决定要不要去掉参数重试。选了具体
+ * 级别时还会命中 effort / thinking_budget：部分中转站支持思考却不支持控制
+ * 强度，那应该退到「思考，但不指定强度」而不是直接不思考。 */
 function isThinkingRejected(status: number, body: string): boolean {
   if (status !== 400 && status !== 422) return false
-  return /thinking|reasoning|budget_tokens|includeThoughts/i.test(body)
+  return /thinking|reasoning|budget_tokens|includeThoughts|effort|thinking_budget|thinkingBudget/i.test(
+    body
+  )
 }
 
 export async function streamChat(o: ChatStreamOptions): Promise<void> {
-  // 默认索要思考过程。模型不认这些参数时下面会去掉重试，所以非推理模型不会
-  // 因此不可用。
-  let res = await sendRequest(o, await prepare(o, true))
+  const requested: ChatThinkingLevel = o.thinking ?? "auto"
+  // 降级链：先按用户选的级别请求；被拒就退到 `auto`（只要思考、不说多
+  // 少），因为不少中转站支持 thinking 却不认 effort / thinkingBudget；再被拒
+  // 才彻底去掉思考参数。这样选了级别不会把原本能思考的模型降成不思考。
+  // 对话按实际 token 用量事后计费，非 2xx 不产生扣费，重试不会重复计费。
+  const chain: ChatThinkingLevel[] =
+    requested === "off"
+      ? ["off"]
+      : requested === "auto"
+        ? ["auto", "off"]
+        : [requested, "auto", "off"]
 
-  if (!res.ok) {
+  let res = await sendRequest(o, await prepare(o, chain[0]))
+  for (let i = 1; i < chain.length && !res.ok; i++) {
     const text = await res.text().catch(() => "")
-    if (isThinkingRejected(res.status, text)) {
-      // 对话按实际 token 用量事后计费，非 2xx 不产生扣费，重试不会重复计费。
-      res = await sendRequest(o, await prepare(o, false))
-      if (!res.ok) {
-        const retryText = await res.text().catch(() => "")
-        throw new Error(
-          `HTTP ${res.status}: ${retryText || res.statusText}`
-        )
-      }
-    } else {
+    if (!isThinkingRejected(res.status, text)) {
       throw new Error(`HTTP ${res.status}: ${text || res.statusText}`)
     }
+    const next = await sendRequest(o, await prepare(o, chain[i]))
+    // 最后一级也失败就把它的错误报出去：逗留第一次的 400 只会把“不支持
+    // 思考”当成真正的失败原因。
+    if (!next.ok && i === chain.length - 1) {
+      const retryText = await next.text().catch(() => "")
+      throw new Error(`HTTP ${next.status}: ${retryText || next.statusText}`)
+    }
+    res = next
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "")
+    throw new Error(`HTTP ${res.status}: ${text || res.statusText}`)
   }
   if (!res.body) throw new Error(`HTTP ${res.status}: 响应没有可读的流`)
 

@@ -18,6 +18,7 @@ import {
 } from "@/components/app/ModeSelector"
 import { readModeDraft, useModeSwitch } from "@/lib/mode"
 import { ModelPicker } from "@/components/app/ModelPicker"
+import { ThinkingPicker } from "@/components/app/ThinkingPicker"
 import { listPlatformModels } from "@/lib/platform-models"
 import type { Protocol } from "@/lib/settings"
 import {
@@ -29,6 +30,7 @@ import {
   type AgentItem,
   type AgentSession,
   type AgentTarget,
+  type ThinkingLevel,
 } from "@/lib/agent"
 import {
   capabilities,
@@ -117,6 +119,14 @@ export default function AgentTaskPage() {
   // says so rather than naming a model the server never actually pinned.
   const [model, setModel] = useState("")
   const [modelProtocol, setModelProtocol] = useState<Protocol>("claude")
+  // How hard the agent reasons. Null means the runtime's own default, which is
+  // what every task did before this control existed; the label says "default"
+  // rather than naming a level the server never actually pinned.
+  const [thinking, setThinking] = useState<ThinkingLevel | null>(null)
+  // Which levels the *selected model* supports, as reported by a live runtime.
+  // Empty until one answers, in which case the picker offers the whole ladder
+  // rather than hiding options that would in fact work.
+  const [thinkingLevels, setThinkingLevels] = useState<ThinkingLevel[]>([])
   const [devices, setDevices] = useState<DeviceOption[]>([])
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [devicesOpen, setDevicesOpen] = useState(false)
@@ -241,6 +251,7 @@ export default function AgentTaskPage() {
       // Adopt the stored model so the picker reflects what this task actually
       // runs on, not what was selected on the previous screen.
       setModel(s?.model ?? "")
+      setThinking(s?.thinking_level ?? null)
       setRunning(s?.status === "running")
       await syncEntries(sessionId, true)
     })()
@@ -331,6 +342,29 @@ export default function AgentTaskPage() {
     }
   }, [model])
 
+  // Ask the runtime which reasoning levels its current model supports.
+  //
+  // Only a live runtime can answer, and the answer changes with the model, so
+  // this re-runs on both. A failure is silent on purpose: the picker falls
+  // back to the full ladder, and pi clamps a level the model cannot do rather
+  // than rejecting it.
+  useEffect(() => {
+    if (sessionId == null || !session?.live) return
+    let cancelled = false
+    void agentApi
+      .thinkingLevels(sessionId)
+      .then((r) => {
+        if (cancelled) return
+        setThinkingLevels(r.levels ?? [])
+      })
+      .catch(() => {
+        /* the picker still works with the full ladder */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [sessionId, session?.live, model])
+
   // Ask for notification permission once, and only where it means something.
   //
   // Requested on entering the task workspace rather than at launch: the prompt
@@ -388,6 +422,7 @@ export default function AgentTaskPage() {
           title: message.slice(0, 40),
           model: model || undefined,
           workspace: workspace ?? undefined,
+          thinking_level: thinking ?? undefined,
         })
         // Carry the prompt across the navigation so the user does not retype
         // it after the route changes.
@@ -396,7 +431,7 @@ export default function AgentTaskPage() {
         toast.error(`创建任务失败：${(e as Error).message}`)
       }
     },
-    [target, deviceId, model, workspace, nav]
+    [target, deviceId, model, workspace, thinking, nav]
   )
 
   /** Switch the model this task runs on.
@@ -420,6 +455,26 @@ export default function AgentTaskPage() {
       }
     },
     [sessionId, model]
+  )
+
+  /** Switch how hard this task reasons.
+   *
+   *  Mirrors `changeModel` deliberately: held locally before a task exists,
+   *  owned by the server once it does, and rolled back on failure so the
+   *  control never claims a level the agent is not actually running at. */
+  const changeThinking = useCallback(
+    async (next: ThinkingLevel) => {
+      const previous = thinking
+      setThinking(next)
+      if (sessionId == null) return
+      try {
+        await agentApi.setThinkingLevel(sessionId, next)
+      } catch (e) {
+        setThinking(previous)
+        toast.error(`切换推理级别失败：${(e as Error).message}`)
+      }
+    },
+    [sessionId, thinking]
   )
 
   const send = useCallback(
@@ -712,6 +767,14 @@ export default function AgentTaskPage() {
                       (m) => m.agent_provider != null
                     )
                   }
+                />
+                {/* Next to the model, because the two are one decision: the
+                    ladder a level means depends on which model is selected,
+                    and the cost of the pair is what the user is choosing. */}
+                <ThinkingPicker
+                  level={thinking}
+                  levels={thinkingLevels}
+                  onChange={(next) => void changeThinking(next)}
                 />
                 {/* Pairing lives next to the picker: "no local computers" is
                     only actionable if the fix is one click away. */}

@@ -1,6 +1,9 @@
 export type Protocol = "openai" | "claude" | "gemini"
 export type ImageProtocol = "openai" | "gemini"
 export type UpstreamMode = "platform" | "byok"
+// Type-only, so this does not create an import cycle with `chat-stream`, which
+// imports `Protocol` and `trimSlash` from here at runtime.
+import type { ChatThinkingLevel } from "./chat-stream"
 
 export const GUEST_SETTINGS_ID = "guest"
 
@@ -18,6 +21,11 @@ export type UpstreamSettings = {
   model: string
   useProxy: boolean
   webSearch: boolean
+  // How hard the model thinks before answering. "auto" reproduces what chat
+  // did before this was选-able: ask for thinking without dictating how much.
+  // Local-only, like `webSearch` — it is a per-device habit, not account
+  // configuration, and cloud sync deliberately does not carry it.
+  thinking: ChatThinkingLevel
 
   // image generation (protocol-aware, independent from chat config)
   imageProtocol: ImageProtocol
@@ -94,6 +102,7 @@ const EMPTY: UpstreamSettings = {
   model: "",
   useProxy: true,
   webSearch: false,
+  thinking: "auto",
   imageProtocol: "openai",
   imageBaseUrl: "",
   imageApiKey: "",
@@ -246,6 +255,7 @@ function fromCloud(p: CloudPayload): Omit<UpstreamSettings, "cloudSync"> {
     videoApiKey: "",
     videoModel: "",
     webSearch: false,
+    thinking: "auto",
   }
 }
 
@@ -295,6 +305,7 @@ export async function loadEffectiveSettings(
       chatMode: local.chatMode,
       imageMode: local.imageMode,
       webSearch: local.webSearch,
+      thinking: local.thinking,
       videoMode: local.videoMode,
       videoBaseUrl: local.videoBaseUrl,
       videoApiKey: local.videoApiKey,
