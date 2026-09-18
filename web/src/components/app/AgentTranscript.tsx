@@ -9,6 +9,7 @@ import {
   Loader2,
   Pencil,
   Search,
+  ShieldAlert,
   Terminal,
   X,
 } from "lucide-react"
@@ -187,6 +188,11 @@ function Thinking({ text }: { text: string }) {
  * broadcast to every connected client, so it can appear while the user is
  * looking at another device, and a modal that stole focus on all of them would
  * be worse than a card that waits.
+ *
+ * The body is the whole point of the card. An approval dialog that does not
+ * show the command is not a safety feature — it teaches people to press 允许 —
+ * so a request that arrives without one says so plainly instead of rendering
+ * an empty box that looks like the UI failed.
  */
 export function ApprovalCard({
   request,
@@ -202,15 +208,30 @@ export function ApprovalCard({
   const title = approvalTitle(request)
   const message = approvalMessage(request)
   const options: string[] = Array.isArray(request?.options) ? request.options : []
+  // `{}` is what the old gate produced for every single request, so it is
+  // treated as "nothing to show" rather than rendered as if it were the
+  // command: a user who sees it has no more information than with a blank box.
+  const detail = message.trim() === "{}" ? "" : message
 
   return (
     <div className={COLUMN}>
       <div className="rounded-2xl border border-primary/40 bg-primary/5 p-3 text-sm shadow-sm">
-        <div className="font-medium">{title}</div>
-        {message && (
-          <pre className="mt-1.5 overflow-auto whitespace-pre-wrap rounded-lg bg-muted/70 p-2.5 text-xs leading-relaxed">
-            {message}
+        <div className="flex items-center gap-2 font-medium">
+          <ShieldAlert className="size-4 shrink-0 text-primary" />
+          {title}
+        </div>
+        {detail ? (
+          // Monospace and scrollable: this is a shell command or a diff, and
+          // a wrapped proportional font hides exactly the characters — quotes,
+          // slashes, redirects — that decide whether it is safe.
+          <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-muted/70 p-2.5 font-mono text-xs leading-relaxed">
+            {detail}
           </pre>
+        ) : (
+          <p className="mt-2 rounded-lg bg-muted/70 p-2.5 text-xs leading-relaxed text-muted-foreground">
+            这台电脑没有附上操作内容，无法显示具体要执行什么。若不确定，请先拒绝，
+            并将桌面客户端升级到最新版本。
+          </p>
         )}
         <div className="mt-2.5 flex flex-wrap gap-2">
           {method === "select" &&

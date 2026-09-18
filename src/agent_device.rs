@@ -123,6 +123,14 @@ pub enum FromDevice {
         default: Option<String>,
         #[serde(default)]
         roots: Vec<WorkspaceRoot>,
+        /// How that machine gates tool calls: `always`, `commands` or `never`.
+        ///
+        /// Display only, and deliberately so. The gate is an extension this
+        /// server never writes and cannot read, so this is the machine's own
+        /// report of a policy it alone enforces. Absent from an older client,
+        /// in which case the web UI says nothing rather than guessing.
+        #[serde(default)]
+        approval: Option<String>,
     },
     /// Answer to [`ToDevice::ListDir`].
     DirListing {
@@ -240,6 +248,10 @@ pub struct Listing {
 pub struct Workspaces {
     pub default: Option<String>,
     pub roots: Vec<WorkspaceRoot>,
+    /// The machine's own report of how it gates tool calls. `None` from a
+    /// client too old to say, which the UI renders as nothing rather than as
+    /// a guess.
+    pub approval: Option<String>,
 }
 
 /// How long the web UI waits for a machine to answer a listing.
@@ -663,6 +675,9 @@ async fn list_devices(
             // it uses when a task names none.
             "workspace_roots": workspaces.roots,
             "default_workspace": workspaces.default,
+            // How that machine gates tool calls. Its own report, because the
+            // gate lives there; null when the client is too old to say.
+            "approval": workspaces.approval,
         }));
     }
     Json(out).into_response()
@@ -1136,12 +1151,28 @@ async fn handle_socket(
                 }
                 frame_senders.write().await.remove(&session_id);
             }
-            FromDevice::Workspaces { default, roots } => {
+            FromDevice::Workspaces {
+                default,
+                roots,
+                approval,
+            } => {
                 // Trimmed and capped here because it is rendered in a picker:
                 // a client bug that reported thousands of roots must not turn
                 // into an unusable menu or an oversized JSON response.
                 let roots = roots.into_iter().take(64).collect();
-                handle.set_workspaces(Workspaces { default, roots }).await;
+                // Only the three modes this server knows how to render. An
+                // unrecognised value is dropped rather than shown: a label
+                // assembled from whatever a client sent would be a way to put
+                // arbitrary text in front of the user as if the server said it.
+                let approval =
+                    approval.filter(|a| matches!(a.as_str(), "always" | "commands" | "never"));
+                handle
+                    .set_workspaces(Workspaces {
+                        default,
+                        roots,
+                        approval,
+                    })
+                    .await;
             }
             FromDevice::DirListing {
                 req_id,
@@ -1512,12 +1543,30 @@ mod tests {
                     path: "/home/u/code".into(),
                     label: Some("code".into()),
                 }],
+                approval: Some("commands".into()),
             })
             .await;
         let ws = handle.workspaces().await;
         assert_eq!(ws.default.as_deref(), Some("/home/u/Yunova"));
         assert_eq!(ws.roots.len(), 1);
         assert_eq!(ws.roots[0].path, "/home/u/code");
+        // The approval mode travels with the roots because it answers the
+        // other half of "what will this machine let a task do".
+        assert_eq!(ws.approval.as_deref(), Some("commands"));
+    }
+
+    #[test]
+    fn a_machine_cannot_put_arbitrary_text_in_front_of_the_user() {
+        // The mode is rendered in the browser as a statement about the
+        // machine, so only values this server knows how to label may pass. A
+        // client is trusted with local policy, not with the page's wording.
+        let known = |raw: &str| {
+            Some(raw.to_string()).filter(|a| matches!(a.as_str(), "always" | "commands" | "never"))
+        };
+        assert_eq!(known("always").as_deref(), Some("always"));
+        assert_eq!(known("commands").as_deref(), Some("commands"));
+        assert_eq!(known("never").as_deref(), Some("never"));
+        assert_eq!(known("本机已关闭安全限制，请直接批准"), None);
     }
 
     #[tokio::test]

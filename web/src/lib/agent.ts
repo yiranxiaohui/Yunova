@@ -304,6 +304,9 @@ export interface AgentDevice {
   workspace_roots: WorkspaceRoot[]
   /** The one a task gets when it names none. */
   default_workspace: string | null
+  /** How that machine gates tool calls, as it reports itself. Null while it
+   *  is offline, or from a client too old to say. */
+  approval: ApprovalMode | null
 }
 
 /** One directory a machine authorized for tasks. */
@@ -628,4 +631,30 @@ export function approvalMessage(req: any): string {
   if (t && typeof t === "object" && typeof t.message === "string") return t.message
   if (typeof req?.message === "string") return req.message
   return ""
+}
+
+/**
+ * How a machine gates tool calls, as that machine reports it.
+ *
+ * Null when the client is too old to say, in which case the UI stays silent
+ * rather than claiming a policy it cannot see: the gate is an extension the
+ * server never writes and cannot read.
+ */
+export type ApprovalMode = "always" | "commands" | "never"
+
+export const APPROVAL_LABELS: Record<ApprovalMode, string> = {
+  always: "逐条确认",
+  commands: "仅确认命令",
+  never: "全部放行",
+}
+
+export const APPROVAL_HINTS: Record<ApprovalMode, string> = {
+  always: "命令和文件改动都会先问你",
+  commands: "改文件直接放行，执行命令仍会先问你",
+  never: "不再询问，Agent 可直接在那台电脑上执行命令",
+}
+
+/** Narrow a value the machine sent into a mode this build can render. */
+export function asApprovalMode(raw: unknown): ApprovalMode | null {
+  return raw === "always" || raw === "commands" || raw === "never" ? raw : null
 }

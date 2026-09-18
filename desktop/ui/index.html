@@ -97,11 +97,31 @@
           </span>
           <ul id="workspaceList" class="paths"></ul>
         </label>
+        <label>
+          审批方式
+          <span class="hint">
+            命令不可撤销，文件改动又受上面的目录范围约束，所以两者可以分开对待。
+          </span>
+        </label>
         <label class="check">
-          <input type="checkbox" id="autoApprove" />
+          <input type="radio" name="approval" value="always" />
           <span>
-            放开审批（Agent 可直接在本机执行命令）
-            <em>关闭时逐条确认，可在本窗口、网页或手机上处理。</em>
+            逐条确认（推荐）
+            <em>命令、写文件、改文件都先问你，可在本窗口、网页或手机上处理。</em>
+          </span>
+        </label>
+        <label class="check">
+          <input type="radio" name="approval" value="commands" />
+          <span>
+            只确认命令
+            <em>改文件直接放行，执行命令仍然先问。适合改动很多的任务。</em>
+          </span>
+        </label>
+        <label class="check">
+          <input type="radio" name="approval" value="never" />
+          <span>
+            全部放行
+            <em>不再询问，Agent 可直接在本机执行命令。</em>
           </span>
         </label>
         <label class="check">

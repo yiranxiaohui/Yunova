@@ -461,7 +461,7 @@ fn config_of(settings: &Settings) -> ConnectorConfig {
         workspace_roots: settings.workspace_roots(),
         state_dir: settings.state_dir(),
         program: settings.program.clone(),
-        auto_approve: settings.auto_approve,
+        approval: settings.approval,
         config_dir: None,
     }
 }

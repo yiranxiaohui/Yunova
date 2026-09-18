@@ -60,6 +60,14 @@ pub enum ToServer {
     Workspaces {
         default: String,
         roots: Vec<WorkspaceRoot>,
+        /// How this machine gates tool calls, for display only.
+        ///
+        /// Reported for the same reason the roots are: the web UI is where the
+        /// user watches a task, and "why is nothing asking me" or "why is this
+        /// asking about every file" is unanswerable from there otherwise. The
+        /// server can render it and never set it — the gate is written by this
+        /// client into a directory the server cannot reach.
+        approval: String,
     },
     /// Answer to a `list_dir` request.
     DirListing {

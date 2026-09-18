@@ -12,6 +12,7 @@ use std::sync::Arc;
 use crate::connector::{Connector, ConnectorConfig, Host, Status};
 use crate::endpoint::{default_site_url, hostname};
 use crate::identity::{Login, prompt_login};
+use crate::runtime::ApprovalMode;
 use crate::runtime_env;
 
 /// Prints, because a terminal is the whole UI here.
@@ -93,12 +94,15 @@ pub fn run() {
             workspace_roots.push(extra);
         }
     }
-    let auto_approve = matches!(
-        runtime_env::var("YUNOVA_DEVICE_AUTO_APPROVE")
-            .unwrap_or_default()
-            .as_str(),
-        "1" | "true" | "yes" | "on"
-    );
+    // Three steps rather than a switch (see `runtime::ApprovalMode`). The
+    // variable name is unchanged and still accepts `1`/`true`, because it is
+    // already in service units that must keep running unattended; it now also
+    // accepts `commands` and `always`. An unreadable value keeps the safe
+    // default rather than being guessed at.
+    let approval = runtime_env::var("YUNOVA_DEVICE_AUTO_APPROVE")
+        .ok()
+        .and_then(|v| ApprovalMode::parse(&v))
+        .unwrap_or_default();
 
     let config = ConnectorConfig {
         site_url: raw,
@@ -107,7 +111,7 @@ pub fn run() {
         workspace_roots,
         state_dir,
         program: runtime_env::var("YUNOVA_PI_BIN").unwrap_or_else(|_| "pi".into()),
-        auto_approve,
+        approval,
         // The credential lives outside the workspace: the workspace is
         // precisely what the agent may rewrite, and a token the agent can edit
         // is a token it can replace or leak. An explicit override exists for
@@ -138,15 +142,8 @@ pub fn run() {
                 .join(", ")
         );
     }
-    println!(
-        "  审批:     {}",
-        if config.auto_approve {
-            "已放开（Agent 可直接执行命令）"
-        } else {
-            "逐条确认（在网页或手机上处理）"
-        }
-    );
-    if config.auto_approve {
+    println!("  审批:     {}", config.approval.label());
+    if config.approval == ApprovalMode::Never {
         println!("  ⚠ 自动批准下 Agent 可在本机任意执行命令，只在信任的环境中使用。");
     }
     match crate::connector::bound_account(&config) {
