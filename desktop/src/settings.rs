@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::endpoint::{default_site_url, hostname};
+use crate::runtime::ApprovalMode;
 use crate::runtime_env;
 
 /// User-visible configuration of the local execution target.
@@ -47,9 +48,21 @@ pub struct Settings {
     /// to avoid.
     #[serde(default)]
     pub extra_workspaces: Vec<String>,
-    /// Whether tool calls run without asking.
+    /// How tool calls are gated on this machine.
+    ///
+    /// Three steps rather than a switch: see [`ApprovalMode`]. Stored under a
+    /// new key so a settings file written by an older build still parses; the
+    /// old `auto_approve` boolean is read below and folded into this.
     #[serde(default)]
-    pub auto_approve: bool,
+    pub approval: ApprovalMode,
+    /// The pre-3.0 switch, kept only so an existing settings file is not
+    /// silently reset to "ask about everything".
+    ///
+    /// Never written back — `save` drops it — so it disappears the first time
+    /// the user touches the panel, and only one field decides the policy from
+    /// then on.
+    #[serde(default, skip_serializing)]
+    auto_approve: Option<bool>,
     /// Whether the connector starts as soon as the app does.
     #[serde(default = "yes")]
     pub connect_on_launch: bool,
@@ -82,7 +95,8 @@ impl Default for Settings {
             // everything the user owns just because nobody narrowed it.
             workspace: default_workspace().to_string_lossy().into_owned(),
             extra_workspaces: Vec::new(),
-            auto_approve: false,
+            approval: ApprovalMode::default(),
+            auto_approve: None,
             connect_on_launch: true,
             program: default_program(),
         }
@@ -141,8 +155,18 @@ impl Settings {
         {
             settings.program = v.trim().to_string();
         }
-        if let Ok(v) = runtime_env::var("YUNOVA_DEVICE_AUTO_APPROVE") {
-            settings.auto_approve = matches!(v.as_str(), "1" | "true" | "yes" | "on");
+        // A file written before the mode existed carries only the boolean, and
+        // a machine that was running unattended must not quietly start asking
+        // for approvals nobody is there to answer. Folded before the
+        // environment is consulted, so an explicit `YUNOVA_DEVICE_AUTO_APPROVE`
+        // still wins over what the file remembers.
+        if let Some(true) = settings.auto_approve.take() {
+            settings.approval = ApprovalMode::Never;
+        }
+        if let Ok(v) = runtime_env::var("YUNOVA_DEVICE_AUTO_APPROVE")
+            && let Some(mode) = ApprovalMode::parse(&v)
+        {
+            settings.approval = mode;
         }
         if settings.name.trim().is_empty() {
             settings.name = hostname();
@@ -286,8 +310,9 @@ mod tests {
         // The workspace is the only thing bounding what a prompt from a phone
         // can reach, so its default must actually bound something.
         let s = Settings::default();
-        assert!(
-            !s.auto_approve,
+        assert_eq!(
+            s.approval,
+            ApprovalMode::Always,
             "asking must be the default on a personal machine"
         );
         if let Some(home) = home() {
@@ -303,7 +328,7 @@ mod tests {
         let s = Settings {
             site_url: "https://self.hosted.example".into(),
             name: "laptop".into(),
-            auto_approve: true,
+            approval: ApprovalMode::Commands,
             ..Default::default()
         };
         s.save(&path).unwrap();
@@ -315,7 +340,7 @@ mod tests {
             assert_eq!(back.site_url, "https://self.hosted.example");
         }
         assert_eq!(back.name, "laptop");
-        assert!(back.auto_approve);
+        assert_eq!(back.approval, ApprovalMode::Commands);
         assert!(back.is_configured());
 
         std::fs::remove_dir_all(&dir).ok();
@@ -352,7 +377,7 @@ mod tests {
         if runtime_env::var("YUNOVA_DEVICE_URL").is_err() {
             assert_eq!(s.site_url, default_site_url());
         }
-        assert!(!s.auto_approve);
+        assert_eq!(s.approval, ApprovalMode::Always);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -432,7 +457,15 @@ mod tests {
 
         let s = Settings::load(&path);
         assert_eq!(s.name, "laptop");
-        assert!(s.auto_approve);
+        // The boolean predates the three-step mode. A machine that was running
+        // unattended must keep doing so: silently reverting it to "ask about
+        // everything" would strand a headless box on the first prompt nobody
+        // is there to answer.
+        assert_eq!(
+            s.approval,
+            ApprovalMode::Never,
+            "the old auto-approve boolean must survive the upgrade"
+        );
         assert!(
             s.extra_workspaces.is_empty(),
             "a missing list must read as 'no extra directories', not as a failure to load"
@@ -440,6 +473,13 @@ mod tests {
         if runtime_env::var("YUNOVA_DEVICE_WORKSPACE").is_err() {
             assert_eq!(s.workspace_roots(), vec![PathBuf::from("/tmp/ws")]);
         }
+
+        // And it is folded away rather than kept alongside the new field: two
+        // sources for one policy is how they end up disagreeing.
+        s.save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("auto_approve"), "got: {raw}");
+        assert_eq!(Settings::load(&path).approval, ApprovalMode::Never);
 
         std::fs::remove_dir_all(&dir).ok();
     }

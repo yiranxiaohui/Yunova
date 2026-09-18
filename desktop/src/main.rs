@@ -53,7 +53,43 @@ fn main() {
         // No window: a server or a CI box has no display, and the old
         // environment-driven behaviour is exactly right there.
         Some("--headless") => cli::run(),
+        // Write the approval gate this build would install, and exit.
+        //
+        // Exists for `tests/approval_gate_renders.rs`, which runs the
+        // generated JavaScript under node the way pi does. The generator lives
+        // in a binary crate with no lib target, so there is no other way for a
+        // test to get at the exact file that ships — and a gate asserted only
+        // as a Rust string is how it came to be shipped with a dialog that
+        // rendered `{}`. Not documented in `usage`: it configures nothing and
+        // is not something a user has a reason to run.
+        Some("--emit-approval-gate") => emit_approval_gate(&args[1..]),
         _ => shell::run(),
+    }
+}
+
+/// `--emit-approval-gate <mode> <dir>`: write the gate and stop.
+fn emit_approval_gate(args: &[String]) {
+    let [mode, dir] = args else {
+        eprintln!("用法: yunova-desktop --emit-approval-gate <always|commands|never> <目录>");
+        std::process::exit(2);
+    };
+    let Some(mode) = runtime::ApprovalMode::parse(mode) else {
+        eprintln!("无法识别的审批方式: {mode}");
+        std::process::exit(2);
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let result = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to start the async runtime")
+        .block_on(runtime::write_runtime_config(
+            &dir,
+            &serde_json::json!({ "providers": {} }),
+            mode,
+        ));
+    if let Err(e) = result {
+        eprintln!("{e}");
+        std::process::exit(1);
     }
 }
 
@@ -70,7 +106,9 @@ fn usage() {
          \x20 YUNOVA_USERNAME/PASSWORD    免交互登录\n\
          \x20 YUNOVA_DEVICE_WORKSPACE     Agent 可操作的目录，默认当前目录\n\
          \x20 YUNOVA_DEVICE_NAME          设备名，默认主机名\n\
-         \x20 YUNOVA_DEVICE_AUTO_APPROVE  设为 1 放开审批，谨慎使用\n\
+         \x20 YUNOVA_DEVICE_AUTO_APPROVE  审批方式：always（默认，逐条确认）、\n\
+         \x20                             commands（只确认命令）、never（全部放行）。\n\
+         \x20                             仍兼容旧的 1/0 写法，1 等于 never，谨慎使用\n\
          \x20 YUNOVA_PI_BIN               运行时可执行文件，默认 pi\n\
          \n\
          桌面模式的设置保存在 OS 配置目录，可在应用内的「本机设置」中修改。\n\

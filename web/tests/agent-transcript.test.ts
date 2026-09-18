@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import {
+  APPROVAL_HINTS,
+  APPROVAL_LABELS,
+  approvalMessage,
+  approvalTitle,
+  asApprovalMode,
   entriesToItems,
   mergeAgentItems,
   toAgentBlocks,
@@ -156,5 +161,62 @@ describe("transcript grouping", () => {
 
   test("an empty transcript produces no blocks", () => {
     expect(toAgentBlocks([])).toEqual([])
+  })
+})
+
+describe("approval requests", () => {
+  // pi's RPC mode sends `{type, id, method, title, message}` for a confirm.
+  const confirm = (title: string, message?: string) => ({
+    type: "extension_ui_request",
+    id: "u1",
+    method: "confirm",
+    title,
+    message,
+  })
+
+  test("shows the command the user is being asked to approve", () => {
+    // The regression this covers reached users: the gate called confirm with
+    // an options object and read the wrong argument key, so every card said
+    // "允许在本机执行 bash?" over a body of `{}`. Approving something you
+    // cannot see is not a decision.
+    const req = confirm("允许在本机执行命令？", "目录：/home/u/app\n\nrm -rf build")
+    expect(approvalTitle(req)).toBe("允许在本机执行命令？")
+    expect(approvalMessage(req)).toContain("rm -rf build")
+  })
+
+  test("still reads a request whose fields arrived nested", () => {
+    // An older client passed `{title: {title, message}}`. Accepting both keeps
+    // a mixed fleet answerable instead of showing "需要确认" with no body.
+    const nested = {
+      method: "confirm",
+      title: { title: "允许执行？", message: "ls -la" },
+    }
+    expect(approvalTitle(nested)).toBe("允许执行？")
+    expect(approvalMessage(nested)).toBe("ls -la")
+  })
+
+  test("falls back to a label rather than rendering an empty card", () => {
+    expect(approvalTitle({ method: "confirm" })).toBe("需要确认")
+    expect(approvalMessage({ method: "confirm" })).toBe("")
+  })
+})
+
+describe("device approval modes", () => {
+  test("labels every mode this build can render", () => {
+    for (const mode of ["always", "commands", "never"] as const) {
+      expect(asApprovalMode(mode)).toBe(mode)
+      expect(APPROVAL_LABELS[mode]).toBeTruthy()
+      expect(APPROVAL_HINTS[mode]).toBeTruthy()
+    }
+  })
+
+  test("an unknown or absent mode renders nothing rather than a guess", () => {
+    // The gate lives on the user's machine and the server cannot read it, so
+    // an offline machine — or one running a client too old to report — has no
+    // policy to display. Claiming one would assert a boundary nobody checked.
+    expect(asApprovalMode(null)).toBeNull()
+    expect(asApprovalMode(undefined)).toBeNull()
+    expect(asApprovalMode("auto")).toBeNull()
+    expect(asApprovalMode("本机已关闭安全限制")).toBeNull()
   })
 })

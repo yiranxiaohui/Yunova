@@ -11,10 +11,14 @@ import {
 import { useConfirm } from "@/lib/confirm-context"
 import { capabilities } from "@/lib/platform"
 import {
+  APPROVAL_HINTS,
+  APPROVAL_LABELS,
+  asApprovalMode,
   listDevices,
   renameDevice,
   revokeDevice,
   type AgentDevice,
+  type ApprovalMode,
 } from "@/lib/agent"
 import { toast } from "sonner"
 
@@ -188,6 +192,12 @@ YUNOVA_DEVICE_URL=${window.location.origin} \\
                   {d.platform && (
                     <span className="ml-1.5 text-xs text-muted-foreground">{d.platform}</span>
                   )}
+                  {/* Which approvals that machine will ask for. Shown here
+                      rather than only in its own panel, because this is where
+                      the user decides which computer to aim a task at, and
+                      “will it stop and ask me” is part of that decision. Only
+                      a connected machine reports it. */}
+                  <ApprovalNote mode={asApprovalMode(d.approval)} />
                 </span>
                 <span
                   className={
@@ -218,12 +228,36 @@ YUNOVA_DEVICE_URL=${window.location.origin} \\
 
           <p className="text-xs text-muted-foreground">
             客户端登录后只保存一枚设备令牌，不保存密码；移除设备即刻失效。
-            桌面客户端默认逐条确认命令，审批请求会推送到所有登录端，任一端处理即生效。
-            建任务时可以挑一个工作目录，可挑范围由那台电脑的「本机设置」决定；
-            请指向具体项目而不是整个用户目录。
+            审批方式由那台电脑的「本机设置」决定，服务器改不了；审批请求会推送到
+            所有登录端，任一端处理即生效。建任务时可以挑一个工作目录，可挑范围同样
+            由那台电脑决定；请指向具体项目而不是整个用户目录。
           </p>
         </div>
       </DialogContent>
     </Dialog>
+  )
+}
+
+/**
+ * What a machine will stop and ask about.
+ *
+ * Silent when the machine is offline or its client is too old to report:
+ * the gate is an extension the server never writes and cannot read, so this
+ * is the machine's own statement about itself. Inventing a default here would
+ * be worse than saying nothing — it would claim a boundary nobody verified.
+ */
+function ApprovalNote({ mode }: { mode: ApprovalMode | null }) {
+  if (mode == null) return null
+  return (
+    <span
+      className={
+        mode === "never"
+          ? "ml-1.5 text-xs text-amber-600 dark:text-amber-500"
+          : "ml-1.5 text-xs text-muted-foreground"
+      }
+      title={APPROVAL_HINTS[mode]}
+    >
+      · {APPROVAL_LABELS[mode]}
+    </span>
   )
 }

@@ -28,7 +28,7 @@ use crate::identity::{
     save_credential,
 };
 use crate::proto::{FromServer, ToServer};
-use crate::runtime::{Config, RuntimeManager};
+use crate::runtime::{ApprovalMode, Config, RuntimeManager};
 
 /// Everything the connector needs to know about the user's choices.
 ///
@@ -53,8 +53,8 @@ pub struct ConnectorConfig {
     pub state_dir: PathBuf,
     /// The `pi` executable.
     pub program: String,
-    /// Whether tool calls run without asking.
-    pub auto_approve: bool,
+    /// How tool calls are gated on this machine.
+    pub approval: ApprovalMode,
     /// Override for where the device token is stored; used by packaging and
     /// by tests.
     pub config_dir: Option<PathBuf>,
@@ -199,7 +199,7 @@ impl Connector {
             workspace_roots: config.workspace_roots.clone(),
             state_dir: config.state_dir.clone(),
             program: config.program.clone(),
-            auto_approve: config.auto_approve,
+            approval: config.approval,
             // Runtime diagnostics belong in the window's log, not in a
             // process stderr nobody launched a terminal to read.
             reporter: Some({
@@ -647,6 +647,7 @@ fn workspaces_frame(config: &ConnectorConfig) -> ToServer {
     ToServer::Workspaces {
         default: config.workspace.to_string_lossy().into_owned(),
         roots,
+        approval: config.approval.as_str().to_string(),
     }
 }
 
@@ -907,7 +908,7 @@ mod tests {
                     workspace_roots: vec![dir.clone()],
                     state_dir: dir.clone(),
                     program: "pi".into(),
-                    auto_approve: false,
+                    approval: ApprovalMode::Always,
                     config_dir: Some(dir.clone()),
                 },
                 None,
@@ -972,7 +973,7 @@ mod tests {
                     workspace_roots: vec![dir.clone()],
                     state_dir: dir.clone(),
                     program: "pi".into(),
-                    auto_approve: false,
+                    approval: ApprovalMode::Always,
                     config_dir: Some(dir.clone()),
                 },
                 None,

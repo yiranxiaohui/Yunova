@@ -18,9 +18,20 @@ const fields = {
   siteUrl: el("siteUrl"),
   name: el("name"),
   workspace: el("workspace"),
-  autoApprove: el("autoApprove"),
   connectOnLaunch: el("connectOnLaunch"),
   program: el("program"),
+}
+
+/** The approval radios, which are read as a group rather than by id. */
+const approvalInputs = () => [
+  ...document.querySelectorAll('input[name="approval"]'),
+]
+
+function approvalValue() {
+  const picked = approvalInputs().find((i) => i.checked)
+  // Never "whatever was last rendered": a group that somehow lost its
+  // selection must fall back to asking, not to running unattended.
+  return picked ? picked.value : "always"
 }
 
 let lastSaved = null
@@ -69,10 +80,12 @@ function renderSettings(s) {
   fields.workspace.value = s.workspace
   extraWorkspaces = Array.isArray(s.extra_workspaces) ? [...s.extra_workspaces] : []
   renderWorkspaces()
-  fields.autoApprove.checked = s.auto_approve
   fields.connectOnLaunch.checked = s.connect_on_launch
   fields.program.value = s.program
-  el("autoWarn").hidden = !s.auto_approve
+  for (const input of approvalInputs()) {
+    input.checked = input.value === s.approval
+  }
+  el("autoWarn").hidden = s.approval !== "never"
   lastSaved = JSON.stringify(collect())
 }
 
@@ -124,7 +137,7 @@ function collect() {
     name: fields.name.value.trim(),
     workspace: fields.workspace.value.trim(),
     extra_workspaces: extraWorkspaces,
-    auto_approve: fields.autoApprove.checked,
+    approval: approvalValue(),
     connect_on_launch: fields.connectOnLaunch.checked,
     program: fields.program.value.trim() || "pi",
   }
@@ -286,11 +299,13 @@ el("addWorkspace").addEventListener("click", async () => {
 // Typing a path by hand also changes the default, and the list has to follow.
 fields.workspace.addEventListener("input", renderWorkspaces)
 
-fields.autoApprove.addEventListener("change", () => {
-  // Shown immediately, before saving: the consequence has to be visible while
-  // the user still has their hand on the switch.
-  el("autoWarn").hidden = !fields.autoApprove.checked
-})
+for (const input of approvalInputs()) {
+  input.addEventListener("change", () => {
+    // Shown immediately, before saving: the consequence has to be visible while
+    // the user still has their hand on the control.
+    el("autoWarn").hidden = approvalValue() !== "never"
+  })
+}
 
 el("connect").addEventListener("click", async () => {
   // Connecting with unsaved edits would connect to something other than what
