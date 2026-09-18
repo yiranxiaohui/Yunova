@@ -381,12 +381,24 @@ Anthropic 拼 `/v1/messages`），因此网关额外暴露了
 从 `/api/cli/models` 取：哪些模型开放是管理员的决定，编译进包里的清单在下一次
 改价时就过期了。
 
+扩展虽然放在 `pi-package/`，包根却是**仓库根**：`pi install` 只认包根的
+`package.json` 里的 `pi` 清单或包根的 `extensions/` 约定目录，不会自己往子目录里
+找第二个 `package.json`。所以仓库根的 `package.json` 用 `pi.extensions` 指向
+`./pi-package/extensions`——少了它，`pi install git:…/Yunova@main` 会
+「安装成功」却一个 provider 都不注册，`/login` 里于是只剩一句「未发现提供商」。
+
 ```bash
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 pi install git:github.com/yiranxiaohui/Yunova@main
 YUNOVA_BASE_URL=https://chat.yunnet.top pi
 # 然后在 pi 里：/login yunova → 浏览器确认 → /model 里就能选到本站模型
 ```
+
+装到全局（不加 `-l`）是有意的：`-l` 写的是项目级配置，而 pi 只在**受信任的**目录
+里接受它，在别处会直接以 `Project is not trusted` 拒绝。另外 `pi auth check
+--provider yunova-openai` 不能用来确认安装成功——那条命令跑在一个不加载扩展的
+运行时里，对任何扩展 provider 都恒返回 `not_ready`；要确认就直接进 pi 看 `/login`
+列表或 `/model`。
 
 自托管用 `YUNOVA_BASE_URL` 指向自己的实例；登录时用的地址会连同令牌一起存下来，
 所以之后不必一直把这个环境变量设对。令牌可随时在「Agent 令牌」里撤销。
