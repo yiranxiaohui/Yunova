@@ -226,6 +226,10 @@ export interface DeviceDirEntry {
   name: string
   /** Whether it looks like a code project, so the picker can hint at it. */
   repo: boolean
+  /** Set on a root the machine authorized but that does not exist on disk.
+   *  Entering it would only produce an error, so the picker shows it as
+   *  unavailable rather than as a choice. */
+  missing?: boolean
 }
 
 /** A directory listing from a machine. */

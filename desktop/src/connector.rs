@@ -671,6 +671,16 @@ fn dir_listing(req_id: u64, path: Option<String>, default: &Path, roots: &[PathB
     // No path: the roots themselves. Listed as entries so the picker's first
     // screen and its later screens have one shape.
     let Some(raw) = path.as_deref().map(str::trim).filter(|p| !p.is_empty()) else {
+        // The default workspace is created here rather than only at task
+        // start. It is picked by the app (`~/Yunova`), so on a machine where
+        // no task has ever run it does not exist yet, and browsing into it
+        // failed with a bare "No such file or directory" — the picker's first
+        // and only entry was unusable. Creating one app-owned directory is not
+        // a widening of scope: it is already an authorized root, and the
+        // runtime would create it moments later anyway. Extra roots the user
+        // typed are deliberately *not* created, because a typo there should
+        // stay visible instead of quietly producing an empty directory.
+        let _ = std::fs::create_dir_all(default);
         let mut entries = Vec::new();
         for root in std::iter::once(default).chain(roots.iter().map(PathBuf::as_path)) {
             let as_string = root.to_string_lossy().into_owned();
@@ -684,6 +694,10 @@ fn dir_listing(req_id: u64, path: Option<String>, default: &Path, roots: &[PathB
                 path: as_string,
                 name: root_label(root),
                 repo: root.join(".git").exists(),
+                // Reported rather than filtered out: a configured root that
+                // vanished is something the user has to fix in the client's
+                // settings, and hiding it would make the setting look empty.
+                missing: !root.is_dir(),
             });
         }
         return ToServer::DirListing {
@@ -723,6 +737,8 @@ fn dir_listing(req_id: u64, path: Option<String>, default: &Path, roots: &[PathB
                 path: c.path,
                 name: c.name,
                 repo: c.repo,
+                // Children come from `read_dir`, so they exist.
+                missing: false,
             })
             .collect(),
         error: None,
@@ -733,6 +749,108 @@ fn dir_listing(req_id: u64, path: Option<String>, default: &Path, roots: &[PathB
 mod tests {
     use super::*;
     use crate::proto::ToServer;
+
+    fn listing_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "yunova-listing-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ))
+    }
+
+    fn entries_of(frame: ToServer) -> Vec<crate::proto::DirEntry> {
+        match frame {
+            ToServer::DirListing { entries, error, .. } => {
+                assert!(error.is_none(), "unexpected refusal: {error:?}");
+                entries
+            }
+            other => panic!("expected a listing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_default_workspace_is_created_before_it_is_offered() {
+        // The app picks `~/Yunova` for the user, so on a machine where no task
+        // has run yet the picker's first — often only — entry pointed at a
+        // directory that did not exist. Clicking it answered "No such file or
+        // directory", which reads as a broken feature rather than as a
+        // directory nobody created. The runtime already creates it at task
+        // start, so creating it here changes nothing about scope.
+        let base = listing_dir("default");
+        let default = base.join("Yunova");
+        assert!(!default.exists());
+
+        let entries = entries_of(dir_listing(1, None, &default, &[]));
+        assert!(
+            default.is_dir(),
+            "the default root must exist after listing"
+        );
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].missing);
+
+        // And it must now be enterable, which is the whole point.
+        let into = dir_listing(
+            2,
+            Some(default.to_string_lossy().into_owned()),
+            &default,
+            &[],
+        );
+        match into {
+            ToServer::DirListing { path, error, .. } => {
+                assert!(
+                    error.is_none(),
+                    "entering the default root failed: {error:?}"
+                );
+                assert!(path.is_some());
+            }
+            other => panic!("expected a listing, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_extra_root_that_is_gone_is_shown_as_missing_not_created() {
+        // A root the user typed is their statement about their own disk. A
+        // typo there must stay visible instead of being materialised as an
+        // empty directory, and the entry has to say why it cannot be opened —
+        // silently dropping it would make the settings list look empty.
+        let base = listing_dir("extra");
+        let default = base.join("Yunova");
+        let gone = base.join("typo");
+
+        let entries = entries_of(dir_listing(1, None, &default, std::slice::from_ref(&gone)));
+        assert!(!gone.exists(), "an extra root must never be created");
+        assert_eq!(entries.len(), 2);
+        assert!(!entries[0].missing, "the default was created");
+        assert!(entries[1].missing);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn children_are_never_marked_missing() {
+        // They come from `read_dir`, so the flag only ever describes a
+        // configured root.
+        let base = listing_dir("children");
+        let default = base.join("ws");
+        std::fs::create_dir_all(default.join("proj")).unwrap();
+
+        let entries = entries_of(dir_listing(
+            1,
+            Some(default.to_string_lossy().into_owned()),
+            &default,
+            &[],
+        ));
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "proj");
+        assert!(!entries[0].missing);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn a_status_serialises_for_a_ui() {

@@ -158,6 +158,13 @@ pub struct DirEntry {
     /// it by name alone.
     #[serde(default)]
     pub repo: bool,
+    /// An authorized root the machine reports as not existing on disk.
+    ///
+    /// Relayed verbatim so the picker can show it as unavailable instead of
+    /// letting the user click into a directory that can only answer with an
+    /// error. Defaulted, because an older client does not send it.
+    #[serde(default)]
+    pub missing: bool,
 }
 
 /// Frames to the desktop client.
@@ -1535,6 +1542,7 @@ mod tests {
                         path: "/home/u/code/app".into(),
                         name: "app".into(),
                         repo: true,
+                        missing: false,
                     }],
                 }),
             )
