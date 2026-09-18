@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react"
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react"
 import { Link, useLocation, useNavigate, useParams } from "react-router-dom"
 import {
   BookMarked,
@@ -6,6 +6,7 @@ import {
   Clapperboard,
   Cloud,
   Download,
+  Folder,
   ImageIcon,
   Laptop,
   Library,
@@ -28,7 +29,14 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { conversationsApi, type Conversation } from "@/lib/conversations"
 import { searchApi, type SearchHit } from "@/lib/search"
-import { agentApi, type AgentSession, type AgentTarget } from "@/lib/agent"
+import { agentApi, type AgentSession } from "@/lib/agent"
+import {
+  groupSidebarItems,
+  readCollapsedGroups,
+  writeCollapsedGroups,
+  type SidebarGroup,
+  type SidebarItem,
+} from "@/lib/sidebar-groups"
 import { cn } from "@/lib/utils"
 import { useAuth } from "@/lib/auth-context"
 import { prefetchWorkMode } from "@/lib/mode"
@@ -50,10 +58,6 @@ type Props = {
    *  Parent uses this to close the mobile drawer. */
   onNavigate?: () => void
 }
-
-type SidebarItem =
-  | { kind: "chat"; id: number; title: string; updated_at: string }
-  | { kind: "agent"; id: number; title: string; updated_at: string; target: AgentTarget }
 
 function relativeTime(iso: string): string {
   // Timestamps arrive in two shapes: SQLite's `datetime('now')` ("2026-09-15
@@ -166,6 +170,11 @@ export function Sidebar({
   )
   const [profileOpen, setProfileOpen] = useState(false)
   const [avatarBroken, setAvatarBroken] = useState(false)
+  // Read lazily rather than in an effect: a post-mount read would render one
+  // frame with every group open and then fold them, which reads as a flicker
+  // on exactly the sidebars that have enough groups to be worth folding.
+  // `readCollapsedGroups` swallows a storage refusal, so this cannot throw.
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(readCollapsedGroups)
   const [searchHits, setSearchHits] = useState<SearchHit[] | null>(null)
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
@@ -185,6 +194,16 @@ export function Sidebar({
   useEffect(() => {
     setAvatarBroken(false)
   }, [user?.avatar_url])
+
+  const toggleGroup = useCallback((key: string) => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      writeCollapsedGroups(next)
+      return next
+    })
+  }, [])
 
   // Collapsing hides the input, so the filter must stop applying with it:
   // leaving a query attached to an invisible search box makes the recent list
@@ -220,6 +239,8 @@ export function Sidebar({
             title: s.title,
             updated_at: s.updated_at,
             target: s.target,
+            workspace: s.workspace,
+            device_id: s.device_id,
           })),
         ].sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1))
         setItems(merged)
@@ -242,6 +263,11 @@ export function Sidebar({
     if (!q) return items
     return items.filter((c) => c.title.toLowerCase().includes(q))
   }, [items, trimmedQuery, isApiSearch])
+
+  // One directory per group, newest group first. Tasks started in the same
+  // project belong together: their titles are generated from the first prompt
+  // and repeat across projects, so the path is what tells them apart.
+  const groups = useMemo(() => groupSidebarItems(filtered), [filtered])
 
   useEffect(() => {
     if (!user || !isApiSearch) {
@@ -593,86 +619,108 @@ export function Sidebar({
                 {error}
               </p>
             )}
-            <ul className="flex flex-col gap-0.5">
-              {filtered.map((c) => {
-                const active = activeAgent
-                  ? c.kind === "agent" && activeId === c.id
-                  : c.kind === "chat" && activeId === c.id
-                const itemKey = `${c.kind}-${c.id}`
-                return (
-                  <li key={itemKey} className="relative">
-                    <div
-                      className={cn(
-                        "group relative flex items-center rounded-lg transition-colors",
-                        active
-                          ? "bg-sidebar-accent/80 text-sidebar-accent-foreground"
-                          : "hover:bg-sidebar-accent/55"
-                      )}
-                    >
-                      <Link
-                        to={c.kind === "agent" ? `/t/${c.id}` : `/c/${c.id}`}
-                        className="min-w-0 flex-1 px-2.5 py-2"
-                        title={`${c.title}　·　${relativeTime(c.updated_at)}`}
-                        onClick={() => {
-                          setMenuFor(null)
-                          onNavigate?.()
-                        }}
-                      >
-                        {/* One line per session, Doubao-style: the timestamp
-                            moved into the tooltip so twice as many titles fit
-                            without scrolling. */}
-                        <div className="flex items-center gap-1.5 truncate text-[13px]">
-                          {c.kind === "agent" &&
-                            (c.target === "cloud" ? (
-                              <Cloud className="size-3.5 shrink-0 text-primary" />
-                            ) : (
-                              <Laptop className="size-3.5 shrink-0 text-primary" />
-                            ))}
-                          <span className="truncate">{c.title}</span>
-                        </div>
-                      </Link>
-                      <button
-                        type="button"
-                        className="mr-1 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-background/60 hover:text-foreground group-hover:opacity-100 data-[open=true]:opacity-100"
-                        data-open={menuFor === itemKey}
-                        onClick={(e) => {
-                          e.stopPropagation()
-                          setMenuFor(menuFor === itemKey ? null : itemKey)
-                        }}
-                        aria-label="菜单"
-                      >
-                        <MoreHorizontal className="size-4" />
-                      </button>
-                    </div>
-                    {menuFor === itemKey && (
-                      <div
-                        className="absolute right-1 top-full z-10 mt-0.5 flex min-w-36 flex-col rounded-md border border-border bg-popover p-1 text-sm shadow-panel"
-                        onMouseLeave={() => setMenuFor(null)}
-                      >
-                        <button
-                          className="flex items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent"
-                          onClick={() => {
-                            setMenuFor(null)
-                            void rename(c)
-                          }}
-                        >
-                          <Pencil className="size-3.5" /> 重命名
-                        </button>
-                        <button
-                          className="flex items-center gap-2 rounded px-2 py-1 text-left text-destructive hover:bg-destructive/10"
-                          onClick={() => {
-                            setMenuFor(null)
-                            void remove(c)
-                          }}
-                        >
-                          <Trash2 className="size-3.5" /> 删除
-                        </button>
-                      </div>
-                    )}
-                  </li>
-                )
-              })}
-            </ul>
+            {groups.map((g) => {
+              // A single group is the flat list of before: a lone header
+              // labelled "对话" above every item would cost a row and explain
+              // nothing. Headers appear only once there is something to tell
+              // apart. While filtering, collapse is ignored — a hidden match
+              // reads as "no results".
+              const showHeader = groups.length > 1
+              const folded = showHeader && !trimmedQuery && collapsedGroups.has(g.key)
+              return (
+                <section key={g.key} className="pb-1">
+                  {showHeader && (
+                    <GroupHeader
+                      group={g}
+                      folded={folded}
+                      onToggle={() => toggleGroup(g.key)}
+                    />
+                  )}
+                  {!folded && (
+                    <ul className="flex flex-col gap-0.5">
+                      {g.items.map((c) => {
+                        const active = activeAgent
+                          ? c.kind === "agent" && activeId === c.id
+                          : c.kind === "chat" && activeId === c.id
+                        const itemKey = `${c.kind}-${c.id}`
+                        return (
+                          <li key={itemKey} className="relative">
+                            <div
+                              className={cn(
+                                "group relative flex items-center rounded-lg transition-colors",
+                                active
+                                  ? "bg-sidebar-accent/80 text-sidebar-accent-foreground"
+                                  : "hover:bg-sidebar-accent/55"
+                              )}
+                            >
+                              <Link
+                                to={c.kind === "agent" ? `/t/${c.id}` : `/c/${c.id}`}
+                                className="min-w-0 flex-1 px-2.5 py-2"
+                                title={`${c.title}　·　${relativeTime(c.updated_at)}`}
+                                onClick={() => {
+                                  setMenuFor(null)
+                                  onNavigate?.()
+                                }}
+                              >
+                                {/* One line per session, Doubao-style: the
+                                    timestamp moved into the tooltip so twice
+                                    as many titles fit without scrolling. */}
+                                <div className="flex items-center gap-1.5 truncate text-[13px]">
+                                  {c.kind === "agent" &&
+                                    (c.target === "cloud" ? (
+                                      <Cloud className="size-3.5 shrink-0 text-primary" />
+                                    ) : (
+                                      <Laptop className="size-3.5 shrink-0 text-primary" />
+                                    ))}
+                                  <span className="truncate">{c.title}</span>
+                                </div>
+                              </Link>
+                              <button
+                                type="button"
+                                className="mr-1 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-background/60 hover:text-foreground group-hover:opacity-100 data-[open=true]:opacity-100"
+                                data-open={menuFor === itemKey}
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  setMenuFor(menuFor === itemKey ? null : itemKey)
+                                }}
+                                aria-label="菜单"
+                              >
+                                <MoreHorizontal className="size-4" />
+                              </button>
+                            </div>
+                            {menuFor === itemKey && (
+                              <div
+                                className="absolute right-1 top-full z-10 mt-0.5 flex min-w-36 flex-col rounded-md border border-border bg-popover p-1 text-sm shadow-panel"
+                                onMouseLeave={() => setMenuFor(null)}
+                              >
+                                <button
+                                  className="flex items-center gap-2 rounded px-2 py-1 text-left hover:bg-accent"
+                                  onClick={() => {
+                                    setMenuFor(null)
+                                    void rename(c)
+                                  }}
+                                >
+                                  <Pencil className="size-3.5" /> 重命名
+                                </button>
+                                <button
+                                  className="flex items-center gap-2 rounded px-2 py-1 text-left text-destructive hover:bg-destructive/10"
+                                  onClick={() => {
+                                    setMenuFor(null)
+                                    void remove(c)
+                                  }}
+                                >
+                                  <Trash2 className="size-3.5" /> 删除
+                                </button>
+                              </div>
+                            )}
+                          </li>
+                        )
+                      })}
+                    </ul>
+                  )}
+                </section>
+              )
+            })}
             {!loading && items.some((x) => x.kind === "chat") && !trimmedQuery && (
               <button
                 type="button"
@@ -763,6 +811,45 @@ export function Sidebar({
         <ProfileDialog open={profileOpen} onClose={() => setProfileOpen(false)} />
       )}
     </aside>
+  )
+}
+
+function GroupHeader({
+  group,
+  folded,
+  onToggle,
+}: {
+  group: SidebarGroup
+  folded: boolean
+  onToggle: () => void
+}) {
+  // The directory name, not the path: the sidebar is 16rem wide and a full
+  // path truncates to its useless half ("/home/xiaohui/pro…"). The whole path
+  // stays reachable as the tooltip, which is where the path matters — when
+  // two projects share a basename.
+  const Icon =
+    group.kind === "chat"
+      ? MessageSquareText
+      : group.kind === "cloud"
+        ? Cloud
+        : group.kind === "device"
+          ? Laptop
+          : Folder
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      title={group.hint}
+      aria-expanded={!folded}
+      className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-sidebar-accent/45 hover:text-sidebar-accent-foreground"
+    >
+      <ChevronDown
+        className={cn("size-3 shrink-0 transition-transform", folded && "-rotate-90")}
+      />
+      <Icon className="size-3 shrink-0" />
+      <span className="min-w-0 flex-1 truncate text-left">{group.label}</span>
+      <span className="shrink-0 tabular-nums opacity-70">{group.items.length}</span>
+    </button>
   )
 }
 
