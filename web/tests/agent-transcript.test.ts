@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  APPROVAL_DEFAULT_HINT,
   APPROVAL_HINTS,
   APPROVAL_LABELS,
   approvalMessage,
@@ -218,5 +219,25 @@ describe("device approval modes", () => {
     expect(asApprovalMode(undefined)).toBeNull()
     expect(asApprovalMode("auto")).toBeNull()
     expect(asApprovalMode("本机已关闭安全限制")).toBeNull()
+  })
+
+  test("a task's own choice is narrowed the same way a machine's is", () => {
+    // A task now carries a mode too, and it reaches the browser from the same
+    // plain-text column. Anything this build cannot render has to read as
+    // "the execution target decides", which leaves the machine's own policy
+    // in force — the stricter reading of an unrecognised value.
+    expect(asApprovalMode("commands")).toBe("commands")
+    expect(asApprovalMode("")).toBeNull()
+    expect(asApprovalMode(0)).toBeNull()
+    expect(asApprovalMode(false)).toBeNull()
+  })
+
+  test("'no choice' is worded per target rather than shared", () => {
+    // The two defaults are genuinely different and the picker must not blur
+    // them: a sandbox runs unattended because it is disposable and offline,
+    // while a personal machine keeps whatever its owner configured.
+    expect(APPROVAL_DEFAULT_HINT.cloud).toBeTruthy()
+    expect(APPROVAL_DEFAULT_HINT.device).toBeTruthy()
+    expect(APPROVAL_DEFAULT_HINT.cloud).not.toBe(APPROVAL_DEFAULT_HINT.device)
   })
 })
